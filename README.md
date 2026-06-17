@@ -1,0 +1,144 @@
+# iotsploit-usb
+
+`iotsploit-usb` is a small C99 component that lets firmware projects add a USBTMC + SCPI control interface without binding the core to a USB stack, RTOS, DMA driver, or board support package.
+
+The public C API uses the `usbscpi_*` prefix because it describes the component interface and avoids churn for downstream firmware code.
+
+The host project owns USB initialization and device-specific I/O. This component owns the SCPI command path, definite-length binary block parsing, standard error queue, and response routing.
+
+## Design Choices
+
+- Stack-neutral core: no TinyUSB, ESP-IDF, Pico SDK, STM32, or RTOS headers in `src/`.
+- Opaque handle: host allocates storage with `usbscpi_sizeof()` and calls `usbscpi_init()`.
+- No dynamic allocation after init: all buffers are supplied by the host.
+- libscpi-facing API: host commands are registered as `scpi_command_t` tables and callbacks use `SCPI_Result*`.
+- Binary blocks bypass the text parser: `:DATA:WRITE #<n><len><payload>` payload bytes go directly to callbacks.
+- Optional helpers only: ring buffer and TinyUSB glue are separate from the core library.
+
+## Repository Layout
+
+```text
+include/usbscpi/usbscpi.h       public component API
+include/usbscpi/ring_buffer.h   optional SPSC ring helper
+include/scpi/scpi.h             small libscpi-compatible subset for examples/tests
+src/usbscpi.c                   core receive path and standard commands
+src/scpi_compat.c               minimal SCPI parser/result/error implementation
+helpers/ring_buffer.c           optional ring helper
+glue/usbscpi_tinyusb.c          optional TinyUSB USBTMC adapter
+examples/minimal_host.c         host-side integration sketch
+tests/test_usbscpi.c            host unit tests
+```
+
+## Minimal Integration
+
+```c
+static uint8_t usbscpi_storage[1024];
+static char line_buf[96];
+
+static int usb_tx(void *user, const uint8_t *data, size_t len, bool eom) {
+    return platform_usbtmc_send(data, len, eom);
+}
+
+static int on_block_data(void *user, const uint8_t *data, size_t len) {
+    return platform_write_to_dma_or_ring(data, len);
+}
+
+usbscpi_config_t cfg = {
+    .usb_tx = usb_tx,
+    .on_block_data = on_block_data,
+    .line_buf = line_buf,
+    .line_buf_len = sizeof(line_buf),
+    .max_block_len = 4096,
+    .idn = "Vendor,Product,SN0001,0.1.0",
+};
+
+usbscpi_t *scpi = usbscpi_init(usbscpi_storage, sizeof(usbscpi_storage), &cfg);
+```
+
+When the USB stack receives a device-dependent message, pass its payload to:
+
+```c
+usbscpi_on_rx(scpi, data, len, eom);
+```
+
+## Default Commands
+
+- `*IDN?`
+- `*RST`
+- `*CLS`
+- `*OPC?`
+- `SYSTem:ERRor?`
+- `DATA:FREE?`
+
+Register project-specific commands with:
+
+```c
+static scpi_result_t meas_voltage(scpi_t *ctx) {
+    return SCPI_ResultUInt32(ctx, 3300);
+}
+
+static const scpi_command_t app_cmds[] = {
+    { "MEASure:VOLTage?", meas_voltage, 0 },
+    SCPI_CMD_LIST_END
+};
+
+usbscpi_register(scpi, app_cmds);
+```
+
+## Binary Data Contract
+
+The MVP wire format is intentionally frozen:
+
+```text
+:DATA:WRITE #<N><LEN><LEN bytes payload>
+```
+
+`N` is one ASCII digit from `1` to `9`, and `LEN` is an ASCII decimal field of `N` digits. Payload completion is length-driven and does not depend on `\n`, so payload may contain `0x00`, `\n`, `\r`, `#`, or any other byte.
+
+The `:DATA:WRITE ` prefix is intentionally fixed so the component can switch from text mode to binary mode before the payload reaches the SCPI parser.
+
+## Build
+
+Host CMake:
+
+```sh
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+ESP-IDF:
+
+```cmake
+set(EXTRA_COMPONENT_DIRS path/to/iotsploit-usb)
+```
+
+Pico SDK:
+
+```cmake
+include(path/to/iotsploit-usb/cmake/iotsploit-usb-pico.cmake)
+target_link_libraries(your_firmware PRIVATE usbscpi)
+```
+
+## TinyUSB Glue
+
+The core does not depend on TinyUSB. Projects that use TinyUSB can either wire callbacks directly or build `glue/usbscpi_tinyusb.c` and configure:
+
+```c
+cfg.usb_tx = usbscpi_tinyusb_tx;
+usbscpi_tinyusb_bind(scpi);
+```
+
+## Extension Points
+
+These interfaces are deliberately present in the MVP so later features can be added without changing the core contract:
+
+- `usb_tx`: swap USB stack glue.
+- `on_block_begin/data/end`: add CRC, sequence numbers, or zero-copy forwarding.
+- `data_free`: implement `DATA:FREE?` with a ring buffer or downstream queue.
+- `lock`/`unlock`: protect callbacks when called from an ISR or USB task.
+- `usbscpi_clear`: map USBTMC clear/abort requests and SCPI reset paths to one state reset.
+
+## Scope
+
+This repository is a reusable component, not a complete firmware application. It does not initialize clocks, USB descriptors, RTOS tasks, DMA, SPI, UART, bootloaders, or board pins.

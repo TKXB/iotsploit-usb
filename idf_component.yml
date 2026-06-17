@@ -1,0 +1,4 @@
+version: "0.1.0"
+description: "iotsploit-usb: stack-neutral USBTMC + SCPI component for embedded firmware projects"
+url: "https://github.com/TKXB/iotsploit-usb"
+dependencies: {}
