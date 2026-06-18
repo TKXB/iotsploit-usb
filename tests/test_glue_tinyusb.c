@@ -27,6 +27,7 @@ uint32_t     stub_last_tx_len = 0;
 bool tud_usbtmc_msg_data_cb(void *data, size_t len, bool transfer_complete);
 bool tud_usbtmc_msgBulkIn_request_cb(usbtmc_msg_request_dev_dep_in const *request);
 bool tud_usbtmc_msgBulkIn_complete_cb(void);
+void tud_usbtmc_bulkIn_clearFeature_cb(void);
 
 static void reset_stub(void) {
     stub_state = STUB_STATE_RCV;
@@ -77,11 +78,33 @@ static void test_query_buffers_then_transmits_on_in(void) {
     assert(done);
     assert(stub_start_bus_read == 2);
 
-    /* A second IN request with no new query must not resend the old reply. */
+    /* A second IN request with no pending response must NOT resend the old
+     * reply. Instead the glue sends a minimal dummy message so TinyUSB does not
+     * stay stuck in STATE_TX_REQUESTED -- that stuck state would block every
+     * future OUT transfer and time out subsequent reads with -110 (seen when a
+     * host utility reads without first sending a command, e.g. `head -c 200`). */
     stub_transmit_ok = 0;
+    stub_last_tx_len = 0;
+    memset(stub_last_tx, 0, sizeof(stub_last_tx));
     bool again = tud_usbtmc_msgBulkIn_request_cb(&req);
     assert(again);
-    assert(stub_transmit_ok == 0);
+    assert(stub_transmit_ok == 1);                             /* a dummy was sent */
+    assert(stub_last_tx_len == 1);                             /* and it is minimal */
+    assert(strstr((char *)stub_last_tx, "IoTSploit") == NULL); /* not the old reply */
+    assert(tud_usbtmc_msgBulkIn_complete_cb());
+
+    /* IN-endpoint clear (host abort) must reset TX state so a response queued
+     * before the clear is dropped and a later IN sees "no data" again. */
+    assert(usbscpi_tinyusb_queue_response((const uint8_t *)"X\n", 2) == 0);
+    tud_usbtmc_bulkIn_clearFeature_cb();
+    stub_transmit_ok = 0;
+    stub_last_tx_len = 0;
+    bool after_clear = tud_usbtmc_msgBulkIn_request_cb(&req);
+    assert(after_clear);
+    /* The queued "X\n" was dropped by the clear, so this IN sends the 1-byte
+     * dummy rather than the 2-byte queued response. */
+    assert(stub_transmit_ok == 1);
+    assert(stub_last_tx_len == 1);
 }
 
 int main(void) {

@@ -76,17 +76,23 @@ bool tud_usbtmc_msg_data_cb(void *data, size_t len, bool transfer_complete) {
 
 /* Host requested IN data: we are now in STATE_TX_REQUESTED, so transmit is
  * legal here. Hand the whole buffered response to TinyUSB (it fragments across
- * packets internally; the buffer must stay valid until the IN completes). */
+ * packets internally; the buffer must stay valid until the IN completes).
+ *
+ * If there is no pending response (e.g. a spurious host read without a prior
+ * command), send a minimal dummy message so TinyUSB does not get stuck in
+ * STATE_TX_REQUESTED, which would block all future OUT transfers. */
 bool tud_usbtmc_msgBulkIn_request_cb(usbtmc_msg_request_dev_dep_in const *request) {
     (void)request;
     if (s_tx_pending && s_tx_len > 0u) {
         s_tx_in_flight = true;
         return tud_usbtmc_transmit_dev_msg_data(s_tx_buf, s_tx_len, true, false);
     }
-    /* No data ready: SCPI is strictly write-then-read, so this is a protocol
-     * misuse path. Leave the request unanswered (host read times out) rather
-     * than asserting on a zero-length transmit. */
-    return true;
+    /* No data ready: send a minimal response so TinyUSB does not get stuck
+     * in STATE_TX_REQUESTED.  This happens when a host utility does a read
+     * without first sending a command (e.g. `head -c 200`). */
+    s_tx_in_flight = true;
+    static const uint8_t dummy = '\n';
+    return tud_usbtmc_transmit_dev_msg_data(&dummy, 1u, true, false);
 }
 
 /* IN transfer finished: release the buffer, clear MAV, re-arm OUT. */
@@ -116,4 +122,13 @@ void tud_usbtmc_bulkOut_clearFeature_cb(void) {
     s_tx_in_flight = false;
     s_status = 0u;
     tud_usbtmc_start_bus_read();
+}
+
+/* IN endpoint clear (e.g. host abort): reset TX state so future responses
+ * can be queued even if tud_usbtmc_msgBulkIn_complete_cb was never called. */
+void tud_usbtmc_bulkIn_clearFeature_cb(void) {
+    s_tx_len = 0u;
+    s_tx_pending = false;
+    s_tx_in_flight = false;
+    s_status &= (uint8_t)~USBSCPI_STB_MAV;
 }
