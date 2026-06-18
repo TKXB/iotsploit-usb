@@ -129,6 +129,24 @@ cfg.usb_tx = usbscpi_tinyusb_tx;
 usbscpi_tinyusb_bind(scpi);
 ```
 
+The glue owns the **entire** USBTMC bulk-IN response path. USBTMC is a two-phase
+protocol: the device receives the command on bulk-OUT, and may only send the
+reply *after* the host issues a bulk-IN read (TinyUSB enforces this with
+`TU_VERIFY(state == STATE_TX_REQUESTED)` inside `tud_usbtmc_transmit_dev_msg_data`).
+The component produces the reply synchronously in the OUT path, so the glue
+**buffers** it (`usbscpi_tinyusb_tx`, raising the MAV status bit) and
+**transmits** it later from `tud_usbtmc_msgBulkIn_request_cb`. Sending the reply
+directly from the OUT path silently drops it and makes every query read time out
+(`-110`).
+
+Because of this, integrators using the glue **must not** also define any of:
+`tud_usbtmc_msg_data_cb`, `tud_usbtmc_bulkOut_clearFeature_cb`,
+`tud_usbtmc_msgBulkIn_request_cb`, `tud_usbtmc_msgBulkIn_complete_cb`,
+`tud_usbtmc_get_stb_cb` (the glue provides them; duplicates break linking).
+Route any out-of-band device→host bytes (e.g. UDS replies) through
+`usbscpi_tinyusb_queue_response()` rather than calling
+`tud_usbtmc_transmit_dev_msg_data()` directly.
+
 ## Extension Points
 
 These interfaces are deliberately present in the MVP so later features can be added without changing the core contract:

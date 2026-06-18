@@ -50,4 +50,18 @@ if(USBSCPI_BUILD_TESTS)
     add_executable(test_usbscpi tests/test_usbscpi.c)
     target_link_libraries(test_usbscpi PRIVATE usbscpi usbscpi_helpers)
     add_test(NAME test_usbscpi COMMAND test_usbscpi)
+
+    # Host test for the TinyUSB glue, built against a minimal TinyUSB stub
+    # (tests/stub/tusb.h). Regression coverage for the USBTMC IN-response
+    # sequencing / -110 fix; no real TinyUSB required.
+    add_executable(test_glue_tinyusb
+        tests/test_glue_tinyusb.c
+        glue/usbscpi_tinyusb.c
+    )
+    target_include_directories(test_glue_tinyusb PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/glue
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/stub
+    )
+    target_link_libraries(test_glue_tinyusb PRIVATE usbscpi)
+    add_test(NAME test_glue_tinyusb COMMAND test_glue_tinyusb)
 endif()
