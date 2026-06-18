@@ -43,6 +43,8 @@ struct scpi_context {
     size_t error_count;
 
     void *user_context;
+
+    const char *args;
 };
 
 void SCPI_Init(scpi_t *ctx, scpi_write_t write, void *user);
@@ -53,6 +55,8 @@ int SCPI_ResultText(scpi_t *ctx, const char *value);
 int SCPI_ResultUInt32(scpi_t *ctx, uint32_t value);
 int SCPI_ResultInt32(scpi_t *ctx, int32_t value);
 int SCPI_ResultBool(scpi_t *ctx, int value);
+int SCPI_ResultArbitraryBlock(scpi_t *ctx, const uint8_t *data, size_t len);
+int SCPI_ParamUInt32(scpi_t *ctx, uint32_t *val, int mandatory);
 void SCPI_ErrorPush(scpi_t *ctx, int code, const char *message);
 int SCPI_ErrorPop(scpi_t *ctx, scpi_error_t *out);
 void SCPI_ErrorClear(scpi_t *ctx);

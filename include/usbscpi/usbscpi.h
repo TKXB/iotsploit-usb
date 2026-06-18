@@ -24,6 +24,8 @@ typedef int (*usbscpi_block_end_t)(void *user, size_t total_len);
 typedef size_t (*usbscpi_data_free_t)(void *user);
 typedef void (*usbscpi_event_t)(void *user);
 typedef void (*usbscpi_lock_t)(void *user);
+typedef size_t (*usbscpi_data_avail_t)(void *user);
+typedef size_t (*usbscpi_data_read_t)(void *user, uint8_t *buf, size_t len);
 
 typedef struct {
     usbscpi_usb_tx_t usb_tx;
@@ -40,6 +42,13 @@ typedef struct {
     size_t line_buf_len;
     size_t max_block_len;
     const char *idn;
+
+    usbscpi_data_avail_t data_avail;
+    usbscpi_data_read_t  data_read;
+    uint8_t *io_buf;
+    size_t io_buf_len;
+    unsigned proto;
+    size_t mtu;
 } usbscpi_config_t;
 
 typedef enum {

@@ -9,6 +9,8 @@
  * time; SCPI responses are short, so 512 bytes is generous. If a single
  * response can exceed this, raise the macro (TinyUSB fragments the IN transfer
  * internally, so the whole buffer is handed off in one transmit call).
+ *
+ * Must be >= mtu + 8 (e.g. 264 for mtu=256).
  */
 #ifndef USBSCPI_TINYUSB_TX_BUF_SIZE
 #define USBSCPI_TINYUSB_TX_BUF_SIZE 512u
