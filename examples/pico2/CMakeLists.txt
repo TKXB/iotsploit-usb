@@ -29,6 +29,7 @@ target_link_libraries(pico2_usbscpi_demo
 )
 
 target_include_directories(pico2_usbscpi_demo PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}            # tusb_config.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../glue
 )

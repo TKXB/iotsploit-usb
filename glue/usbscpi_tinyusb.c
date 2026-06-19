@@ -67,6 +67,20 @@ int usbscpi_tinyusb_tx(void *user, const uint8_t *data, size_t len, bool eom) {
 /* TinyUSB USBTMC callbacks                                            */
 /* ------------------------------------------------------------------ */
 
+/* Interface opened (host issued SET_CONFIGURATION): arm the *first* bulk-OUT
+ * read so the very first host write is actually received. Without this the OUT
+ * endpoint stays un-armed and every host write times out (-110); enumeration
+ * still succeeds, which makes the failure look like a data-path bug.
+ *
+ * The glue owns this so consumers cannot forget it: it already re-arms the OUT
+ * endpoint after every receive / IN-complete / clear below, and this closes the
+ * remaining gap at open time. The TinyUSB USBTMC driver opens the endpoint but
+ * leaves the first bus read to the application. */
+void tud_usbtmc_open_cb(uint8_t interface_id) {
+    (void)interface_id;
+    tud_usbtmc_start_bus_read();
+}
+
 /* Bulk-OUT data: feed the component, then re-arm the OUT endpoint. */
 bool tud_usbtmc_msg_data_cb(void *data, size_t len, bool transfer_complete) {
     if (g_usbscpi) {

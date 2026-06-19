@@ -63,6 +63,62 @@ static const scpi_command_t demo_commands[] = {
     SCPI_CMD_LIST_END
 };
 
+/* ---------- TinyUSB USBTMC callbacks the application must provide ----------
+ * The glue (usbscpi_tinyusb.c) implements the data-path callbacks
+ * (open/msg_data/msgBulkIn_*/get_stb/clearFeature). These remaining ones are
+ * strong symbols required by TinyUSB's usbtmc_device.c and have no default, so
+ * every USBTMC application has to define them or the link fails. */
+#if CFG_TUD_USBTMC_ENABLE_488
+usbtmc_response_capabilities_488_t const *tud_usbtmc_get_capabilities_cb(void) {
+    static const usbtmc_response_capabilities_488_t caps = {
+        .USBTMC_status = USBTMC_STATUS_SUCCESS,
+        .bcdUSBTMC = 0x0100,
+        .bmDevCapabilities = { 0 },
+        .bcdUSB488 = 0x0100,
+        .bmIntfcCapabilities = { 0 },
+        .bmDevCapabilities488 = { 0 },
+    };
+    return &caps;
+}
+#else
+usbtmc_response_capabilities_t const *tud_usbtmc_get_capabilities_cb(void) {
+    static const usbtmc_response_capabilities_t caps = {
+        .USBTMC_status = USBTMC_STATUS_SUCCESS,
+        .bcdUSBTMC = 0x0100,
+    };
+    return &caps;
+}
+#endif
+
+bool tud_usbtmc_msgBulkOut_start_cb(usbtmc_msg_request_dev_dep_out const *msg) {
+    (void)msg;
+    return true;
+}
+bool tud_usbtmc_initiate_abort_bulk_out_cb(uint8_t *tmcResult) {
+    *tmcResult = USBTMC_STATUS_SUCCESS;
+    return true;
+}
+bool tud_usbtmc_check_abort_bulk_out_cb(usbtmc_check_abort_bulk_rsp_t *rsp) {
+    rsp->USBTMC_status = USBTMC_STATUS_SUCCESS;
+    return true;
+}
+bool tud_usbtmc_initiate_abort_bulk_in_cb(uint8_t *tmcResult) {
+    *tmcResult = USBTMC_STATUS_SUCCESS;
+    return true;
+}
+bool tud_usbtmc_check_abort_bulk_in_cb(usbtmc_check_abort_bulk_rsp_t *rsp) {
+    rsp->USBTMC_status = USBTMC_STATUS_SUCCESS;
+    return true;
+}
+bool tud_usbtmc_initiate_clear_cb(uint8_t *tmcResult) {
+    *tmcResult = USBTMC_STATUS_SUCCESS;
+    return true;
+}
+bool tud_usbtmc_check_clear_cb(usbtmc_get_clear_status_rsp_t *rsp) {
+    rsp->USBTMC_status = USBTMC_STATUS_SUCCESS;
+    return true;
+}
+
 int main(void) {
     stdio_init_all();
     adc_init();

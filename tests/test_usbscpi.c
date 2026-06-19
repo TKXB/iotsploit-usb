@@ -156,7 +156,9 @@ static void test_param_parsing_and_arbitrary_block(void) {
     assert(f.tx[2] == '1');
     assert(f.tx[3] == '0');
     assert(memcmp(&f.tx[4], block_data_buf, 10) == 0);
-    assert(f.tx[4 + 10 - 1] == block_data_buf[9]);
+    /* f.tx is a char[]; cast through uint8_t so the high-bit payload byte
+     * (0xF6) compares equal on platforms where char is signed (x86). */
+    assert((uint8_t)f.tx[4 + 10 - 1] == block_data_buf[9]);
     assert(f.tx[4 + 10] == '\n');
 }
 
