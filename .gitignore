@@ -1,1 +1,8 @@
 /build/
+
+# ESP-IDF example build artifacts (TinyUSB is fetched via idf_component.yml)
+examples/esp32s3/build/
+examples/esp32s3/managed_components/
+examples/esp32s3/sdkconfig
+examples/esp32s3/sdkconfig.old
+examples/esp32s3/dependencies.lock
