@@ -56,8 +56,32 @@ static scpi_result_t custom_cmd(scpi_t *ctx) {
     return SCPI_ResultUInt32(ctx, 3300);
 }
 
+static uint32_t gpio_pin = 0;
+static uint32_t gpio_val = 0;
+
+static scpi_result_t custom_gpio_set(scpi_t *ctx) {
+    if (SCPI_ParamUInt32(ctx, &gpio_pin, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
+    if (SCPI_ParamUInt32(ctx, &gpio_val, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t custom_gpio_get(scpi_t *ctx) {
+    if (SCPI_ParamUInt32(ctx, &gpio_pin, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
+    return SCPI_ResultUInt32(ctx, gpio_val);
+}
+
+static uint8_t block_data_buf[64];
+static size_t block_data_len = 0;
+
+static scpi_result_t custom_block_cmd(scpi_t *ctx) {
+    return SCPI_ResultArbitraryBlock(ctx, block_data_buf, block_data_len);
+}
+
 static const scpi_command_t custom_commands[] = {
     { "MEASure:VOLTage?", custom_cmd, 0 },
+    { "GPIO:SET", custom_gpio_set, 0 },
+    { "GPIO:GET?", custom_gpio_get, 0 },
+    { "BLOCk:TEST?", custom_block_cmd, 0 },
     SCPI_CMD_LIST_END
 };
 
@@ -95,6 +119,47 @@ static void test_idn_and_custom_command(void) {
     f.tx[0] = '\0';
     assert(usbscpi_on_rx(dev, "MEAS:VOLT?\n", 11, true) == USBSCPI_OK);
     assert(strcmp(f.tx, "3300\n") == 0);
+}
+
+static void test_param_parsing_and_arbitrary_block(void) {
+    fixture_t f;
+    uint8_t storage[1024];
+    char line[96];
+    usbscpi_t *dev = make_device(&f, storage, sizeof(storage), line, sizeof(line));
+    assert(usbscpi_register(dev, custom_commands) == SCPI_RES_OK);
+
+    /* GPIO:SET 5,1 */
+    f.tx_len = 0;
+    f.tx[0] = '\0';
+    assert(usbscpi_on_rx(dev, "GPIO:SET 5,1\n", 13, true) == USBSCPI_OK);
+    assert(gpio_pin == 5);
+    assert(gpio_val == 1);
+
+    /* GPIO:GET? 5 */
+    f.tx_len = 0;
+    f.tx[0] = '\0';
+    assert(usbscpi_on_rx(dev, "GPIO:GET? 5\n", 12, true) == USBSCPI_OK);
+    assert(strcmp(f.tx, "1\n") == 0);
+
+    /* Arbitrary block with embedded zeros and newlines */
+    block_data_len = 10;
+    for (size_t i = 0; i < block_data_len; i++) {
+        block_data_buf[i] = (uint8_t)(0xFF ^ i);
+    }
+    f.tx_len = 0;
+    f.tx[0] = '\0';
+    assert(usbscpi_on_rx(dev, "BLOC:TEST?\n", 12, true) == USBSCPI_OK);
+    /* Expected: #210<10 bytes>\n */
+    assert(f.tx_len == 4 + 10 + 1); /* "#210" + payload + "\n" */
+    assert(f.tx[0] == '#');
+    assert(f.tx[1] == '2');
+    assert(f.tx[2] == '1');
+    assert(f.tx[3] == '0');
+    assert(memcmp(&f.tx[4], block_data_buf, 10) == 0);
+    /* f.tx is a char[]; cast through uint8_t so the high-bit payload byte
+     * (0xF6) compares equal on platforms where char is signed (x86). */
+    assert((uint8_t)f.tx[4 + 10 - 1] == block_data_buf[9]);
+    assert(f.tx[4 + 10] == '\n');
 }
 
 static void test_binary_block_split_and_special_bytes(void) {
@@ -136,6 +201,85 @@ static void test_error_queue_and_free_query(void) {
     assert(strcmp(f.tx, "16\n") == 0);
 }
 
+static size_t test_data_avail_val = 0;
+static size_t test_data_avail(void *user) {
+    (void)user;
+    return test_data_avail_val;
+}
+
+static size_t test_data_read(void *user, uint8_t *buf, size_t len) {
+    (void)user;
+    for (size_t i = 0; i < len; i++) {
+        buf[i] = (uint8_t)(i & 0xFF);
+    }
+    return len;
+}
+
+static void test_new_default_commands(void) {
+    fixture_t f;
+    uint8_t storage[1024];
+    char line[96];
+    uint8_t io_buf[256];
+    usbscpi_config_t cfg = {
+        .usb_tx = tx_cb,
+        .line_buf = line,
+        .line_buf_len = sizeof(line),
+        .max_block_len = 4096,
+        .idn = "Test,USBSCPI,SN1,0.1.0",
+        .data_avail = test_data_avail,
+        .data_read = test_data_read,
+        .io_buf = io_buf,
+        .io_buf_len = sizeof(io_buf),
+        .proto = 1,
+        .mtu = 256,
+        .user = &f,
+    };
+    usbscpi_t *dev = usbscpi_init(storage, sizeof(storage), &cfg);
+    assert(dev);
+
+    /* SYST:CAP? */
+    f.tx_len = 0;
+    f.tx[0] = '\0';
+    assert(usbscpi_on_rx(dev, "SYST:CAP?\n", 11, true) == USBSCPI_OK);
+    assert(strstr(f.tx, "proto=1") != NULL);
+    assert(strstr(f.tx, "mtu=256") != NULL);
+
+    /* SYST:ERR:COUN? (should be 0 after init) */
+    f.tx_len = 0;
+    f.tx[0] = '\0';
+    assert(usbscpi_on_rx(dev, "SYST:ERR:COUN?\n", 16, true) == USBSCPI_OK);
+    assert(strcmp(f.tx, "0\n") == 0);
+
+    /* DATA:COUNt? */
+    test_data_avail_val = 42;
+    f.tx_len = 0;
+    f.tx[0] = '\0';
+    assert(usbscpi_on_rx(dev, "DATA:COUNt?\n", 13, true) == USBSCPI_OK);
+    assert(strcmp(f.tx, "42\n") == 0);
+
+    /* DATA:READ? 8 */
+    f.tx_len = 0;
+    f.tx[0] = '\0';
+    assert(usbscpi_on_rx(dev, "DATA:READ? 8\n", 13, true) == USBSCPI_OK);
+    /* Expected: #28<8 bytes>\n */
+    assert(f.tx_len == 3 + 8 + 1); /* "#2" + "8" + payload + "\n" */
+    assert(f.tx[0] == '#');
+    assert(f.tx[1] == '1');
+    assert(f.tx[2] == '8');
+    for (size_t i = 0; i < 8; i++) {
+        assert((uint8_t)f.tx[3 + i] == (uint8_t)(i & 0xFF));
+    }
+    assert(f.tx[3 + 8] == '\n');
+
+    /* SYST:HELP:HEAD? */
+    f.tx_len = 0;
+    f.tx[0] = '\0';
+    assert(usbscpi_on_rx(dev, "SYST:HELP:HEAD?\n", 17, true) == USBSCPI_OK);
+    assert(f.tx_len > 0);
+    assert(strstr(f.tx, "*IDN?") != NULL);
+    assert(strstr(f.tx, "SYSTem:ERRor?") != NULL);
+}
+
 static void test_ring_buffer(void) {
     uint8_t backing[8];
     uint8_t out[8];
@@ -151,8 +295,10 @@ static void test_ring_buffer(void) {
 
 int main(void) {
     test_idn_and_custom_command();
+    test_param_parsing_and_arbitrary_block();
     test_binary_block_split_and_special_bytes();
     test_error_queue_and_free_query();
+    test_new_default_commands();
     test_ring_buffer();
     puts("usbscpi tests passed");
     return 0;

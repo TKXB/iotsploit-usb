@@ -26,6 +26,8 @@ src/scpi_compat.c               minimal SCPI parser/result/error implementation
 helpers/ring_buffer.c           optional ring helper
 glue/usbscpi_tinyusb.c          optional TinyUSB USBTMC adapter
 examples/minimal_host.c         host-side integration sketch
+examples/pico2/                 Raspberry Pi Pico (RP2040) TinyUSB demo
+examples/esp32s3/               ESP32-S3 (ESP-IDF + TinyUSB) demo, hardware-verified
 tests/test_usbscpi.c            host unit tests
 ```
 
@@ -139,13 +141,29 @@ The component produces the reply synchronously in the OUT path, so the glue
 directly from the OUT path silently drops it and makes every query read time out
 (`-110`).
 
+The glue also owns the **bulk-OUT arming**. It defines `tud_usbtmc_open_cb` to
+call `tud_usbtmc_start_bus_read()` when the interface is opened, and re-arms the
+OUT endpoint after every receive, IN-completion and clear. TinyUSB opens the
+endpoint but leaves the *first* bus read to the application; if nothing arms it,
+enumeration still succeeds but every host write times out (`-110`). Letting the
+glue own this means consumers cannot forget it.
+
 Because of this, integrators using the glue **must not** also define any of:
-`tud_usbtmc_msg_data_cb`, `tud_usbtmc_bulkOut_clearFeature_cb`,
-`tud_usbtmc_msgBulkIn_request_cb`, `tud_usbtmc_msgBulkIn_complete_cb`,
+`tud_usbtmc_open_cb`, `tud_usbtmc_msg_data_cb`,
+`tud_usbtmc_bulkOut_clearFeature_cb`, `tud_usbtmc_msgBulkIn_request_cb`,
+`tud_usbtmc_msgBulkIn_complete_cb`, `tud_usbtmc_bulkIn_clearFeature_cb`,
 `tud_usbtmc_get_stb_cb` (the glue provides them; duplicates break linking).
 Route any out-of-band device→host bytes (e.g. UDS replies) through
 `usbscpi_tinyusb_queue_response()` rather than calling
 `tud_usbtmc_transmit_dev_msg_data()` directly.
+
+The glue does **not** cover the remaining strong-symbol USBTMC callbacks that
+TinyUSB's `usbtmc_device.c` requires (they have no library default). Every
+application must still define them or the link fails — see `examples/pico2/main.c`:
+`tud_usbtmc_get_capabilities_cb`, `tud_usbtmc_msgBulkOut_start_cb`,
+`tud_usbtmc_initiate_abort_bulk_out_cb`, `tud_usbtmc_check_abort_bulk_out_cb`,
+`tud_usbtmc_initiate_abort_bulk_in_cb`, `tud_usbtmc_check_abort_bulk_in_cb`,
+`tud_usbtmc_initiate_clear_cb`, `tud_usbtmc_check_clear_cb`.
 
 ## Extension Points
 

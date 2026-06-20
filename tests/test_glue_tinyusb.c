@@ -24,6 +24,7 @@ uint8_t      stub_last_tx[512];
 uint32_t     stub_last_tx_len = 0;
 
 /* TinyUSB-provided callbacks the glue defines (no public prototypes upstream) */
+void tud_usbtmc_open_cb(uint8_t interface_id);
 bool tud_usbtmc_msg_data_cb(void *data, size_t len, bool transfer_complete);
 bool tud_usbtmc_msgBulkIn_request_cb(usbtmc_msg_request_dev_dep_in const *request);
 bool tud_usbtmc_msgBulkIn_complete_cb(void);
@@ -36,6 +37,15 @@ static void reset_stub(void) {
     stub_start_bus_read = 0;
     stub_last_tx_len = 0;
     memset(stub_last_tx, 0, sizeof(stub_last_tx));
+}
+
+/* The interface-open callback must arm the first bulk-OUT read; otherwise the
+ * OUT endpoint stays un-armed and every host write times out with -110. */
+static void test_open_arms_bus_read(void) {
+    reset_stub();
+    assert(stub_start_bus_read == 0);
+    tud_usbtmc_open_cb(0);
+    assert(stub_start_bus_read == 1);
 }
 
 static void test_query_buffers_then_transmits_on_in(void) {
@@ -108,6 +118,7 @@ static void test_query_buffers_then_transmits_on_in(void) {
 }
 
 int main(void) {
+    test_open_arms_bus_read();
     test_query_buffers_then_transmits_on_in();
     puts("usbscpi tinyusb glue tests passed");
     return 0;

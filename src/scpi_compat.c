@@ -2,12 +2,20 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void scpi_write_cstr(scpi_t *ctx, const char *s) {
     if (ctx && ctx->write && s) {
         ctx->write(ctx->user, s, strlen(s));
     }
+}
+
+static int scpi_write_data(scpi_t *ctx, const char *data, size_t len) {
+    if (ctx && ctx->write && len) {
+        return ctx->write(ctx->user, data, len);
+    }
+    return SCPI_RES_ERR;
 }
 
 static int segment_match(const char *pattern, size_t plen, const char *input, size_t ilen) {
@@ -121,7 +129,13 @@ static int execute_line(scpi_t *ctx, char *line) {
     while (*end && !isspace((unsigned char)*end)) {
         end++;
     }
-    *end = '\0';
+
+    char *args_start = end;
+    if (*end != '\0') {
+        args_start = end + 1;
+        *end = '\0';
+    }
+    ctx->args = args_start;
 
     for (size_t t = 0; t < ctx->table_count; t++) {
         const scpi_command_t *cmd = ctx->tables[t];
@@ -204,6 +218,70 @@ int SCPI_ResultInt32(scpi_t *ctx, int32_t value) {
 
 int SCPI_ResultBool(scpi_t *ctx, int value) {
     return SCPI_ResultUInt32(ctx, value ? 1u : 0u);
+}
+
+int SCPI_ParamUInt32(scpi_t *ctx, uint32_t *val, int mandatory) {
+    if (!ctx || !val) {
+        return SCPI_RES_ERR;
+    }
+    if (!ctx->args) {
+        if (mandatory) {
+            SCPI_ErrorPush(ctx, -109, "Missing parameter");
+        }
+        return mandatory ? SCPI_RES_ERR : SCPI_RES_OK;
+    }
+    const char *p = ctx->args;
+    while (*p && (isspace((unsigned char)*p) || *p == ',')) {
+        p++;
+    }
+    if (*p == '\0') {
+        if (mandatory) {
+            SCPI_ErrorPush(ctx, -109, "Missing parameter");
+        }
+        return mandatory ? SCPI_RES_ERR : SCPI_RES_OK;
+    }
+
+    char *endptr = NULL;
+    unsigned long v = strtoul(p, &endptr, 0);
+    if (endptr == p) {
+        if (mandatory) {
+            SCPI_ErrorPush(ctx, -224, "Illegal parameter value");
+        }
+        return mandatory ? SCPI_RES_ERR : SCPI_RES_OK;
+    }
+
+    *val = (uint32_t)v;
+    ctx->args = endptr;
+    return SCPI_RES_OK;
+}
+
+int SCPI_ResultArbitraryBlock(scpi_t *ctx, const uint8_t *data, size_t len) {
+    if (!ctx) {
+        return SCPI_RES_ERR;
+    }
+    size_t temp = len;
+    int ndigits = 0;
+    do {
+        ndigits++;
+        temp /= 10;
+    } while (temp > 0);
+
+    char header[16];
+    int n = snprintf(header, sizeof(header), "#%d%zu", ndigits, (size_t)len);
+    if (n < 0 || (size_t)n >= sizeof(header)) {
+        return SCPI_RES_ERR;
+    }
+
+    if (scpi_write_data(ctx, header, (size_t)n) != SCPI_RES_OK) {
+        return SCPI_RES_ERR;
+    }
+    if (len > 0 && scpi_write_data(ctx, (const char *)data, len) != SCPI_RES_OK) {
+        return SCPI_RES_ERR;
+    }
+    if (scpi_write_data(ctx, "\n", 1) != SCPI_RES_OK) {
+        return SCPI_RES_ERR;
+    }
+    return SCPI_RES_OK;
 }
 
 void SCPI_ErrorPush(scpi_t *ctx, int code, const char *message) {

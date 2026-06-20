@@ -76,13 +76,128 @@ static scpi_result_t cmd_data_free(scpi_t *scpi) {
     return SCPI_ResultUInt32(scpi, (uint32_t)free_bytes);
 }
 
+static scpi_result_t cmd_syst_cap(scpi_t *scpi) {
+    usbscpi_t *ctx = scpi_owner(scpi);
+    if (!ctx) return SCPI_RES_ERR;
+    char buf[128];
+    (void)snprintf(buf, sizeof(buf), "proto=%u;mtu=%zu;maxblock=%zu;feat=",
+                   ctx->cfg.proto, ctx->cfg.mtu, ctx->cfg.max_block_len);
+    return SCPI_ResultText(scpi, buf);
+}
+
+static scpi_result_t cmd_syst_help_head(scpi_t *scpi) {
+    usbscpi_t *ctx = scpi_owner(scpi);
+    if (!ctx) return SCPI_RES_ERR;
+
+    uint32_t offset = 0, count = (uint32_t)-1;
+    (void)SCPI_ParamUInt32(scpi, &offset, 0);
+    (void)SCPI_ParamUInt32(scpi, &count, 0);
+
+    size_t total_size = 0;
+    size_t cmd_idx = 0;
+    size_t returned = 0;
+
+    for (size_t t = 0; t < scpi->table_count; t++) {
+        const scpi_command_t *cmd = scpi->tables[t];
+        for (; cmd && cmd->pattern; cmd++) {
+            if (cmd_idx >= offset && cmd_idx < offset + count) {
+                total_size += strlen(cmd->pattern) + 1; /* +1 for \n */
+                returned++;
+            }
+            cmd_idx++;
+        }
+    }
+
+    if (ctx->cfg.mtu && total_size > ctx->cfg.mtu) {
+        SCPI_ErrorPush(scpi, -223, "Too much data");
+        return SCPI_RES_ERR;
+    }
+
+    (void)returned;
+    cmd_idx = 0;
+    for (size_t t = 0; t < scpi->table_count; t++) {
+        const scpi_command_t *cmd = scpi->tables[t];
+        for (; cmd && cmd->pattern; cmd++) {
+            if (cmd_idx >= offset && cmd_idx < offset + count) {
+                SCPI_ResultText(scpi, cmd->pattern);
+            }
+            cmd_idx++;
+        }
+    }
+
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_data_count(scpi_t *scpi) {
+    usbscpi_t *ctx = scpi_owner(scpi);
+    size_t count = 0;
+    if (ctx && ctx->cfg.data_avail) {
+        count = ctx->cfg.data_avail(ctx->cfg.user);
+    }
+    return SCPI_ResultUInt32(scpi, (uint32_t)count);
+}
+
+static scpi_result_t cmd_data_read(scpi_t *scpi) {
+    usbscpi_t *ctx = scpi_owner(scpi);
+    if (!ctx) return SCPI_RES_ERR;
+
+    uint32_t count = 0;
+    if (SCPI_ParamUInt32(scpi, &count, 1) != SCPI_RES_OK) {
+        return SCPI_RES_ERR;
+    }
+
+    size_t avail = 0;
+    if (ctx->cfg.data_avail) {
+        avail = ctx->cfg.data_avail(ctx->cfg.user);
+    }
+
+    size_t to_read = count;
+    if (to_read > ctx->cfg.io_buf_len) {
+        to_read = ctx->cfg.io_buf_len;
+    }
+    if (to_read > avail) {
+        to_read = avail;
+    }
+
+    size_t actual = 0;
+    if (to_read > 0 && ctx->cfg.data_read && ctx->cfg.io_buf) {
+        actual = ctx->cfg.data_read(ctx->cfg.user, ctx->cfg.io_buf, to_read);
+    }
+
+    /* Check arbitrary block header + payload + \n against mtu */
+    if (ctx->cfg.mtu) {
+        size_t temp = actual;
+        int ndigits = 0;
+        do {
+            ndigits++;
+            temp /= 10;
+        } while (temp > 0);
+        size_t total = 1 + (size_t)ndigits + actual + 1; /* # + digits + payload + \n */
+        if (total > ctx->cfg.mtu) {
+            SCPI_ErrorPush(scpi, -223, "Too much data");
+            return SCPI_RES_ERR;
+        }
+    }
+
+    return SCPI_ResultArbitraryBlock(scpi, ctx->cfg.io_buf, actual);
+}
+
+static scpi_result_t cmd_syst_err_count(scpi_t *scpi) {
+    return SCPI_ResultUInt32(scpi, (uint32_t)scpi->error_count);
+}
+
 static const scpi_command_t default_commands[] = {
     { "*IDN?", cmd_idn, 0 },
     { "*RST", cmd_rst, 0 },
     { "*CLS", cmd_cls, 0 },
     { "*OPC?", cmd_opc, 0 },
     { "SYSTem:ERRor?", cmd_syst_err, 0 },
+    { "SYSTem:ERRor:COUNt?", cmd_syst_err_count, 0 },
+    { "SYSTem:CAPabilities?", cmd_syst_cap, 0 },
+    { "SYSTem:HELP:HEADers?", cmd_syst_help_head, 0 },
     { "DATA:FREE?", cmd_data_free, 0 },
+    { "DATA:COUNt?", cmd_data_count, 0 },
+    { "DATA:READ?", cmd_data_read, 0 },
     SCPI_CMD_LIST_END
 };
 
