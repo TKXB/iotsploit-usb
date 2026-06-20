@@ -7,6 +7,8 @@
 #include "tusb.h"
 #include "usbscpi/usbscpi.h"
 #include "usbscpi_tinyusb.h"
+#include "wifi_scan.h"
+#include "ble_scan.h"
 
 /* ---------- 静态缓冲(等价 pico2,避免动态分配) ---------- */
 static uint8_t s_storage[1024];
@@ -71,10 +73,68 @@ static scpi_result_t cmd_adc_read(scpi_t *ctx) {
     return SCPI_ResultUInt32(ctx, (uint32_t)raw);
 }
 
+/* ---------- WiFi 扫描命令(异步触发 → 轮询 → 逐行取) ---------- */
+static scpi_result_t cmd_wlan_scan(scpi_t *ctx) {
+    return wifi_scan_start() == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
+}
+
+static scpi_result_t cmd_wlan_done(scpi_t *ctx) {
+    return SCPI_ResultBool(ctx, wifi_scan_done());
+}
+
+static scpi_result_t cmd_wlan_count(scpi_t *ctx) {
+    return SCPI_ResultUInt32(ctx, (uint32_t)wifi_scan_count());
+}
+
+static scpi_result_t cmd_wlan_get(scpi_t *ctx) {
+    uint32_t idx = 0;
+    char buf[96];
+    if (SCPI_ParamUInt32(ctx, &idx, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
+    if (wifi_scan_get(idx, buf, sizeof(buf)) != 0) {
+        SCPI_ErrorPush(ctx, -222, "Data out of range");
+        return SCPI_RES_ERR;
+    }
+    return SCPI_ResultText(ctx, buf);
+}
+
+/* ---------- BLE 扫描命令 ---------- */
+static scpi_result_t cmd_ble_scan(scpi_t *ctx) {
+    uint32_t secs = 5;
+    (void)SCPI_ParamUInt32(ctx, &secs, 0);
+    return ble_scan_start(secs) == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
+}
+
+static scpi_result_t cmd_ble_done(scpi_t *ctx) {
+    return SCPI_ResultBool(ctx, ble_scan_done());
+}
+
+static scpi_result_t cmd_ble_count(scpi_t *ctx) {
+    return SCPI_ResultUInt32(ctx, (uint32_t)ble_scan_count());
+}
+
+static scpi_result_t cmd_ble_get(scpi_t *ctx) {
+    uint32_t idx = 0;
+    char buf[96];
+    if (SCPI_ParamUInt32(ctx, &idx, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
+    if (ble_scan_get(idx, buf, sizeof(buf)) != 0) {
+        SCPI_ErrorPush(ctx, -222, "Data out of range");
+        return SCPI_RES_ERR;
+    }
+    return SCPI_ResultText(ctx, buf);
+}
+
 static const scpi_command_t demo_commands[] = {
     { "GPIO:SET",  cmd_gpio_set, 0 },
     { "GPIO:GET?", cmd_gpio_get, 0 },
     { "ADC:READ?", cmd_adc_read, 0 },
+    { "WLAN:SCAN",        cmd_wlan_scan,  0 },
+    { "WLAN:SCAN:DONE?",  cmd_wlan_done,  0 },
+    { "WLAN:SCAN:COUNt?", cmd_wlan_count, 0 },
+    { "WLAN:SCAN?",       cmd_wlan_get,   0 },
+    { "BLE:SCAN",         cmd_ble_scan,   0 },
+    { "BLE:SCAN:DONE?",   cmd_ble_done,   0 },
+    { "BLE:SCAN:COUNt?",  cmd_ble_count,  0 },
+    { "BLE:SCAN?",        cmd_ble_get,    0 },
     SCPI_CMD_LIST_END
     /* *IDN? / SYST:CAP? / SYST:HELP:HEAD? / SYST:ERR? / DATA:READ? 由 core 白送 */
 };
@@ -202,6 +262,16 @@ static void usb_task(void *arg) {
     }
 }
 
+/* ---------- 无线初始化任务 ----------
+ * WiFi + NimBLE 起步占用较多栈,且可能耗时;放到独立任务里,使 USB(USBTMC)
+ * 枚举不被其阻塞。即便扫描初始化卡住,USB 仍可响应。 */
+static void scan_init_task(void *arg) {
+    (void)arg;
+    wifi_scan_init();     /* NVS + netif + Wi-Fi STA */
+    ble_scan_init();      /* NimBLE controller + host task */
+    vTaskDelete(NULL);
+}
+
 void app_main(void) {
     adc_setup();
     usb_phy_start();
@@ -225,5 +295,7 @@ void app_main(void) {
     usbscpi_tinyusb_bind(dev);          /* glue 接管 IN/OUT 路径 */
     usbscpi_register(dev, demo_commands);
 
-    xTaskCreate(usb_task, "usb", 4096, dev, 5, NULL);
+    xTaskCreate(usb_task, "usb", 6144, dev, 5, NULL);
+    /* USB 起来后再异步初始化无线,避免阻塞枚举 */
+    xTaskCreate(scan_init_task, "scan_init", 8192, NULL, 4, NULL);
 }
