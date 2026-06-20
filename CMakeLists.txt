@@ -1,10 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 
 if(DEFINED IDF_TARGET)
+    file(GLOB LIBSCPI_SRCS "third_party/libscpi/src/*.c")
     idf_component_register(
-        SRCS "src/usbscpi.c" "src/scpi_compat.c"
-        INCLUDE_DIRS "include"
+        SRCS "src/usbscpi.c" ${LIBSCPI_SRCS}
+        INCLUDE_DIRS "include" "third_party/libscpi/inc"
+        PRIV_INCLUDE_DIRS "third_party/libscpi/src"
     )
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC SCPI_USER_CONFIG=1)
     return()
 endif()
 
@@ -14,10 +17,23 @@ option(USBSCPI_BUILD_TESTS "Build iotsploit-usb host tests" ON)
 option(USBSCPI_BUILD_HELPERS "Build iotsploit-usb optional helper library" ON)
 option(USBSCPI_BUILD_TINYUSB_GLUE "Build iotsploit-usb optional TinyUSB glue" OFF)
 
+# Vendored libscpi: its own static lib so third-party warnings don't trip our
+# -Werror; SCPI_USER_CONFIG activates third_party/libscpi/inc/scpi/scpi_user_config.h.
+file(GLOB LIBSCPI_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libscpi/src/*.c)
+add_library(libscpi STATIC ${LIBSCPI_SRCS})
+target_include_directories(libscpi PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/libscpi/inc>
+)
+target_include_directories(libscpi PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libscpi/src
+)
+target_compile_definitions(libscpi PUBLIC SCPI_USER_CONFIG=1)
+target_compile_features(libscpi PUBLIC c_std_99)
+
 add_library(usbscpi STATIC
     src/usbscpi.c
-    src/scpi_compat.c
 )
+target_link_libraries(usbscpi PUBLIC libscpi)
 target_include_directories(usbscpi PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>

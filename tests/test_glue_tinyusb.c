@@ -51,7 +51,7 @@ static void test_open_arms_bus_read(void) {
 static void test_query_buffers_then_transmits_on_in(void) {
     reset_stub();
 
-    static uint8_t storage[1024];
+    static uint8_t storage[2048];
     static char    line[96];
     usbscpi_config_t cfg = {
         .usb_tx = usbscpi_tinyusb_tx,

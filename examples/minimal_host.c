@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-static uint8_t usbscpi_storage[1024];
+static uint8_t usbscpi_storage[2048];
 static char line_buf[96];
 
 static int usb_tx(void *user, const uint8_t *data, size_t len, bool eom) {

@@ -53,28 +53,31 @@ static size_t data_free_cb(void *user) {
 }
 
 static scpi_result_t custom_cmd(scpi_t *ctx) {
-    return SCPI_ResultUInt32(ctx, 3300);
+    SCPI_ResultUInt32(ctx, 3300);
+    return SCPI_RES_OK;
 }
 
 static uint32_t gpio_pin = 0;
 static uint32_t gpio_val = 0;
 
 static scpi_result_t custom_gpio_set(scpi_t *ctx) {
-    if (SCPI_ParamUInt32(ctx, &gpio_pin, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
-    if (SCPI_ParamUInt32(ctx, &gpio_val, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
+    if (SCPI_ParamUInt32(ctx, &gpio_pin, TRUE) != TRUE) return SCPI_RES_ERR;
+    if (SCPI_ParamUInt32(ctx, &gpio_val, TRUE) != TRUE) return SCPI_RES_ERR;
     return SCPI_RES_OK;
 }
 
 static scpi_result_t custom_gpio_get(scpi_t *ctx) {
-    if (SCPI_ParamUInt32(ctx, &gpio_pin, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
-    return SCPI_ResultUInt32(ctx, gpio_val);
+    if (SCPI_ParamUInt32(ctx, &gpio_pin, TRUE) != TRUE) return SCPI_RES_ERR;
+    SCPI_ResultUInt32(ctx, gpio_val);
+    return SCPI_RES_OK;
 }
 
 static uint8_t block_data_buf[64];
 static size_t block_data_len = 0;
 
 static scpi_result_t custom_block_cmd(scpi_t *ctx) {
-    return SCPI_ResultArbitraryBlock(ctx, block_data_buf, block_data_len);
+    SCPI_ResultArbitraryBlock(ctx, block_data_buf, block_data_len);
+    return SCPI_RES_OK;
 }
 
 static const scpi_command_t custom_commands[] = {
@@ -107,10 +110,10 @@ static usbscpi_t *make_device(fixture_t *f, uint8_t *storage, size_t storage_len
 
 static void test_idn_and_custom_command(void) {
     fixture_t f;
-    uint8_t storage[1024];
+    uint8_t storage[2048];
     char line[96];
     usbscpi_t *dev = make_device(&f, storage, sizeof(storage), line, sizeof(line));
-    assert(usbscpi_register(dev, custom_commands) == SCPI_RES_OK);
+    assert(usbscpi_register(dev, custom_commands) == USBSCPI_OK);
 
     assert(usbscpi_on_rx(dev, "*IDN?\n", 6, true) == USBSCPI_OK);
     assert(strstr(f.tx, "Test,USBSCPI,SN1,0.1.0") != NULL);
@@ -123,10 +126,10 @@ static void test_idn_and_custom_command(void) {
 
 static void test_param_parsing_and_arbitrary_block(void) {
     fixture_t f;
-    uint8_t storage[1024];
+    uint8_t storage[2048];
     char line[96];
     usbscpi_t *dev = make_device(&f, storage, sizeof(storage), line, sizeof(line));
-    assert(usbscpi_register(dev, custom_commands) == SCPI_RES_OK);
+    assert(usbscpi_register(dev, custom_commands) == USBSCPI_OK);
 
     /* GPIO:SET 5,1 */
     f.tx_len = 0;
@@ -164,7 +167,7 @@ static void test_param_parsing_and_arbitrary_block(void) {
 
 static void test_binary_block_split_and_special_bytes(void) {
     fixture_t f;
-    uint8_t storage[1024];
+    uint8_t storage[2048];
     char line[96];
     usbscpi_t *dev = make_device(&f, storage, sizeof(storage), line, sizeof(line));
 
@@ -187,7 +190,7 @@ static void test_binary_block_split_and_special_bytes(void) {
 
 static void test_error_queue_and_free_query(void) {
     fixture_t f;
-    uint8_t storage[1024];
+    uint8_t storage[2048];
     char line[96];
     usbscpi_t *dev = make_device(&f, storage, sizeof(storage), line, sizeof(line));
 
@@ -217,7 +220,7 @@ static size_t test_data_read(void *user, uint8_t *buf, size_t len) {
 
 static void test_new_default_commands(void) {
     fixture_t f;
-    uint8_t storage[1024];
+    uint8_t storage[2048];
     char line[96];
     uint8_t io_buf[256];
     usbscpi_config_t cfg = {
