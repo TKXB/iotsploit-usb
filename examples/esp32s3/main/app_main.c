@@ -11,7 +11,7 @@
 #include "ble_scan.h"
 
 /* ---------- 静态缓冲(等价 pico2,避免动态分配) ---------- */
-static uint8_t s_storage[1024];
+static uint8_t s_storage[2048];
 static char    s_line[96];
 static uint8_t s_io[256];
 
@@ -51,8 +51,8 @@ static size_t adc_read_cb(void *user, uint8_t *buf, size_t len) {
 /* ---------- 业务命令(每个 3–5 行,仅 HAL 不同) ---------- */
 static scpi_result_t cmd_gpio_set(scpi_t *ctx) {
     uint32_t pin, val;
-    if (SCPI_ParamUInt32(ctx, &pin, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
-    if (SCPI_ParamUInt32(ctx, &val, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
+    if (SCPI_ParamUInt32(ctx, &pin, TRUE) != TRUE) return SCPI_RES_ERR;
+    if (SCPI_ParamUInt32(ctx, &val, TRUE) != TRUE) return SCPI_RES_ERR;
     gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
     gpio_set_level((gpio_num_t)pin, val != 0);
     return SCPI_RES_OK;
@@ -60,67 +60,76 @@ static scpi_result_t cmd_gpio_set(scpi_t *ctx) {
 
 static scpi_result_t cmd_gpio_get(scpi_t *ctx) {
     uint32_t pin;
-    if (SCPI_ParamUInt32(ctx, &pin, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
+    if (SCPI_ParamUInt32(ctx, &pin, TRUE) != TRUE) return SCPI_RES_ERR;
     gpio_set_direction((gpio_num_t)pin, GPIO_MODE_INPUT);
-    return SCPI_ResultUInt32(ctx, (uint32_t)gpio_get_level((gpio_num_t)pin));
+    SCPI_ResultUInt32(ctx, (uint32_t)gpio_get_level((gpio_num_t)pin));
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_adc_read(scpi_t *ctx) {
     uint32_t ch = 0;
-    (void)SCPI_ParamUInt32(ctx, &ch, 0);
+    (void)SCPI_ParamUInt32(ctx, &ch, FALSE);
     int raw = 0;
     adc_oneshot_read(s_adc1, (adc_channel_t)ch, &raw);
-    return SCPI_ResultUInt32(ctx, (uint32_t)raw);
+    SCPI_ResultUInt32(ctx, (uint32_t)raw);
+    return SCPI_RES_OK;
 }
 
 /* ---------- WiFi 扫描命令(异步触发 → 轮询 → 逐行取) ---------- */
 static scpi_result_t cmd_wlan_scan(scpi_t *ctx) {
+    (void)ctx;
     return wifi_scan_start() == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
 }
 
 static scpi_result_t cmd_wlan_done(scpi_t *ctx) {
-    return SCPI_ResultBool(ctx, wifi_scan_done());
+    SCPI_ResultBool(ctx, wifi_scan_done());
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_wlan_count(scpi_t *ctx) {
-    return SCPI_ResultUInt32(ctx, (uint32_t)wifi_scan_count());
+    SCPI_ResultUInt32(ctx, (uint32_t)wifi_scan_count());
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_wlan_get(scpi_t *ctx) {
     uint32_t idx = 0;
     char buf[96];
-    if (SCPI_ParamUInt32(ctx, &idx, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
+    if (SCPI_ParamUInt32(ctx, &idx, TRUE) != TRUE) return SCPI_RES_ERR;
     if (wifi_scan_get(idx, buf, sizeof(buf)) != 0) {
-        SCPI_ErrorPush(ctx, -222, "Data out of range");
+        SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
         return SCPI_RES_ERR;
     }
-    return SCPI_ResultText(ctx, buf);
+    SCPI_ResultCharacters(ctx, buf, strlen(buf));   /* 裸 CSV,不要 ResultText(会加引号) */
+    return SCPI_RES_OK;
 }
 
 /* ---------- BLE 扫描命令 ---------- */
 static scpi_result_t cmd_ble_scan(scpi_t *ctx) {
     uint32_t secs = 5;
-    (void)SCPI_ParamUInt32(ctx, &secs, 0);
+    (void)SCPI_ParamUInt32(ctx, &secs, FALSE);
     return ble_scan_start(secs) == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
 }
 
 static scpi_result_t cmd_ble_done(scpi_t *ctx) {
-    return SCPI_ResultBool(ctx, ble_scan_done());
+    SCPI_ResultBool(ctx, ble_scan_done());
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_count(scpi_t *ctx) {
-    return SCPI_ResultUInt32(ctx, (uint32_t)ble_scan_count());
+    SCPI_ResultUInt32(ctx, (uint32_t)ble_scan_count());
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_get(scpi_t *ctx) {
     uint32_t idx = 0;
     char buf[96];
-    if (SCPI_ParamUInt32(ctx, &idx, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
+    if (SCPI_ParamUInt32(ctx, &idx, TRUE) != TRUE) return SCPI_RES_ERR;
     if (ble_scan_get(idx, buf, sizeof(buf)) != 0) {
-        SCPI_ErrorPush(ctx, -222, "Data out of range");
+        SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
         return SCPI_RES_ERR;
     }
-    return SCPI_ResultText(ctx, buf);
+    SCPI_ResultCharacters(ctx, buf, strlen(buf));
+    return SCPI_RES_OK;
 }
 
 static const scpi_command_t demo_commands[] = {

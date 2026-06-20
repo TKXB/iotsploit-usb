@@ -5,7 +5,7 @@
 #include "usbscpi/usbscpi.h"
 #include "usbscpi_tinyusb.h"
 
-static uint8_t s_storage[1024];
+static uint8_t s_storage[2048];
 static char    s_line[96];
 static uint8_t s_io[256];
 
@@ -33,8 +33,8 @@ static size_t adc_read_cb(void *user, uint8_t *buf, size_t len) {
 
 static scpi_result_t cmd_gpio_set(scpi_t *ctx) {
     uint32_t pin, val;
-    if (SCPI_ParamUInt32(ctx, &pin, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
-    if (SCPI_ParamUInt32(ctx, &val, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
+    if (SCPI_ParamUInt32(ctx, &pin, TRUE) != TRUE) return SCPI_RES_ERR;
+    if (SCPI_ParamUInt32(ctx, &val, TRUE) != TRUE) return SCPI_RES_ERR;
     gpio_init((uint)pin);
     gpio_set_dir((uint)pin, GPIO_OUT);
     gpio_put((uint)pin, val != 0);
@@ -43,17 +43,19 @@ static scpi_result_t cmd_gpio_set(scpi_t *ctx) {
 
 static scpi_result_t cmd_gpio_get(scpi_t *ctx) {
     uint32_t pin;
-    if (SCPI_ParamUInt32(ctx, &pin, 1) != SCPI_RES_OK) return SCPI_RES_ERR;
+    if (SCPI_ParamUInt32(ctx, &pin, TRUE) != TRUE) return SCPI_RES_ERR;
     gpio_init((uint)pin);
     gpio_set_dir((uint)pin, GPIO_IN);
-    return SCPI_ResultUInt32(ctx, gpio_get((uint)pin));
+    SCPI_ResultUInt32(ctx, gpio_get((uint)pin));
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_adc_read(scpi_t *ctx) {
     uint32_t ch = 0;
-    (void)SCPI_ParamUInt32(ctx, &ch, 0);
+    (void)SCPI_ParamUInt32(ctx, &ch, FALSE);
     adc_select_input((uint8_t)ch);
-    return SCPI_ResultUInt32(ctx, adc_read());
+    SCPI_ResultUInt32(ctx, adc_read());
+    return SCPI_RES_OK;
 }
 
 static const scpi_command_t demo_commands[] = {
