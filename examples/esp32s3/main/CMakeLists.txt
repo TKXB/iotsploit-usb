@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "app_main.c" "wifi_scan.c" "ble_scan.c"
+    SRCS "app_main.c" "wifi_scan.c" "ble_scan.c" "ble_conn.c"
     INCLUDE_DIRS "."
     REQUIRES iotsploit-usb tinyusb driver esp_adc usb
              esp_wifi esp_netif esp_event nvs_flash bt)

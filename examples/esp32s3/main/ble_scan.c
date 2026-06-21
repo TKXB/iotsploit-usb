@@ -123,3 +123,14 @@ int ble_scan_get(size_t index, char *out, size_t out_len) {
              d->rssi, d->name, d->adv_type);
     return 0;
 }
+
+int ble_scan_addr(size_t index, uint8_t out_val[6], uint8_t *out_type) {
+    if (index >= s_dev_count || !out_val) {
+        return -1;
+    }
+    memcpy(out_val, s_devs[index].addr.val, 6);
+    if (out_type) {
+        *out_type = s_devs[index].addr.type;
+    }
+    return 0;
+}

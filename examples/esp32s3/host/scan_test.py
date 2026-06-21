@@ -9,6 +9,7 @@ Usage:
     sudo python3 scan_test.py                 # auto-detect /dev/usbtmc*
     sudo python3 scan_test.py -d /dev/usbtmc0 # explicit device node
     sudo python3 scan_test.py --ble-secs 8    # longer BLE discovery
+    sudo python3 scan_test.py --connect 0     # scan, then connect+pair device #0
 
 Root is required because the usbtmc character device is root-only by default.
 A pyvisa equivalent is shown in the example README.
@@ -67,11 +68,55 @@ def scan_ble(dev, secs):
         print(f"  [{i:2}] {dev.cmd(f'BLE:SCAN? {i}')}")
 
 
+CONN_STATE = {0: "idle", 1: "connecting", 2: "connected", 3: "failed"}
+PAIR_STATE = {0: "idle", 1: "in-progress", 2: "passkey-needed",
+              3: "numcmp-needed", 4: "done", 5: "failed", 6: "display-key"}
+
+
+def connect_and_pair(dev, index, timeout_s=15):
+    """Connect to scan result #index, pair (prompting for a PIN if the peer
+    asks), then print the negotiated security parameters."""
+    print(f"\n--- BLE connect + pair (device #{index}) ---")
+    dev.cmd(f"BLE:CONNect {index}", read=False)
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        st = int(dev.cmd("BLE:CONNect:STATe?"))
+        if st in (2, 3):
+            break
+        time.sleep(0.2)
+    print(f"  connect state: {CONN_STATE.get(st, st)}")
+    if st != 2:
+        return
+
+    dev.cmd("BLE:PAIR", read=False)
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        ps = int(dev.cmd("BLE:PAIR:STATe?"))
+        if ps == 2:                       # peer displays a passkey; we type it
+            pk = input("  enter 6-digit passkey shown on the peer: ").strip()
+            dev.cmd(f"BLE:PAIR:PASSKey {pk}", read=False)
+        elif ps == 6:                     # we display a passkey; enter on peer
+            print(f"  enter this passkey on the peer: {dev.cmd('BLE:PAIR:PASSKey?')}")
+        elif ps == 3:                     # numeric comparison
+            ok = input(f"  numbers match? ({dev.cmd('BLE:PAIR:NUMCmp?')}) [Y/n] ")
+            dev.cmd(f"BLE:PAIR:CONFirm {0 if ok.strip().lower() == 'n' else 1}", read=False)
+        elif ps in (4, 5):
+            break
+        time.sleep(0.3)
+    print(f"  pair state: {PAIR_STATE.get(ps, ps)}")
+
+    # <mac>,<level>,<encrypted>,<authenticated>,<bonded>,<key_size>
+    print("  BLE:SEC? ->", dev.cmd("BLE:SEC?"))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-d", "--device", help="usbtmc node (default: first /dev/usbtmc*)")
     ap.add_argument("--ble-secs", type=int, default=5, help="BLE discovery duration")
+    ap.add_argument("--connect", type=int, metavar="INDEX",
+                    help="after the BLE scan, connect+pair with device #INDEX")
     ap.add_argument("--wifi-only", action="store_true")
     ap.add_argument("--ble-only", action="store_true")
     args = ap.parse_args()
@@ -98,6 +143,8 @@ def main():
         scan_wifi(dev)
     if not args.wifi_only:
         scan_ble(dev, args.ble_secs)
+        if args.connect is not None:
+            connect_and_pair(dev, args.connect)
 
     print("\nSYST:ERR? ->", dev.cmd("SYST:ERR?"))
     dev.close()

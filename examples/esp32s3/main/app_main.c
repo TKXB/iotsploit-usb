@@ -9,6 +9,7 @@
 #include "usbscpi_tinyusb.h"
 #include "wifi_scan.h"
 #include "ble_scan.h"
+#include "ble_conn.h"
 
 /* ---------- 静态缓冲(等价 pico2,避免动态分配) ---------- */
 static uint8_t s_storage[2048];
@@ -132,6 +133,80 @@ static scpi_result_t cmd_ble_get(scpi_t *ctx) {
     return SCPI_RES_OK;
 }
 
+/* ---------- BLE 连接 / 配对命令 ---------- */
+static scpi_result_t cmd_ble_conn(scpi_t *ctx) {
+    uint32_t idx = 0;
+    if (SCPI_ParamUInt32(ctx, &idx, TRUE) != TRUE) return SCPI_RES_ERR;
+    return ble_conn_start((size_t)idx) == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
+}
+
+static scpi_result_t cmd_ble_conn_state(scpi_t *ctx) {
+    SCPI_ResultInt32(ctx, ble_conn_state());
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_ble_conn_status(scpi_t *ctx) {
+    SCPI_ResultInt32(ctx, ble_conn_last_status());
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_ble_disconn(scpi_t *ctx) {
+    (void)ctx;
+    return ble_conn_disconnect() == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
+}
+
+static scpi_result_t cmd_ble_pair(scpi_t *ctx) {
+    (void)ctx;
+    return ble_pair_start() == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
+}
+
+static scpi_result_t cmd_ble_pair_state(scpi_t *ctx) {
+    SCPI_ResultInt32(ctx, ble_pair_state());
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_ble_pair_passkey(scpi_t *ctx) {
+    uint32_t pk = 0;
+    if (SCPI_ParamUInt32(ctx, &pk, TRUE) != TRUE) return SCPI_RES_ERR;
+    return ble_pair_passkey(pk) == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
+}
+
+static scpi_result_t cmd_ble_pair_passkey_q(scpi_t *ctx) {
+    uint32_t pk = 0;
+    if (ble_pair_passkey_get(&pk) != 0) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    SCPI_ResultUInt32(ctx, pk);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_ble_numcmp(scpi_t *ctx) {
+    uint32_t n = 0;
+    if (ble_pair_numcmp_get(&n) != 0) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    SCPI_ResultUInt32(ctx, n);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_ble_confirm(scpi_t *ctx) {
+    uint32_t accept = 1;
+    (void)SCPI_ParamUInt32(ctx, &accept, FALSE);
+    return ble_pair_confirm((int)accept) == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
+}
+
+static scpi_result_t cmd_ble_sec(scpi_t *ctx) {
+    char buf[64];
+    if (ble_sec_info(buf, sizeof(buf)) != 0) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    SCPI_ResultCharacters(ctx, buf, strlen(buf));
+    return SCPI_RES_OK;
+}
+
 static const scpi_command_t demo_commands[] = {
     { "GPIO:SET",  cmd_gpio_set, 0 },
     { "GPIO:GET?", cmd_gpio_get, 0 },
@@ -144,6 +219,17 @@ static const scpi_command_t demo_commands[] = {
     { "BLE:SCAN:DONE?",   cmd_ble_done,   0 },
     { "BLE:SCAN:COUNt?",  cmd_ble_count,  0 },
     { "BLE:SCAN?",        cmd_ble_get,    0 },
+    { "BLE:CONNect",          cmd_ble_conn,         0 },
+    { "BLE:CONNect:STATe?",   cmd_ble_conn_state,   0 },
+    { "BLE:CONNect:STATus?",  cmd_ble_conn_status,  0 },
+    { "BLE:DISConnect",       cmd_ble_disconn,      0 },
+    { "BLE:PAIR",             cmd_ble_pair,         0 },
+    { "BLE:PAIR:STATe?",      cmd_ble_pair_state,   0 },
+    { "BLE:PAIR:PASSKey",     cmd_ble_pair_passkey, 0 },
+    { "BLE:PAIR:PASSKey?",    cmd_ble_pair_passkey_q, 0 },
+    { "BLE:PAIR:NUMCmp?",     cmd_ble_numcmp,       0 },
+    { "BLE:PAIR:CONFirm",     cmd_ble_confirm,      0 },
+    { "BLE:SEC?",             cmd_ble_sec,          0 },
     SCPI_CMD_LIST_END
     /* *IDN? / SYST:CAP? / SYST:HELP:HEAD? / SYST:ERR? / DATA:READ? 由 core 白送 */
 };
@@ -278,6 +364,7 @@ static void scan_init_task(void *arg) {
     (void)arg;
     wifi_scan_init();     /* NVS + netif + Wi-Fi STA */
     ble_scan_init();      /* NimBLE controller + host task */
+    ble_conn_init();      /* Security Manager config (KeyboardDisplay, MITM, SC) */
     vTaskDelete(NULL);
 }
 
@@ -306,5 +393,5 @@ void app_main(void) {
 
     xTaskCreate(usb_task, "usb", 6144, dev, 5, NULL);
     /* USB 起来后再异步初始化无线,避免阻塞枚举 */
-    xTaskCreate(scan_init_task, "scan_init", 8192, NULL, 4, NULL);
+    xTaskCreate(scan_init_task, "scan_init", 12288, NULL, 4, NULL);
 }
