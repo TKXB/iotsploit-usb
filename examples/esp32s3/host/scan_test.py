@@ -10,6 +10,7 @@ Usage:
     sudo python3 scan_test.py -d /dev/usbtmc0 # explicit device node
     sudo python3 scan_test.py --ble-secs 8    # longer BLE discovery
     sudo python3 scan_test.py --connect 0     # scan, then connect+pair device #0
+    sudo python3 scan_test.py --connect-mac D8:3A:DD:E4:7A:98   # ...by address
 
 Root is required because the usbtmc character device is root-only by default.
 A pyvisa equivalent is shown in the example README.
@@ -68,6 +69,16 @@ def scan_ble(dev, secs):
         print(f"  [{i:2}] {dev.cmd(f'BLE:SCAN? {i}')}")
 
 
+def find_index_by_mac(dev, mac):
+    """Return the scan index whose address matches mac, or None. Requires a
+    prior BLE:SCAN (results stay queryable in the device)."""
+    mac = mac.upper()
+    for i in range(int(dev.cmd("BLE:SCAN:COUNt?"))):
+        if dev.cmd(f"BLE:SCAN? {i}").upper().startswith(mac):
+            return i
+    return None
+
+
 CONN_STATE = {0: "idle", 1: "connecting", 2: "connected", 3: "failed"}
 PAIR_STATE = {0: "idle", 1: "in-progress", 2: "passkey-needed",
               3: "numcmp-needed", 4: "done", 5: "failed", 6: "display-key"}
@@ -117,6 +128,9 @@ def main():
     ap.add_argument("--ble-secs", type=int, default=5, help="BLE discovery duration")
     ap.add_argument("--connect", type=int, metavar="INDEX",
                     help="after the BLE scan, connect+pair with device #INDEX")
+    ap.add_argument("--connect-mac", metavar="MAC",
+                    help="after the BLE scan, connect+pair with this address "
+                         "(e.g. AA:BB:CC:DD:EE:FF)")
     ap.add_argument("--wifi-only", action="store_true")
     ap.add_argument("--ble-only", action="store_true")
     args = ap.parse_args()
@@ -145,6 +159,12 @@ def main():
         scan_ble(dev, args.ble_secs)
         if args.connect is not None:
             connect_and_pair(dev, args.connect)
+        elif args.connect_mac:
+            idx = find_index_by_mac(dev, args.connect_mac)
+            if idx is None:
+                print(f"\n  {args.connect_mac} not found in scan results")
+            else:
+                connect_and_pair(dev, idx)
 
     print("\nSYST:ERR? ->", dev.cmd("SYST:ERR?"))
     dev.close()
