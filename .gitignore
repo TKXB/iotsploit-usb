@@ -12,3 +12,6 @@ __pycache__/
 
 # nRF52840 example build artifacts
 examples/nrf52840/_build/
+
+# Rust host build artifacts
+examples/host-rs/target/
