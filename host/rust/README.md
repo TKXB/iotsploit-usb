@@ -55,8 +55,8 @@ binary works for the nRF52840, ESP32-S3, Pico2, and any future
 
 - **Linux**, **Windows**, or **macOS** PC.
   - Linux: uses the kernel `/dev/usbtmcN` driver by default (no extra deps).
-  - Windows/macOS: uses the raw USB backend (`rusb`/libusb). See
-    [Platform setup](#platform-setup) below.
+  - Windows/macOS: uses the raw USB backend (`nusb`, pure Rust — no libusb to
+    install). See [Platform setup](#platform-setup) below.
 - The **Rust toolchain** (`rustc` + `cargo`). Any recent stable version works.
   ```sh
   rustc --version   # e.g. 1.93.1
@@ -75,7 +75,7 @@ lsusb | grep 1209:0001
 # macOS
 system_profiler SPUSBDataType | grep -A5 1209
 
-# Windows (PowerShell, with libusb installed)
+# Windows (PowerShell)
 # Use Zadig to bind WinUSB first — see Platform setup below
 ```
 
@@ -86,9 +86,10 @@ cd host/rust
 cargo build --release
 ```
 
-The binary is at `target/release/iotsploit-host`. The core crate has **zero
-external dependencies** — the only optional dependency is `rusb` behind the
-`raw-usb` feature (needed on Windows/macOS, optional on Linux).
+The binary is at `target/release/iotsploit-host`. The default (Linux kernel)
+build has **zero external dependencies**. The `raw-usb` feature adds `nusb`
+(pure Rust — no libusb C library to install) plus `futures-lite`/`async-io`;
+it is needed on Windows/macOS and optional on Linux.
 
 **Platform-specific build:**
 
@@ -96,7 +97,7 @@ external dependencies** — the only optional dependency is `rusb` behind the
 # Linux (default: kernel backend, no extra deps)
 cargo build --release
 
-# Windows / macOS (raw USB backend via rusb/libusb)
+# Windows / macOS / Linux (raw USB backend via nusb)
 cargo build --release --features raw-usb
 
 # Linux with both backends (kernel + raw)
@@ -337,7 +338,7 @@ your shell ──► iotsploit-host (Rust) ──► Transport trait
                                            │
                           ┌────────────────┼────────────────┐
                           │                │                │
-                  /dev/usbtmcN      rusb/libusb       (future TCP)
+                  /dev/usbtmcN      nusb (raw USB)    (future TCP)
                   Linux kernel       Win / mac / Linux
                                            │
                                   USB cable (USBTMC)
@@ -348,8 +349,8 @@ your shell ──► iotsploit-host (Rust) ──► Transport trait
 
 - **Transport** (`transport.rs`): an abstract `write_msg` / `read_msg` trait.
   - `usbtmc_kernel.rs`: Linux `/dev/usbtmcN` backend (default, zero-dep).
-  - `usbtmc_raw.rs`: raw USBTMC bulk transfers via `rusb`/libusb
-    (`--features raw-usb`). Used on Windows/macOS and optionally on Linux.
+  - `usbtmc_raw.rs`: raw USBTMC bulk transfers via `nusb` (pure Rust,
+    `--features raw-usb`). Used on Windows/macOS and optionally on Linux.
 - **Session** (`session.rs`): appends the SCPI `\n` terminator, trims trailing
   CR/LF from text, and never decodes binary blocks as text.
 - **Block** (`block.rs`): parses/encodes IEEE 488.2 definite-length arbitrary
@@ -364,8 +365,8 @@ your shell ──► iotsploit-host (Rust) ──► Transport trait
 - **Workflow** (`workflow.rs`): generic `trigger → poll → count → fetch`
   engine driven by profile/descriptor metadata.
 
-The core crate is dependency-free on purpose. The only optional dependency
-is `rusb` behind the `raw-usb` feature.
+The default (kernel) build is dependency-free on purpose. The `raw-usb`
+feature adds `nusb` (pure Rust, no libusb) plus `futures-lite`/`async-io`.
 
 ## 10. Troubleshooting
 
@@ -423,13 +424,16 @@ The kernel `/dev/usbtmcN` backend works out of the box. For non-root access,
 install the udev rule from [§4](#4-granting-usb-access-one-time).
 
 For the raw USB backend (optional, useful when the kernel driver is
-unavailable):
+unavailable). `nusb` talks to usbfs directly, so no libusb package is needed —
+just permission to access the device (the same udev rule, or run with `sudo`):
 
 ```sh
-sudo apt install libusb-1.0-0-dev   # Debian/Ubuntu
 cargo build --release --features raw-usb
-iotsploit-host --backend raw --vid 1209 --pid 0001 idn
+sudo iotsploit-host --backend raw --vid 1209 --pid 0001 idn
 ```
+
+`nusb` detaches the kernel `usbtmc` driver automatically when it claims the
+interface.
 
 ### Windows
 
@@ -455,19 +459,16 @@ No NI-VISA dependency is required.
 
 ### macOS
 
-macOS also needs the raw USB backend:
+macOS also needs the raw USB backend (`nusb` uses IOKit directly — no
+Homebrew libusb required):
 
-1. Install libusb via Homebrew:
-   ```sh
-   brew install libusb
-   ```
-2. Build with the raw-usb feature:
+1. Build with the raw-usb feature:
    ```sh
    cargo build --release --features raw-usb
    # Apple Silicon:  aarch64-apple-darwin (default on M-series Macs)
    # Intel:          x86_64-apple-darwin
    ```
-3. Run (the first time macOS will prompt for USB permission):
+2. Run (the first time macOS will prompt for USB permission):
    ```sh
    iotsploit-host --backend raw --vid 1209 --pid 0001 idn
    ```
@@ -486,13 +487,15 @@ iotsploit-host-macos-aarch64
 
 ### Smoke-test checklist (per OS)
 
-| Check | Linux | Windows | macOS |
-|---|---|---|---|
-| `--backend auto idn` works | ✓ (kernel) | ✓ (raw) | ✓ (raw) |
-| `--backend raw --vid 1209 --pid 0001 idn` | ✓ | ✓ | ✓ |
-| `headers` returns all commands | ✓ | ✓ | ✓ |
-| `query '*IDN?'` matches expected IDN | ✓ | ✓ | ✓ |
-| `block-read 'DATA:READ? 64' --out /tmp/adc.bin` | ✓ | ✓ | ✓ |
-| `workflow wifi-scan` (esp32s3) | ✓ | ✓ | ✓ |
-| `workflow ble-scan` (nrf52840) | ✓ | ✓ | ✓ |
-| `describe` returns line-record descriptor | ✓ (if fw supports) | ✓ | ✓ |
+Legend: ✓ = verified on hardware; ▢ = expected to work but not yet verified on
+that OS (the raw `nusb` path is identical across OSes apart from the platform
+USB shim, so the Linux ✓ exercises the same code).
+
+| Check | Linux kernel | Linux raw (nusb) | Windows | macOS |
+|---|---|---|---|---|
+| `--backend ... idn` works | ✓ | ✓ | ▢ | ▢ |
+| `headers` / `describe` | ✓ | ✓ | ▢ | ▢ |
+| `query '*IDN?'` matches expected IDN | ✓ | ✓ | ▢ | ▢ |
+| `block-read 'DATA:READ? 64' --out f` | ✓ | ✓ | ▢ | ▢ |
+| `workflow wifi-scan` (esp32s3) | ✓ | ✓ | ▢ | ▢ |
+| `workflow ble-scan` (nrf52840) | ✓ | ▢ | ▢ | ▢ |

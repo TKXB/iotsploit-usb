@@ -16,13 +16,18 @@ path = "src/bin/iotsploit-host.rs"
 [features]
 default = ["kernel"]
 kernel = []                         # Linux /dev/usbtmcN backend
-raw-usb = ["rusb"]                  # Windows/Linux/macOS raw USBTMC backend
+# Cross-platform (Windows/Linux/macOS) raw USBTMC backend. `nusb` is pure Rust
+# (no libusb C dependency); `futures-lite` bridges its async transfers to the
+# blocking Transport trait, and `async-io` provides the transfer timeout timer.
+raw-usb = ["nusb", "futures-lite", "async-io"]
 
-# No serde, no toml, no serde_json — the host crate stays zero-dependency.
+# No serde, no toml, no serde_json — the host crate stays dependency-light.
 # Profile/descriptor/workflow modules parse line-record text with std only.
 
 [dependencies]
-rusb = { version = "0.9", optional = true }
+nusb = { version = "0.1", optional = true }
+futures-lite = { version = "2", optional = true }
+async-io = { version = "2", optional = true }
 
 [profile.release]
 opt-level = 2

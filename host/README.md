@@ -11,9 +11,9 @@ A generic, cross-platform CLI host (`iotsploit-host`). It auto-detects any
 `SYSTem:HELP:HEADers?`, and supports text queries, binary-block reads,
 capabilities parsing, error-queue draining, an interactive REPL,
 line-record profiles, a generic workflow engine, and on-device descriptor
-querying (`SYSTem:HELP:DESCription?`). The core crate is zero-dependency;
-the only optional dependency is `rusb` behind the `raw-usb` feature for
-Windows/macOS.
+querying (`SYSTem:HELP:DESCription?`). The default (Linux kernel) build is
+zero-dependency; the `raw-usb` feature pulls in `nusb` (pure-Rust, no libusb)
+plus `futures-lite`/`async-io` for cross-platform Windows/macOS/Linux support.
 
 See [rust/README.md](rust/README.md) for full usage.
 

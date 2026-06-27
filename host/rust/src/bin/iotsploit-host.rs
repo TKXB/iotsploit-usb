@@ -1,7 +1,7 @@
 //! `iotsploit-host` CLI binary.
 //!
 //! A command-line tool for talking to `iotsploit-usb` devices over SCPI/USBTMC.
-//! Supports multiple transport backends (kernel `/dev/usbtmcN`, raw libusb),
+//! Supports multiple transport backends (kernel `/dev/usbtmcN`, raw `nusb`),
 //! line-record profile metadata, workflow execution, and device descriptors.
 
 use std::io::{self, Write};

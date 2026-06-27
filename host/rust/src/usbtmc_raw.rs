@@ -1,16 +1,28 @@
-//! Raw USBTMC backend using `rusb` (libusb-1.0).
+//! Raw USBTMC backend using `nusb` (pure-Rust, cross-platform USB).
 //!
 //! Implements the USBTMC bulk-OUT/IN framing directly, without relying on a
 //! kernel USBTMC driver. This enables Windows and macOS support, and is also
 //! useful on Linux when the kernel driver is unavailable.
 //!
+//! Unlike a libusb-backed transport, `nusb` talks to the OS USB stack directly
+//! (usbfs / WinUSB / IOKit), so there is no C dependency to build or ship. Its
+//! transfers are async; we bridge them to the blocking [`Transport`] trait with
+//! `futures_lite::block_on`, racing each transfer against an `async-io` timer to
+//! preserve a configurable timeout.
+//!
 //! Built behind the `raw-usb` cargo feature: `cargo build --features raw-usb`.
 
 #![cfg(feature = "raw-usb")]
 
-use crate::{transport::Transport, Error, Result};
-use rusb::{DeviceHandle, GlobalContext};
+use std::future::Future;
 use std::time::Duration;
+
+use async_io::Timer;
+use futures_lite::FutureExt;
+use nusb::transfer::{Direction, EndpointType, RequestBuffer};
+use nusb::{Device, Interface};
+
+use crate::{transport::Transport, Error, Result};
 
 // USBTMC protocol constants (USB TMC Class Specification rev 1.0).
 const MSGID_DEV_DEP_MSG_OUT: u8 = 1; // host → device (command data)
@@ -23,12 +35,13 @@ const EOM_BIT: u8 = 0x01;
 const USB_CLASS_APP_SPEC: u8 = 0xFE;
 const USB_SUBCLASS_USBTMC: u8 = 0x03;
 
-/// Raw USBTMC transport backed by `rusb`/libusb.
+/// Raw USBTMC transport backed by `nusb`.
 pub struct UsbtmcRaw {
-    handle: DeviceHandle<GlobalContext>,
+    // The claimed interface keeps the underlying device alive; dropping it
+    // releases the interface (no manual Drop impl needed).
+    interface: Interface,
     ep_out: u8,
     ep_in: u8,
-    max_packet_out: usize,
     max_packet_in: usize,
     btag: u8,
     timeout: Duration,
@@ -38,61 +51,44 @@ impl UsbtmcRaw {
     /// Open a device by VID/PID. If multiple devices share the same VID/PID,
     /// the first match is used (use [`Self::open_by_serial`] to disambiguate).
     pub fn open_vid_pid(vid: u16, pid: u16) -> Result<Self> {
-        let handle = rusb::open_device_with_vid_pid(vid, pid)
-            .ok_or_else(|| Error::Device(format!("no USB device found with VID={vid:04x} PID={pid:04x}")))?;
-        Self::from_handle(handle)
+        let info = nusb::list_devices()
+            .map_err(map_io_err)?
+            .find(|d| d.vendor_id() == vid && d.product_id() == pid)
+            .ok_or_else(|| {
+                Error::Device(format!("no USB device found with VID={vid:04x} PID={pid:04x}"))
+            })?;
+        let device = info.open().map_err(map_io_err)?;
+        Self::from_device(device)
     }
 
     /// Open a device by USB serial number string.
     pub fn open_by_serial(serial: &str) -> Result<Self> {
-        let list = rusb::devices().map_err(map_usb_err)?;
-        for device in list.iter() {
-            let desc = match device.device_descriptor() {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            let handle = match device.open() {
-                Ok(h) => h,
-                Err(_) => continue,
-            };
-            if let Ok(langs) = handle.read_languages(Duration::from_secs(1)) {
-                if let Some(&lang) = langs.first() {
-                    if let Ok(s) = handle.read_serial_number_string(lang, &desc, Duration::from_secs(1)) {
-                        if s == serial {
-                            return Self::from_handle(handle);
-                        }
-                    }
-                }
-            }
-        }
-        Err(Error::Device(format!("no USB device with serial `{serial}` found")))
+        // `nusb` exposes the serial number from enumeration, so no per-device
+        // open + string-descriptor round-trip is needed.
+        let info = nusb::list_devices()
+            .map_err(map_io_err)?
+            .find(|d| d.serial_number() == Some(serial))
+            .ok_or_else(|| Error::Device(format!("no USB device with serial `{serial}` found")))?;
+        let device = info.open().map_err(map_io_err)?;
+        Self::from_device(device)
     }
 
     /// Auto-detect a single USBTMC device by interface class.
     pub fn auto_detect() -> Result<Self> {
-        let list = rusb::devices().map_err(map_usb_err)?;
-        let mut matches = Vec::new();
-        for device in list.iter() {
-            let config = match device.active_config_descriptor() {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let found = config.interfaces()
-                .flat_map(|i| i.descriptors())
-                .find(|d: &rusb::InterfaceDescriptor| d.class_code() == USB_CLASS_APP_SPEC
-                    && d.sub_class_code() == USB_SUBCLASS_USBTMC);
-            if let Some(idesc) = found {
-                matches.push((device, idesc.interface_number()));
-            }
-        }
+        let mut matches: Vec<_> = nusb::list_devices()
+            .map_err(map_io_err)?
+            .filter(|d| {
+                d.interfaces()
+                    .any(|i| i.class() == USB_CLASS_APP_SPEC && i.subclass() == USB_SUBCLASS_USBTMC)
+            })
+            .collect();
         match matches.len() {
             0 => Err(Error::Device(
                 "no USBTMC interface found on any USB device".into(),
             )),
             1 => {
-                let (device, iface_num) = matches.into_iter().next().unwrap();
-                let handle = device.open().map_err(map_usb_err)?;
-                Self::from_handle_with_iface(handle, iface_num)
+                let device = matches.remove(0).open().map_err(map_io_err)?;
+                Self::from_device(device)
             }
             n => Err(Error::Device(format!(
                 "found {n} USBTMC devices; specify one with --vid/--pid or --serial"
@@ -100,77 +96,66 @@ impl UsbtmcRaw {
         }
     }
 
-    /// Build from an already-opened device handle, auto-detecting the USBTMC
-    /// interface and endpoints.
-    fn from_handle(handle: DeviceHandle<GlobalContext>) -> Result<Self> {
-        let config = handle
-            .device()
-            .active_config_descriptor()
-            .map_err(map_usb_err)?;
-        for iface in config.interfaces() {
-            for idesc in iface.descriptors() {
-                if idesc.class_code() == USB_CLASS_APP_SPEC
-                    && idesc.sub_class_code() == USB_SUBCLASS_USBTMC
-                {
-                    return Self::from_handle_with_iface(handle, idesc.interface_number());
-                }
-            }
-        }
-        Err(Error::Device(
-            "device has no USBTMC interface (class 0xFE/0x03)".into(),
-        ))
-    }
+    /// Locate the USBTMC interface + bulk endpoints on an opened device, claim
+    /// the interface, and build the transport.
+    fn from_device(device: Device) -> Result<Self> {
+        let config = device
+            .active_configuration()
+            .map_err(|e| Error::Device(format!("no active USB configuration: {e}")))?;
 
-    /// Build from an opened handle and a known interface number.
-    fn from_handle_with_iface(
-        handle: DeviceHandle<GlobalContext>,
-        iface_num: u8,
-    ) -> Result<Self> {
-        let config = handle
-            .device()
-            .active_config_descriptor()
-            .map_err(map_usb_err)?;
-
-        // Find the interface and its endpoints.
+        let mut iface_num = None;
         let mut ep_out = None;
         let mut ep_in = None;
-        let mut max_out = 64usize;
         let mut max_in = 64usize;
 
-        for iface in config.interfaces() {
-            for idesc in iface.descriptors() {
-                if idesc.interface_number() != iface_num {
+        for alt in config.interface_alt_settings() {
+            if alt.class() != USB_CLASS_APP_SPEC || alt.subclass() != USB_SUBCLASS_USBTMC {
+                continue;
+            }
+            iface_num = Some(alt.interface_number());
+            for ep in alt.endpoints() {
+                if ep.transfer_type() != EndpointType::Bulk {
                     continue;
                 }
-                for ep in idesc.endpoint_descriptors() {
-                    let addr = ep.address();
-                    if ep.direction() == rusb::Direction::Out {
-                        ep_out = Some(addr);
-                        max_out = ep.max_packet_size().max(64) as usize;
-                    } else if ep.direction() == rusb::Direction::In && ep.transfer_type() == rusb::TransferType::Bulk {
-                        ep_in = Some(addr);
-                        max_in = ep.max_packet_size().max(64) as usize;
+                match ep.direction() {
+                    Direction::Out => {
+                        ep_out = Some(ep.address());
+                    }
+                    Direction::In => {
+                        ep_in = Some(ep.address());
+                        max_in = (ep.max_packet_size() as usize).max(64);
                     }
                 }
             }
+            break;
         }
 
-        let ep_out = ep_out.ok_or_else(|| Error::Device("USBTMC interface has no bulk-OUT endpoint".into()))?;
-        let ep_in = ep_in.ok_or_else(|| Error::Device("USBTMC interface has no bulk-IN endpoint".into()))?;
+        let iface_num = iface_num
+            .ok_or_else(|| Error::Device("device has no USBTMC interface (class 0xFE/0x03)".into()))?;
+        let ep_out =
+            ep_out.ok_or_else(|| Error::Device("USBTMC interface has no bulk-OUT endpoint".into()))?;
+        let ep_in =
+            ep_in.ok_or_else(|| Error::Device("USBTMC interface has no bulk-IN endpoint".into()))?;
 
-        // Detach kernel driver if active (Linux: usbtmc kernel driver).
-        if handle.kernel_driver_active(iface_num).unwrap_or(false) {
-            let _ = handle.detach_kernel_driver(iface_num);
-        }
-        handle
-            .claim_interface(iface_num)
+        // On Linux the kernel usbtmc driver may hold the interface; detach it
+        // first. `detach_and_claim_interface` is a no-op detach on Windows/macOS
+        // (where no such kernel driver exists), so it is the portable choice.
+        let interface = device
+            .detach_and_claim_interface(iface_num)
             .map_err(|e| Error::Device(format!("failed to claim USBTMC interface: {e}")))?;
 
+        // A previously attached kernel driver (or an aborted prior session) can
+        // leave the bulk endpoints with a non-zero data toggle; a fresh raw
+        // claim that starts from toggle 0 would then stall forever. Clearing
+        // halt on both endpoints resets host+device toggle. Best-effort: on a
+        // freshly enumerated device this is a harmless no-op.
+        let _ = interface.clear_halt(ep_out);
+        let _ = interface.clear_halt(ep_in);
+
         Ok(Self {
-            handle,
+            interface,
             ep_out,
             ep_in,
-            max_packet_out: max_out,
             max_packet_in: max_in,
             btag: 0,
             timeout: Duration::from_secs(5),
@@ -192,26 +177,31 @@ impl UsbtmcRaw {
         self.btag
     }
 
-    /// Build a DEV_DEP_MSG_OUT header + payload, padded to a multiple of
-    /// `max_packet_out`.
+    /// Build a DEV_DEP_MSG_OUT header + payload, zero-padded to a 4-byte
+    /// boundary as required by the USBTMC spec (§3.2.1). bTag/bTagInverse are
+    /// placeholders filled by the caller.
+    ///
+    /// Note: padding is to 4 bytes, *not* to `wMaxPacketSize`. Padding to a full
+    /// max-packet boundary would make the bulk-OUT exactly fill a packet, and a
+    /// device expecting a terminating short packet (e.g. TinyUSB USBTMC) would
+    /// then wait forever and never produce a response.
     fn build_msg_out(&self, data: &[u8], eom: bool) -> Vec<u8> {
         let transfer_size = data.len() as u32;
         let total = USBTMC_HEADER_SIZE + data.len();
-        // Pad to multiple of max_packet_out (bulk transfer requirement).
-        let padded = total.div_ceil(self.max_packet_out) * self.max_packet_out;
-        let mut buf = Vec::with_capacity(padded.max(total));
-        buf.push(MSGID_DEV_DEP_MSG_OUT);
-        // bTag and bTagInverse are filled in by the caller
-        buf.push(0); // placeholder bTag
-        buf.push(0); // placeholder ~bTag
-        buf.extend_from_slice(&transfer_size.to_le_bytes());
-        buf.push(if eom { EOM_BIT } else { 0 });
-        buf.extend_from_slice(&[0, 0, 0, 0]); // reserved
+        let padded = total.div_ceil(4) * 4;
+        // Bulk-OUT header (USBTMC §3.2.1): MsgID, bTag, ~bTag, Reserved(0),
+        // then the MsgID-specific 8 bytes — TransferSize(u32 LE) at offset 4..8
+        // and bmTransferAttributes (bit0 = EOM) at offset 8.
+        let mut buf = Vec::with_capacity(padded);
+        buf.push(MSGID_DEV_DEP_MSG_OUT); // 0
+        buf.push(0); // 1: placeholder bTag
+        buf.push(0); // 2: placeholder ~bTag
+        buf.push(0); // 3: Reserved
+        buf.extend_from_slice(&transfer_size.to_le_bytes()); // 4..8: TransferSize
+        buf.push(if eom { EOM_BIT } else { 0 }); // 8: bmTransferAttributes
+        buf.extend_from_slice(&[0, 0, 0]); // 9..12: Reserved
         buf.extend_from_slice(data);
-        // Zero-pad to max_packet_out boundary
-        while buf.len() < padded {
-            buf.push(0);
-        }
+        buf.resize(padded, 0); // zero-pad to 4-byte alignment
         buf
     }
 
@@ -221,11 +211,25 @@ impl UsbtmcRaw {
         let mut msg = self.build_msg_out(data, true);
         msg[1] = btag;
         msg[2] = !btag;
+        self.bulk_out(msg)
+    }
 
-        self.handle
-            .write_bulk(self.ep_out, &msg, self.timeout)
-            .map_err(map_usb_err)?;
+    /// Submit one bulk-OUT transfer and wait (with timeout) for completion.
+    fn bulk_out(&self, data: Vec<u8>) -> Result<()> {
+        let comp = block_on_timeout(self.interface.bulk_out(self.ep_out, data), self.timeout)?;
+        comp.status.map_err(map_transfer_err)?;
         Ok(())
+    }
+
+    /// Submit one bulk-IN transfer and wait (with timeout) for completion,
+    /// returning the received bytes.
+    fn bulk_in(&self, len: usize) -> Result<Vec<u8>> {
+        let comp = block_on_timeout(
+            self.interface.bulk_in(self.ep_in, RequestBuffer::new(len)),
+            self.timeout,
+        )?;
+        comp.status.map_err(map_transfer_err)?;
+        Ok(comp.data)
     }
 
     /// Request and read a DEV_DEP_MSG_IN (device → host response).
@@ -234,11 +238,11 @@ impl UsbtmcRaw {
     /// response on bulk-IN. A DEV_DEP_MSG_IN response is a single 12-byte
     /// header followed by `TransferSize` payload bytes; only the *first* USB
     /// packet of the response carries the header, the rest are pure payload.
-    /// The payload may span several USB packets / `read()` calls, so we parse
-    /// the header once and then accumulate exactly `TransferSize` bytes before
-    /// checking EOM. If the device could not fit the whole logical message in
-    /// one response (EOM clear), we issue another request and append, until EOM
-    /// or `max_len` is reached.
+    /// The payload may span several USB packets / reads, so we parse the header
+    /// once and then accumulate exactly `TransferSize` bytes before checking
+    /// EOM. If the device could not fit the whole logical message in one
+    /// response (EOM clear), we issue another request and append, until EOM or
+    /// `max_len` is reached.
     fn read_msg_in(&mut self, max_len: usize) -> Result<Vec<u8>> {
         let mpi = self.max_packet_in.max(64);
         let mut result = Vec::new();
@@ -247,36 +251,30 @@ impl UsbtmcRaw {
             // Ask for as much as the caller still wants in this response.
             let want = max_len.saturating_sub(result.len()).max(1);
             let btag = self.next_btag();
-            let transfer_size = (want as u32).min(u32::MAX);
+            let transfer_size = want as u32;
 
-            // Build and send the request header.
+            // REQUEST_DEV_DEP_MSG_IN header (USBTMC §3.3): MsgID, bTag, ~bTag,
+            // Reserved(0), TransferSize(u32 LE) at 4..8, bmTransferAttributes at
+            // 8, TermChar at 9, Reserved 10..12. req[3] stays 0 (Reserved).
             let mut req = vec![0u8; USBTMC_HEADER_SIZE];
             req[0] = MSGID_REQUEST_DEV_DEP_MSG_IN;
             req[1] = btag;
             req[2] = !btag;
-            req[3..7].copy_from_slice(&transfer_size.to_le_bytes());
-            req[7] = 0; // no transfer attributes
-            // req[8..12] already zero
-            while req.len() < self.max_packet_out {
-                req.push(0);
-            }
-            self.handle
-                .write_bulk(self.ep_out, &req, self.timeout)
-                .map_err(map_usb_err)?;
+            req[4..8].copy_from_slice(&transfer_size.to_le_bytes());
+            // req[8] bmTransferAttributes = 0 (no TermChar), req[9..12] = 0.
+            // The 12-byte header is 4-byte aligned and shorter than
+            // wMaxPacketSize, so it is already a terminating short packet — no
+            // padding to max-packet size (see build_msg_out).
+            self.bulk_out(req)?;
 
             // First read of this response: carries the header. Size the buffer
             // to hold the whole expected response so a small one usually
             // arrives in a single read (and its trailing short packet ends it).
             let cap = (USBTMC_HEADER_SIZE + want).div_ceil(mpi) * mpi;
-            let mut buf = vec![0u8; cap.max(mpi)];
-            let n = self
-                .handle
-                .read_bulk(self.ep_in, &mut buf, self.timeout)
-                .map_err(map_usb_err)?;
+            let buf = self.bulk_in(cap.max(mpi))?;
+            let n = buf.len();
             if n < USBTMC_HEADER_SIZE {
-                return Err(Error::Device(format!(
-                    "USBTMC response too short: {n} bytes"
-                )));
+                return Err(Error::Device(format!("USBTMC response too short: {n} bytes")));
             }
             if buf[0] != MSGID_DEV_DEP_MSG_IN {
                 return Err(Error::Device(format!(
@@ -291,8 +289,10 @@ impl UsbtmcRaw {
                 )));
             }
 
-            let payload_size = u32::from_le_bytes([buf[3], buf[4], buf[5], buf[6]]) as usize;
-            let eom = (buf[7] & EOM_BIT) != 0;
+            // DEV_DEP_MSG_IN header: TransferSize(u32 LE) at 4..8,
+            // bmTransferAttributes (bit0 = EOM) at offset 8.
+            let payload_size = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
+            let eom = (buf[8] & EOM_BIT) != 0;
 
             // Payload bytes carried by the first read.
             let avail = n - USBTMC_HEADER_SIZE;
@@ -305,17 +305,13 @@ impl UsbtmcRaw {
             // polluting the next transfer.
             while got < payload_size {
                 let remaining = payload_size - got;
-                let mut more = vec![0u8; remaining.div_ceil(mpi) * mpi + mpi];
-                let m = self
-                    .handle
-                    .read_bulk(self.ep_in, &mut more, self.timeout)
-                    .map_err(map_usb_err)?;
-                if m == 0 {
+                let more = self.bulk_in(remaining.div_ceil(mpi) * mpi + mpi)?;
+                if more.is_empty() {
                     return Err(Error::Device(
                         "USBTMC IN ended before the declared payload was received".into(),
                     ));
                 }
-                let take = m.min(remaining);
+                let take = more.len().min(remaining);
                 result.extend_from_slice(&more[..take]);
                 got += take;
             }
@@ -339,34 +335,28 @@ impl Transport for UsbtmcRaw {
     }
 }
 
-impl Drop for UsbtmcRaw {
-    fn drop(&mut self) {
-        // Release the interface so other drivers (e.g. kernel usbtmc) can
-        // reclaim it.
-        let iface = self.handle
-            .device()
-            .active_config_descriptor()
-            .ok()
-            .and_then(|c| {
-                c.interfaces()
-                    .flat_map(|i| i.descriptors())
-                    .find(|d: &rusb::InterfaceDescriptor| d.class_code() == USB_CLASS_APP_SPEC && d.sub_class_code() == USB_SUBCLASS_USBTMC)
-                    .map(|d| d.interface_number())
-            });
-        if let Some(iface_num) = iface {
-            let _ = self.handle.release_interface(iface_num);
-        }
-    }
+/// Drive a `nusb` transfer future to completion on the calling thread, racing it
+/// against an `async-io` timer. Returns [`Error::Timeout`] if the timer wins
+/// (dropping the transfer future cancels the in-flight transfer).
+fn block_on_timeout<F, T>(fut: F, timeout: Duration) -> Result<T>
+where
+    F: Future<Output = T>,
+{
+    futures_lite::future::block_on(async move {
+        let work = async move { Some(fut.await) };
+        let timer = async move {
+            Timer::after(timeout).await;
+            None
+        };
+        work.or(timer).await
+    })
+    .ok_or(Error::Timeout)
 }
 
-fn map_usb_err(e: rusb::Error) -> Error {
-    use rusb::Error::*;
-    match e {
-        Access => Error::Device("USB access denied (permissions?)".into()),
-        NoDevice => Error::Device("USB device disconnected".into()),
-        NotFound => Error::Device("USB device not found".into()),
-        Busy => Error::Device("USB device busy (kernel driver attached?)".into()),
-        Timeout => Error::Timeout,
-        other => Error::Device(format!("USB error: {other}")),
-    }
+fn map_io_err(e: std::io::Error) -> Error {
+    Error::Device(format!("USB error: {e}"))
+}
+
+fn map_transfer_err(e: nusb::transfer::TransferError) -> Error {
+    Error::Device(format!("USB transfer error: {e}"))
 }
