@@ -55,6 +55,8 @@ typedef struct {
     const char *fetch_query;
     const char *state_query;       /* interactive only */
     const char *success_value;     /* interactive only */
+    const char *const *failed_values;  /* failure state values, NULL if none */
+    size_t failed_value_count;
     uint32_t timeout_ms;
     uint32_t poll_ms;
 } usbscpi_workflow_desc_t;

@@ -22,6 +22,7 @@ int          stub_transmit_rejected = 0;
 int          stub_start_bus_read = 0;
 uint8_t      stub_last_tx[512];
 uint32_t     stub_last_tx_len = 0;
+bool         stub_last_tx_eom = false;
 
 /* TinyUSB-provided callbacks the glue defines (no public prototypes upstream) */
 void tud_usbtmc_open_cb(uint8_t interface_id);
@@ -36,7 +37,61 @@ static void reset_stub(void) {
     stub_transmit_rejected = 0;
     stub_start_bus_read = 0;
     stub_last_tx_len = 0;
+    stub_last_tx_eom = false;
     memset(stub_last_tx, 0, sizeof(stub_last_tx));
+}
+
+/* A response larger than the host's per-request TransferSize must be delivered
+ * over several bulk-IN requests: each chunk is clamped to the requested size,
+ * EOM is set only on the final chunk, and every byte is delivered exactly once.
+ * (Regression for "block: declared payload longer than available bytes" / the
+ * device hanging with a half-drained IN endpoint on large `describe` replies.) */
+static void test_large_response_chunks_across_in_requests(void) {
+    reset_stub();
+
+    /* Build a 1500-byte response with a recognizable per-byte pattern. */
+    enum { RESP_LEN = 1500u, CHUNK = 512u };
+    static uint8_t resp[RESP_LEN];
+    for (unsigned i = 0; i < RESP_LEN; i++) {
+        resp[i] = (uint8_t)(i & 0xFFu);
+    }
+    assert(usbscpi_tinyusb_queue_response(resp, RESP_LEN) == 0);
+
+    stub_state = STUB_STATE_TX_REQUESTED;
+    usbtmc_msg_request_dev_dep_in req = { .TransferSize = CHUNK };
+
+    static uint8_t reassembled[RESP_LEN];
+    uint32_t total = 0;
+    int chunks = 0;
+    for (;;) {
+        assert(tud_usbtmc_msgBulkIn_request_cb(&req));
+        assert(stub_transmit_ok == chunks + 1);
+        /* Each chunk must respect the host's TransferSize limit. */
+        assert(stub_last_tx_len <= CHUNK);
+        assert(total + stub_last_tx_len <= RESP_LEN);
+        memcpy(reassembled + total, stub_last_tx, stub_last_tx_len);
+        total += stub_last_tx_len;
+        chunks++;
+        bool eom = stub_last_tx_eom;
+        /* EOM exactly when (and only when) we have reached the end. */
+        assert(eom == (total == RESP_LEN));
+        assert(tud_usbtmc_msgBulkIn_complete_cb());
+        if (eom) {
+            break;
+        }
+    }
+
+    assert(chunks == 3); /* 512 + 512 + 476 */
+    assert(total == RESP_LEN);
+    assert(memcmp(reassembled, resp, RESP_LEN) == 0);
+
+    /* The response is fully drained: a further IN request yields the dummy. */
+    stub_transmit_ok = 0;
+    stub_last_tx_len = 0;
+    assert(tud_usbtmc_msgBulkIn_request_cb(&req));
+    assert(stub_transmit_ok == 1);
+    assert(stub_last_tx_len == 1);
+    assert(tud_usbtmc_msgBulkIn_complete_cb());
 }
 
 /* The interface-open callback must arm the first bulk-OUT read; otherwise the
@@ -115,11 +170,13 @@ static void test_query_buffers_then_transmits_on_in(void) {
      * dummy rather than the 2-byte queued response. */
     assert(stub_transmit_ok == 1);
     assert(stub_last_tx_len == 1);
+    assert(tud_usbtmc_msgBulkIn_complete_cb()); /* settle TX state for the next test */
 }
 
 int main(void) {
     test_open_arms_bus_read();
     test_query_buffers_then_transmits_on_in();
+    test_large_response_chunks_across_in_requests();
     puts("usbscpi tinyusb glue tests passed");
     return 0;
 }

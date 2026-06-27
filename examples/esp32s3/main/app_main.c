@@ -14,7 +14,7 @@
 /* ---------- 静态缓冲(等价 pico2,避免动态分配) ---------- */
 static uint8_t s_storage[2048];
 static char    s_line[96];
-static uint8_t s_io[256];
+static uint8_t s_io[4096];
 
 /* ---------- ADC oneshot 句柄 ---------- */
 static adc_oneshot_unit_handle_t s_adc1;
@@ -207,6 +207,144 @@ static scpi_result_t cmd_ble_sec(scpi_t *ctx) {
     return SCPI_RES_OK;
 }
 
+/* ---------- Descriptor metadata (SYSTem:HELP:DESCription?) ---------- */
+
+static const usbscpi_param_desc_t desc_gpio_set_params[] = {
+    { "pin",   "u32",   true  },
+    { "value", "bool",  true  },
+};
+static const usbscpi_param_desc_t desc_gpio_get_params[] = {
+    { "pin", "u32", true },
+};
+static const usbscpi_param_desc_t desc_adc_read_params[] = {
+    { "channel", "u32", false },
+};
+static const usbscpi_param_desc_t desc_wlan_scan_get_params[] = {
+    { "index", "u32", true },
+};
+static const usbscpi_param_desc_t desc_ble_scan_params[] = {
+    { "duration", "u32", false },
+};
+static const usbscpi_param_desc_t desc_ble_scan_get_params[] = {
+    { "index", "u32", true },
+};
+static const usbscpi_param_desc_t desc_ble_conn_params[] = {
+    { "index", "u32", true },
+};
+static const usbscpi_param_desc_t desc_ble_pair_passkey_params[] = {
+    { "key", "string", true },
+};
+static const usbscpi_param_desc_t desc_ble_pair_confirm_params[] = {
+    { "accept", "bool", false },
+};
+
+static const usbscpi_command_desc_t desc_commands[] = {
+    { "GPIO:SET",              "command", "Set GPIO output level",
+      desc_gpio_set_params,  2, "none" },
+    { "GPIO:GET?",             "query",   "Read GPIO input level",
+      desc_gpio_get_params,  1, "u32" },
+    { "ADC:READ?",             "query",   "Read ADC value",
+      desc_adc_read_params,  1, "u32" },
+    { "WLAN:SCAN",             "command", "Trigger a Wi-Fi SSID scan",
+      NULL, 0, NULL },
+    { "WLAN:SCAN:DONE?",       "query",   "1 = scan finished, 0 = still scanning",
+      NULL, 0, "bool" },
+    { "WLAN:SCAN:COUNt?",      "query",   "Number of access points found",
+      NULL, 0, "u32" },
+    { "WLAN:SCAN?",            "query",   "Get scan result by index (ssid,rssi,channel,authmode,bssid)",
+      desc_wlan_scan_get_params, 1, "string" },
+    { "BLE:SCAN",              "command", "Start BLE scan for N seconds",
+      desc_ble_scan_params, 1, NULL },
+    { "BLE:SCAN:DONE?",        "query",   "1 = scan finished, 0 = still scanning",
+      NULL, 0, "bool" },
+    { "BLE:SCAN:COUNt?",       "query",   "Number of BLE devices found",
+      NULL, 0, "u32" },
+    { "BLE:SCAN?",             "query",   "Get BLE scan result by index (addr,rssi,name,adv_type)",
+      desc_ble_scan_get_params, 1, "string" },
+    { "BLE:CONNect",          "command", "Connect to BLE scan result by index",
+      desc_ble_conn_params, 1, NULL },
+    { "BLE:CONNect:STATe?",   "query",   "0=idle 1=connecting 2=connected 3=failed",
+      NULL, 0, "u32" },
+    { "BLE:CONNect:STATus?",  "query",   "Last disconnect status code",
+      NULL, 0, "u32" },
+    { "BLE:DISConnect",       "command", "Disconnect active BLE connection",
+      NULL, 0, NULL },
+    { "BLE:PAIR",             "command", "Initiate BLE pairing",
+      NULL, 0, NULL },
+    { "BLE:PAIR:STATe?",      "query",   "0=idle 1=in-progress 2=passkey-needed 3=numcmp-needed 4=done 5=failed 6=display-key",
+      NULL, 0, "u32" },
+    { "BLE:PAIR:PASSKey",     "command", "Enter the 6-digit passkey shown on the peer",
+      desc_ble_pair_passkey_params, 1, NULL },
+    { "BLE:PAIR:PASSKey?",    "query",   "Get the passkey to enter on the peer",
+      NULL, 0, "string" },
+    { "BLE:PAIR:NUMCmp?",     "query",   "Get the numeric comparison value",
+      NULL, 0, "u32" },
+    { "BLE:PAIR:CONFirm",     "command", "Confirm (1) or reject (0) numeric comparison",
+      desc_ble_pair_confirm_params, 1, NULL },
+    { "BLE:SEC?",             "query",   "Security info: mac,level,encrypted,authenticated,bonded,key_size",
+      NULL, 0, "string" },
+};
+
+static const char *const desc_ble_connect_failed[] = { "3" };
+
+static const usbscpi_workflow_desc_t desc_workflows[] = {
+    {
+        .name = "wifi-scan",
+        .type = "trigger_poll_fetch",
+        .summary = "Scan for Wi-Fi access points",
+        .trigger_cmd = "WLAN:SCAN",
+        .done_query = "WLAN:SCAN:DONE?",
+        .done_value = "1",
+        .count_query = "WLAN:SCAN:COUNt?",
+        .fetch_query = "WLAN:SCAN?",
+        .state_query = NULL,
+        .success_value = NULL,
+        .failed_values = NULL,
+        .failed_value_count = 0,
+        .timeout_ms = 15000,
+        .poll_ms = 250,
+    },
+    {
+        .name = "ble-scan",
+        .type = "trigger_poll_fetch",
+        .summary = "Scan for BLE devices",
+        .trigger_cmd = "BLE:SCAN",
+        .done_query = "BLE:SCAN:DONE?",
+        .done_value = "1",
+        .count_query = "BLE:SCAN:COUNt?",
+        .fetch_query = "BLE:SCAN?",
+        .state_query = NULL,
+        .success_value = NULL,
+        .failed_values = NULL,
+        .failed_value_count = 0,
+        .timeout_ms = 30000,
+        .poll_ms = 500,
+    },
+    {
+        .name = "ble-connect",
+        .type = "trigger_poll_interactive",
+        .summary = "Connect to a BLE device and pair",
+        .trigger_cmd = "BLE:CONNect",
+        .done_query = NULL,
+        .done_value = NULL,
+        .count_query = NULL,
+        .fetch_query = NULL,
+        .state_query = "BLE:CONNect:STATe?",
+        .success_value = "2",
+        .failed_values = desc_ble_connect_failed,
+        .failed_value_count = 1,
+        .timeout_ms = 15000,
+        .poll_ms = 200,
+    },
+};
+
+static const usbscpi_descriptor_t s_descriptor = {
+    .commands = desc_commands,
+    .command_count = sizeof(desc_commands) / sizeof(desc_commands[0]),
+    .workflows = desc_workflows,
+    .workflow_count = sizeof(desc_workflows) / sizeof(desc_workflows[0]),
+};
+
 static const scpi_command_t demo_commands[] = {
     { "GPIO:SET",  cmd_gpio_set, 0 },
     { "GPIO:GET?", cmd_gpio_get, 0 },
@@ -385,6 +523,7 @@ void app_main(void) {
         .io_buf_len    = sizeof(s_io),
         .proto         = 1,
         .mtu           = 256,
+        .descriptor    = &s_descriptor,
     };
 
     usbscpi_t *dev = usbscpi_init(s_storage, sizeof(s_storage), &cfg);

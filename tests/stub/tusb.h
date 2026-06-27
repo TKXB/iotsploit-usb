@@ -28,16 +28,17 @@ extern int          stub_transmit_rejected; /* transmit calls refused (wrong sta
 extern int          stub_start_bus_read;    /* start_bus_read calls */
 extern uint8_t      stub_last_tx[512];
 extern uint32_t     stub_last_tx_len;
+extern bool         stub_last_tx_eom;       /* EOM flag of the most recent transmit */
 
 static inline bool tud_usbtmc_transmit_dev_msg_data(const void *data, size_t len,
                                                     bool endOfMessage, bool usingTermChar) {
-    (void)endOfMessage;
     (void)usingTermChar;
     if (stub_state != STUB_STATE_TX_REQUESTED) {
         stub_transmit_rejected++;
         return false; /* mirrors TU_VERIFY(state == STATE_TX_REQUESTED) */
     }
     stub_last_tx_len = (uint32_t)len;
+    stub_last_tx_eom = endOfMessage;
     if (len > sizeof(stub_last_tx)) {
         len = sizeof(stub_last_tx);
     }

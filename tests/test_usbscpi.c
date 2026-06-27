@@ -8,7 +8,7 @@
 #include <string.h>
 
 typedef struct {
-    char tx[512];
+    char tx[2048];
     size_t tx_len;
     uint8_t block[512];
     size_t block_len;
@@ -297,6 +297,8 @@ static const usbscpi_command_desc_t desc_commands[] = {
     { "WLAN:SCAN?", "query", "Get scan result by index", NULL, 0, "string" },
 };
 
+static const char *const desc_ble_connect_failed[] = { "3" };
+
 static const usbscpi_workflow_desc_t desc_workflows[] = {
     {
         .name = "wifi-scan",
@@ -309,8 +311,26 @@ static const usbscpi_workflow_desc_t desc_workflows[] = {
         .fetch_query = "WLAN:SCAN?",
         .state_query = NULL,
         .success_value = NULL,
+        .failed_values = NULL,
+        .failed_value_count = 0,
         .timeout_ms = 15000,
         .poll_ms = 250,
+    },
+    {
+        .name = "ble-connect",
+        .type = "trigger_poll_interactive",
+        .summary = "Connect to a BLE device",
+        .trigger_cmd = "BLE:CONNect",
+        .done_query = NULL,
+        .done_value = NULL,
+        .count_query = NULL,
+        .fetch_query = NULL,
+        .state_query = "BLE:CONNect:STATe?",
+        .success_value = "2",
+        .failed_values = desc_ble_connect_failed,
+        .failed_value_count = 1,
+        .timeout_ms = 15000,
+        .poll_ms = 200,
     },
 };
 
@@ -318,14 +338,14 @@ static const usbscpi_descriptor_t test_descriptor = {
     .commands = desc_commands,
     .command_count = 3,
     .workflows = desc_workflows,
-    .workflow_count = 1,
+    .workflow_count = 2,
 };
 
 static void test_descriptor_query(void) {
     fixture_t f;
     uint8_t storage[2048];
     char line[96];
-    uint8_t io_buf[512];
+    uint8_t io_buf[1024];
     usbscpi_config_t cfg = {
         .usb_tx = tx_cb,
         .line_buf = line,
@@ -380,6 +400,13 @@ static void test_descriptor_query(void) {
     assert(strstr(content, "fetch=WLAN:SCAN?#index") != NULL);
     assert(strstr(content, "timeout_ms=15000") != NULL);
     assert(strstr(content, "poll_ms=250") != NULL);
+    /* Verify ble-connect interactive workflow with failed= */
+    assert(strstr(content, "WF ble-connect") != NULL);
+    assert(strstr(content, "type=trigger_poll_interactive") != NULL);
+    assert(strstr(content, "trigger=BLE:CONNect") != NULL);
+    assert(strstr(content, "state=BLE:CONNect:STATe?") != NULL);
+    assert(strstr(content, "success=2") != NULL);
+    assert(strstr(content, "failed=3") != NULL);
 }
 
 static void test_descriptor_unsupported(void) {

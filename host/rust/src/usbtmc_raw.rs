@@ -231,33 +231,44 @@ impl UsbtmcRaw {
     /// Request and read a DEV_DEP_MSG_IN (device → host response).
     ///
     /// Sends REQUEST_DEV_DEP_MSG_IN on the bulk-OUT endpoint, then reads the
-    /// response on bulk-IN, reassembling multi-packet responses until EOM.
+    /// response on bulk-IN. A DEV_DEP_MSG_IN response is a single 12-byte
+    /// header followed by `TransferSize` payload bytes; only the *first* USB
+    /// packet of the response carries the header, the rest are pure payload.
+    /// The payload may span several USB packets / `read()` calls, so we parse
+    /// the header once and then accumulate exactly `TransferSize` bytes before
+    /// checking EOM. If the device could not fit the whole logical message in
+    /// one response (EOM clear), we issue another request and append, until EOM
+    /// or `max_len` is reached.
     fn read_msg_in(&mut self, max_len: usize) -> Result<Vec<u8>> {
-        let btag = self.next_btag();
-        let transfer_size = (max_len as u32).min(u32::MAX);
-
-        // Build and send the request header
-        let mut req = vec![0u8; USBTMC_HEADER_SIZE];
-        req[0] = MSGID_REQUEST_DEV_DEP_MSG_IN;
-        req[1] = btag;
-        req[2] = !btag;
-        req[3..7].copy_from_slice(&transfer_size.to_le_bytes());
-        req[7] = 0; // no transfer attributes
-        // req[8..12] already zero
-
-        // Pad request to max_packet_out if needed
-        while req.len() < self.max_packet_out {
-            req.push(0);
-        }
-
-        self.handle
-            .write_bulk(self.ep_out, &req, self.timeout)
-            .map_err(map_usb_err)?;
-
-        // Read response packets until EOM
+        let mpi = self.max_packet_in.max(64);
         let mut result = Vec::new();
+
         loop {
-            let mut buf = vec![0u8; self.max_packet_in.max(512)];
+            // Ask for as much as the caller still wants in this response.
+            let want = max_len.saturating_sub(result.len()).max(1);
+            let btag = self.next_btag();
+            let transfer_size = (want as u32).min(u32::MAX);
+
+            // Build and send the request header.
+            let mut req = vec![0u8; USBTMC_HEADER_SIZE];
+            req[0] = MSGID_REQUEST_DEV_DEP_MSG_IN;
+            req[1] = btag;
+            req[2] = !btag;
+            req[3..7].copy_from_slice(&transfer_size.to_le_bytes());
+            req[7] = 0; // no transfer attributes
+            // req[8..12] already zero
+            while req.len() < self.max_packet_out {
+                req.push(0);
+            }
+            self.handle
+                .write_bulk(self.ep_out, &req, self.timeout)
+                .map_err(map_usb_err)?;
+
+            // First read of this response: carries the header. Size the buffer
+            // to hold the whole expected response so a small one usually
+            // arrives in a single read (and its trailing short packet ends it).
+            let cap = (USBTMC_HEADER_SIZE + want).div_ceil(mpi) * mpi;
+            let mut buf = vec![0u8; cap.max(mpi)];
             let n = self
                 .handle
                 .read_bulk(self.ep_in, &mut buf, self.timeout)
@@ -267,15 +278,12 @@ impl UsbtmcRaw {
                     "USBTMC response too short: {n} bytes"
                 )));
             }
-
-            // Verify response header
             if buf[0] != MSGID_DEV_DEP_MSG_IN {
                 return Err(Error::Device(format!(
                     "unexpected USBTMC msg id: {} (expected {})",
                     buf[0], MSGID_DEV_DEP_MSG_IN
                 )));
             }
-            // bTag should match
             if buf[1] != btag {
                 return Err(Error::Device(format!(
                     "USBTMC bTag mismatch: got {}, expected {}",
@@ -286,17 +294,33 @@ impl UsbtmcRaw {
             let payload_size = u32::from_le_bytes([buf[3], buf[4], buf[5], buf[6]]) as usize;
             let eom = (buf[7] & EOM_BIT) != 0;
 
-            let available = n - USBTMC_HEADER_SIZE;
-            let take = payload_size.min(available);
-            result.extend_from_slice(&buf[USBTMC_HEADER_SIZE..USBTMC_HEADER_SIZE + take]);
+            // Payload bytes carried by the first read.
+            let avail = n - USBTMC_HEADER_SIZE;
+            let mut got = avail.min(payload_size);
+            result.extend_from_slice(&buf[USBTMC_HEADER_SIZE..USBTMC_HEADER_SIZE + got]);
 
-            if eom {
-                break;
+            // Remaining payload (no header) arrives in subsequent reads. Read
+            // with one extra packet of headroom so a trailing zero-length
+            // terminating packet is consumed in the same call rather than
+            // polluting the next transfer.
+            while got < payload_size {
+                let remaining = payload_size - got;
+                let mut more = vec![0u8; remaining.div_ceil(mpi) * mpi + mpi];
+                let m = self
+                    .handle
+                    .read_bulk(self.ep_in, &mut more, self.timeout)
+                    .map_err(map_usb_err)?;
+                if m == 0 {
+                    return Err(Error::Device(
+                        "USBTMC IN ended before the declared payload was received".into(),
+                    ));
+                }
+                let take = m.min(remaining);
+                result.extend_from_slice(&more[..take]);
+                got += take;
             }
 
-            // If we got a short read (< max_packet_in), the transfer is done
-            // even without EOM (USB short-packet semantics).
-            if n < self.max_packet_in {
+            if eom || result.len() >= max_len {
                 break;
             }
         }

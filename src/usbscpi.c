@@ -273,6 +273,10 @@ static size_t emit_descriptor(const usbscpi_descriptor_t *desc,
         }
         if (wf->state_query && lr_printf(buf, &len, buf_len, " state=%s", wf->state_query) < 0) return 0;
         if (wf->success_value && lr_printf(buf, &len, buf_len, " success=%s", wf->success_value) < 0) return 0;
+        for (size_t k = 0; k < wf->failed_value_count; k++) {
+            if (lr_printf(buf, &len, buf_len, " failed=%s",
+                    wf->failed_values[k] ? wf->failed_values[k] : "") < 0) return 0;
+        }
         if (lr_printf(buf, &len, buf_len, " timeout_ms=%u poll_ms=%u\n",
                 wf->timeout_ms, wf->poll_ms) < 0) return 0;
     }
