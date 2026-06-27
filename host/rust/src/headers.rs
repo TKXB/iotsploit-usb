@@ -4,7 +4,7 @@
 //! patterns (each on its own line, with a trailing terminator). The full list
 //! fits in the device `mtu` for all current `iotsploit-usb` devices, so an
 //! un-paged query is tried first. For hypothetical larger command sets we fall
-//! back to paged retrieval (`SYST:HELP:HEAD? <offset> <count>`).
+//! back to paged retrieval (`SYST:HELP:HEAD? <offset>,<count>`).
 
 use crate::{session::ScpiSession, transport::Transport, Result};
 
@@ -25,6 +25,9 @@ pub fn fetch_headers<T: Transport>(
     if !headers.is_empty() {
         return Ok(headers);
     }
+    // The un-paged attempt overflowed mtu and left a -223 "Too much data" in the
+    // device error queue; drain it so a subsequent `errors` call is clean.
+    let _ = session.drain_errors();
     // 2. Paged fallback.
     fetch_paged(session, page_size.unwrap_or(DEFAULT_PAGE_SIZE))
 }
@@ -34,7 +37,11 @@ fn fetch_paged<T: Transport>(session: &mut ScpiSession<T>, page_size: usize) -> 
     let mut all: Vec<String> = Vec::new();
     let mut offset = 0usize;
     for _ in 0..512 {
-        let cmd = format!("SYST:HELP:HEAD? {offset} {page_size}");
+        // SCPI parameters are comma-separated, not space-separated: a space
+        // before the second argument is an "Invalid character" (-101) to
+        // libscpi, which then leaves `count` at its default and the device
+        // replies with the full (over-mtu) list -> empty paged result.
+        let cmd = format!("SYST:HELP:HEAD? {offset},{page_size}");
         let resp = session.query(&cmd)?;
         let page = split_headers(&resp);
         let n = page.len();
@@ -107,9 +114,10 @@ mod tests {
 
     #[test]
     fn fetch_falls_back_to_paged_when_unpaged_empty() {
-        // First (un-paged) response is empty -> paged fallback returns two pages.
+        // First (un-paged) response is empty -> drain errors -> paged fallback.
         let mut s = ScpiSession::new(FakeTransport::new(&[
             b"\n",                 // un-paged failed/empty
+            b"0,\"No error\"\n",   // drain_errors: queue already clear
             b"a\nb\n\n",           // page 1 (2 items, < page 3 -> stop)
         ]));
         let h = fetch_headers(&mut s, Some(3)).unwrap();
@@ -119,9 +127,10 @@ mod tests {
     #[test]
     fn fetch_pages_until_short_page() {
         let mut s = ScpiSession::new(FakeTransport::new(&[
-            b"\n",          // un-paged empty
-            b"a\nb\nc\n\n", // page size 3, full page
-            b"d\n\n",       // short page -> stop
+            b"\n",                 // un-paged empty
+            b"0,\"No error\"\n",   // drain_errors: queue already clear
+            b"a\nb\nc\n\n",        // page size 3, full page
+            b"d\n\n",              // short page -> stop
         ]));
         let h = fetch_headers(&mut s, Some(3)).unwrap();
         assert_eq!(h, vec!["a", "b", "c", "d"]);
