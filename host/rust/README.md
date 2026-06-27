@@ -40,8 +40,9 @@ not need any board-specific code on the PC — one binary controls every board.
 - Parse `*IDN?`, `SYSTem:CAPabilities?`, and `SYSTem:HELP:HEADers?`.
 - Query the on-device **line-record descriptor** (`SYSTem:HELP:DESCription?`)
   to discover commands, parameters, and workflows.
-- Load **line-record profiles** (`profiles/*.txt`) and run **generic
-  workflows** (`trigger → poll → count → fetch` or interactive polling).
+- Run **generic workflows** (`trigger → poll → count → fetch` or interactive
+  polling) from command/workflow metadata read **live from the device** — there
+  are no local profile files to keep in sync.
 - Drain the SCPI error queue.
 - Drive everything from a one-liner or an interactive prompt.
 
@@ -172,14 +173,18 @@ BLE:SCAN:STOP
 If `list` shows exactly one node, every other command auto-detects it — no
 `--device` needed.
 
-Profiles and workflows:
+Profiles and workflows (metadata comes from the connected device):
 
 ```sh
-$ iotsploit-host profile               # list built-in profiles
-  esp32s3
-  nrf52840
+$ iotsploit-host profile                # show the device's commands & workflows
+idn      : IoTSploit,ESP32S3,0001,0.1.0
+commands : 22
+  GPIO:SET [command] Set GPIO output level
+  ...
+workflows: 3
+  wifi-scan (TriggerPollFetch) Scan for Wi-Fi access points
 
-$ iotsploit-host --profile esp32s3 workflow wifi-scan   # run a workflow
+$ iotsploit-host workflow wifi-scan     # run a workflow
 trigger: WLAN:SCAN
 done after 1.4s
 results (2):
@@ -220,8 +225,8 @@ iotsploit-host [--device <path>] <command> [args]
 | `write '<cmd>'` | Send a non-query SCPI command (no response printed). |
 | `block-read '<cmd>' [--out <file>]` | Query a binary-block response and write the payload to a file (or stdout). |
 | `errors` | Drain the `SYSTem:ERRor?` queue until "No error". |
-| `workflow <name> [params]` | Run a profile-driven workflow (e.g. `wifi-scan`, `ble-scan`). |
-| `profile [name]` | Show profile info or list built-in profiles. |
+| `workflow <name> [params]` | Run a device-described workflow (e.g. `wifi-scan`, `ble-scan`). |
+| `profile` | Show the connected device's full command/workflow descriptor. |
 | `repl` | Interactive SCPI prompt. |
 | `-h, --help` | Show built-in help. |
 | `-V, --version` | Show version. |
@@ -305,11 +310,11 @@ ok
 (no errors)
 ```
 
-Or with the profile-driven workflow engine (does all the polling for you):
+Or with the descriptor-driven workflow engine (does all the polling for you):
 
 ```sh
-# Load nrf52840 profile, trigger scan, poll until done, fetch all results
-iotsploit-host --profile nrf52840 workflow ble-scan
+# Fetch the device descriptor, trigger scan, poll until done, fetch all results
+iotsploit-host workflow ble-scan
 # output:
 # trigger: BLE:SCAN:START
 # done after 3.2s
@@ -319,12 +324,10 @@ iotsploit-host --profile nrf52840 workflow ble-scan
 #   [2] DE:AD:BE:EF:00:01,-55,Headphones
 ```
 
-You can also list available profiles:
+You can inspect the connected device's full descriptor:
 
 ```sh
-iotsploit-host profile                # list built-in profiles
-iotsploit-host profile nrf52840       # show nRF52840 profile details
-iotsploit-host profile esp32s3        # show ESP32-S3 profile details
+iotsploit-host profile                # commands + workflows from the device
 ```
 
 ## 9. How it works
@@ -354,9 +357,10 @@ your shell ──► iotsploit-host (Rust) ──► Transport trait
 - **Caps** (`caps.rs`): tolerantly parses `SYSTem:CAPabilities?`.
 - **Headers** (`headers.rs`): lists commands; falls back to paging for large
   command sets.
-- **Descriptor** (`descriptor.rs`): shared line-record parser for both local
-  profile files (`profiles/*.txt`) and on-device `SYSTem:HELP:DESCription?`.
-  Zero-dependency — plain `std`, no `serde`/`toml`/`serde_json`.
+- **Descriptor** (`descriptor.rs`): line-record parser for the on-device
+  `SYSTem:HELP:DESCription?` response (the same parser also reads a file via
+  `load_file`, used in tests). Zero-dependency — plain `std`, no
+  `serde`/`toml`/`serde_json`.
 - **Workflow** (`workflow.rs`): generic `trigger → poll → count → fetch`
   engine driven by profile/descriptor metadata.
 
@@ -403,7 +407,7 @@ iotsploit-host idn
 iotsploit-host caps
 iotsploit-host headers
 iotsploit-host describe
-iotsploit-host --profile nrf52840 workflow ble-scan
+iotsploit-host workflow ble-scan
 iotsploit-host query 'BLE:SCAN:STATe?'
 iotsploit-host block-read 'DATA:READ? 64' --out /tmp/adc.bin
 iotsploit-host errors
@@ -489,6 +493,6 @@ iotsploit-host-macos-aarch64
 | `headers` returns all commands | ✓ | ✓ | ✓ |
 | `query '*IDN?'` matches expected IDN | ✓ | ✓ | ✓ |
 | `block-read 'DATA:READ? 64' --out /tmp/adc.bin` | ✓ | ✓ | ✓ |
-| `--profile esp32s3 workflow wifi-scan` | ✓ | ✓ | ✓ |
-| `--profile nrf52840 workflow ble-scan` | ✓ | ✓ | ✓ |
+| `workflow wifi-scan` (esp32s3) | ✓ | ✓ | ✓ |
+| `workflow ble-scan` (nrf52840) | ✓ | ✓ | ✓ |
 | `describe` returns line-record descriptor | ✓ (if fw supports) | ✓ | ✓ |

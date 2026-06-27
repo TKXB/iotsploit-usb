@@ -28,7 +28,6 @@ GLOBAL OPTIONS:
     -d, --device <path>         /dev/usbtmcN node (kernel backend)
     --vid <hex> --pid <hex>     USB VID/PID for raw backend (e.g. 1209 0001)
     --serial <string>           USB serial number (raw backend)
-    --profile <path|name>       Load a profile (path or built-in name)
     -h, --help                  Show this help
     -V, --version               Show version
 
@@ -42,17 +41,20 @@ COMMANDS:
     write  <cmd>                 Send a SCPI command (no response printed)
     block-read <cmd> [--out F]   Query an arbitrary-block response; write to file
     errors                       Drain the SYSTem:ERRor? queue
-    workflow <name> [params...]  Run a profile workflow (e.g. wifi-scan, ble-scan)
-    profile [name]               Show profile info or list built-in profiles
+    workflow <name> [params...]  Run a workflow defined by the device descriptor
+    profile                      Show the device's full command/workflow descriptor
     repl                         Interactive SCPI prompt (Ctrl-D to exit)
+
+Command and workflow metadata is read live from the connected device via
+SYSTem:HELP:DESCription? — the device is the single source of truth, so there
+are no local profile files to keep in sync.
 
 EXAMPLES:
     iotsploit-host idn
     iotsploit-host caps
     iotsploit-host headers
-    iotsploit-host --profile esp32s3 workflow wifi-scan
-    iotsploit-host --profile esp32s3 workflow ble-scan 8
-    iotsploit-host --profile nrf52840 workflow ble-scan
+    iotsploit-host workflow wifi-scan
+    iotsploit-host workflow ble-scan 8
     iotsploit-host --backend raw --vid 1209 --pid 0001 idn
     iotsploit-host describe
     iotsploit-host query '*IDN?'
@@ -77,7 +79,6 @@ struct Cli {
     vid: Option<u16>,
     pid: Option<u16>,
     serial: Option<String>,
-    profile: Option<String>,
     command: String,
     args: Vec<String>,
 }
@@ -88,7 +89,6 @@ fn parse_args(argv: Vec<String>) -> std::result::Result<Cli, String> {
     let mut vid: Option<u16> = None;
     let mut pid: Option<u16> = None;
     let mut serial: Option<String> = None;
-    let mut profile: Option<String> = None;
     let mut positionals: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -135,16 +135,8 @@ fn parse_args(argv: Vec<String>) -> std::result::Result<Cli, String> {
                 let v = argv.get(i).ok_or("missing value for --serial")?;
                 serial = Some(v.clone());
             }
-            "--profile" => {
-                i += 1;
-                let v = argv.get(i).ok_or("missing value for --profile")?;
-                profile = Some(v.clone());
-            }
             _ if a.starts_with("--device=") => {
                 device = Some(PathBuf::from(&a["--device=".len()..]));
-            }
-            _ if a.starts_with("--profile=") => {
-                profile = Some(a["--profile=".len()..].to_string());
             }
             _ => positionals.push(a.clone()),
         }
@@ -161,7 +153,6 @@ fn parse_args(argv: Vec<String>) -> std::result::Result<Cli, String> {
         vid,
         pid,
         serial,
-        profile,
         command,
         args: positionals[1..].to_vec(),
     })
@@ -268,33 +259,23 @@ fn open_session(cli: &Cli) -> iotsploit_host::Result<ScpiSession<Backend>> {
     Ok(ScpiSession::new(transport).with_read_size(8192).with_max_block_len(1 << 20))
 }
 
-// ── Profile loading ────────────────────────────────────────────────────────
+// ── Profile resolution ─────────────────────────────────────────────────────
 
-fn load_profile(name_or_path: &str) -> iotsploit_host::Result<iotsploit_host::descriptor::Profile> {
-    use iotsploit_host::descriptor;
-
-    // If it looks like a path, load from file.
-    let path = PathBuf::from(name_or_path);
-    if path.exists() {
-        return descriptor::load_file(&path).map_err(|e| Error::Device(e.to_string()));
-    }
-
-    // Otherwise try built-in profiles next to the crate.
-    let crate_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.join("..").join("..")))
-            .unwrap_or_default());
-    let built_in = crate_dir.join("profiles").join(format!("{name_or_path}.txt"));
-    if built_in.exists() {
-        return descriptor::load_file(&built_in).map_err(|e| Error::Device(e.to_string()));
-    }
-
-    Err(Error::Device(format!(
-        "profile `{name_or_path}` not found (tried `{}` and built-in `profiles/{name_or_path}.txt`)",
-        path.display()
-    )))
+/// Fetch the device's descriptor (`SYSTem:HELP:DESCription?`) as a [`Profile`].
+///
+/// The device is the single source of truth for its command/workflow metadata,
+/// so there are no local profile files. Firmware that does not yet implement the
+/// descriptor query yields a clear, actionable error.
+fn fetch_profile(
+    s: &mut ScpiSession<Backend>,
+) -> iotsploit_host::Result<iotsploit_host::descriptor::Profile> {
+    iotsploit_host::descriptor::fetch(s)?.ok_or_else(|| {
+        Error::Device(
+            "device does not serve SYSTem:HELP:DESCription? — update its firmware to expose \
+             its descriptor"
+                .into(),
+        )
+    })
 }
 
 // ── Command dispatch ───────────────────────────────────────────────────────
@@ -420,49 +401,26 @@ fn run(cli: Cli) -> Result<(), Error> {
                 .ok_or_else(|| Error::Device("workflow requires a name (e.g. wifi-scan)".into()))?;
             let wf_params: Vec<String> = cli.args[1..].to_vec();
 
-            let profile_name = cli
-                .profile
-                .as_ref()
-                .ok_or_else(|| Error::Device("workflow requires --profile <name|path>".into()))?;
-            let profile = load_profile(profile_name)?;
             let mut s = open_session(&cli)?;
+            let profile = fetch_profile(&mut s)?;
             iotsploit_host::workflow::run_workflow(&mut s, &profile, wf_name, &wf_params)
         }
         "profile" => {
-            match cli.args.first() {
-                Some(name) => {
-                    let p = load_profile(name)?;
-                    println!("device   : {}", p.device.name);
-                    if let Some(m) = &p.device.idn_match {
-                        println!("idn_match: {m}");
-                    }
-                    println!("commands : {}", p.commands.len());
-                    for c in &p.commands {
-                        println!("  {} [{}] {}", c.pattern, c.kind, c.summary);
-                    }
-                    println!("workflows: {}", p.workflows.len());
-                    for w in &p.workflows {
-                        println!("  {} ({:?}) {}", w.name, w.workflow_type, w.summary);
-                    }
-                }
-                None => {
-                    // List built-in profiles
-                    let crate_dir = std::env::var("CARGO_MANIFEST_DIR")
-                        .map(PathBuf::from)
-                        .unwrap_or_default();
-                    let profiles_dir = crate_dir.join("profiles");
-                    if profiles_dir.exists() {
-                        if let Ok(entries) = std::fs::read_dir(&profiles_dir) {
-                            for entry in entries.flatten() {
-                                if let Some(name) = entry.path().file_stem() {
-                                    println!("{}", name.to_string_lossy());
-                                }
-                            }
-                        }
-                    } else {
-                        eprintln!("no built-in profiles directory found");
-                    }
-                }
+            let mut s = open_session(&cli)?;
+            let p = fetch_profile(&mut s)?;
+            if let Some(idn) = &p.device.idn {
+                println!("idn      : {idn}");
+            }
+            if !p.device.name.is_empty() {
+                println!("device   : {}", p.device.name);
+            }
+            println!("commands : {}", p.commands.len());
+            for c in &p.commands {
+                println!("  {} [{}] {}", c.pattern, c.kind, c.summary);
+            }
+            println!("workflows: {}", p.workflows.len());
+            for w in &p.workflows {
+                println!("  {} ({:?}) {}", w.name, w.workflow_type, w.summary);
             }
             Ok(())
         }

@@ -14,7 +14,9 @@
 /* ---------- Static buffers (no dynamic allocation) ---------- */
 static uint8_t s_storage[2048];
 static char    s_line[96];
-static uint8_t s_io[256];
+/* io_buf doubles as the SYST:HELP:DESC? render buffer; the descriptor text is
+   ~0.75 KiB, so size it well above the 256-byte mtu. */
+static uint8_t s_io[1024];
 
 /* ---------- USB TX callback via TinyUSB glue ---------- */
 static int usb_tx(void *user, const uint8_t *data, size_t len, bool eom) {
@@ -75,6 +77,55 @@ static const scpi_command_t ble_commands[] = {
     { "BLE:SCAN:RESult?", cmd_ble_scan_result,  0 },
     { "BLE:SCAN:CLEar",   cmd_ble_scan_clear,   0 },
     SCPI_CMD_LIST_END
+};
+
+/* ---------- Descriptor metadata (SYSTem:HELP:DESCription?) ---------- */
+/* The device is the single source of truth for its command/workflow metadata:
+   the host fetches this over SYST:HELP:DESC? instead of carrying a local copy. */
+
+static const usbscpi_param_desc_t desc_ble_scan_result_params[] = {
+    { "index", "u32", true },
+};
+
+static const usbscpi_command_desc_t desc_commands[] = {
+    { "BLE:SCAN:START",  "command", "Start BLE scanning",
+      NULL, 0, NULL },
+    { "BLE:SCAN:STOP",   "command", "Stop BLE scanning",
+      NULL, 0, NULL },
+    { "BLE:SCAN:STATe?", "query",   "1 = scanning, 0 = idle/finished",
+      NULL, 0, "bool" },
+    { "BLE:SCAN:COUNt?", "query",   "Number of BLE devices found",
+      NULL, 0, "u32" },
+    { "BLE:SCAN:RESult?", "query",  "Get scan result by index (addr,rssi,name)",
+      desc_ble_scan_result_params, 1, "string" },
+    { "BLE:SCAN:CLEar",  "command", "Clear scan results",
+      NULL, 0, NULL },
+};
+
+static const usbscpi_workflow_desc_t desc_workflows[] = {
+    {
+        .name = "ble-scan",
+        .type = "trigger_poll_fetch",
+        .summary = "Scan for BLE devices",
+        .trigger_cmd = "BLE:SCAN:START",
+        .done_query = "BLE:SCAN:STATe?",
+        .done_value = "0",
+        .count_query = "BLE:SCAN:COUNt?",
+        .fetch_query = "BLE:SCAN:RESult?",
+        .state_query = NULL,
+        .success_value = NULL,
+        .failed_values = NULL,
+        .failed_value_count = 0,
+        .timeout_ms = 30000,
+        .poll_ms = 500,
+    },
+};
+
+static const usbscpi_descriptor_t s_descriptor = {
+    .commands = desc_commands,
+    .command_count = sizeof(desc_commands) / sizeof(desc_commands[0]),
+    .workflows = desc_workflows,
+    .workflow_count = sizeof(desc_workflows) / sizeof(desc_workflows[0]),
 };
 
 /* ---------- TinyUSB USBTMC required callbacks ---------- */
@@ -219,6 +270,7 @@ int main(void) {
         .io_buf_len    = sizeof(s_io),
         .proto         = 1,
         .mtu           = 256,
+        .descriptor    = &s_descriptor,
     };
 
     usbscpi_t *dev = usbscpi_init(s_storage, sizeof(s_storage), &cfg);

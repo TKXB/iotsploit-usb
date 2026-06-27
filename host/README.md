@@ -22,4 +22,5 @@ See [rust/README.md](rust/README.md) for full usage.
 The original Python smoke-test host (`scan_test.py`) for the ESP32-S3 demo.
 It drives Wi-Fi scan, BLE scan, and BLE connect/pair workflows through the
 Linux `/dev/usbtmcN` kernel driver. Kept as a reference; the Rust host now
-has full workflow parity via `--profile esp32s3 workflow <name>`.
+has full workflow parity via `iotsploit-host workflow <name>` (metadata read
+live from the device descriptor).
