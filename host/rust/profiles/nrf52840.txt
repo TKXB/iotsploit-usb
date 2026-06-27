@@ -1,0 +1,14 @@
+# nRF52840 iotsploit-usb profile
+# VID 1209:0001, *IDN? -> IoTSploit,nRF52840,<sn>,<ver>
+#
+# Note: BLE scan commands differ from ESP32-S3!
+#   nRF52840: BLE:SCAN:START / STOP / STATe? / COUNt? / RESult? / CLEar
+#   ESP32-S3: BLE:SCAN <secs> / SCAN:DONE? / SCAN:COUNt? / SCAN?
+DEV name=nrf52840 idn_match="nRF52840" proto=1 mtu=256 max_block=4096
+CMD BLE:SCAN:START kind=command summary="Start BLE scanning"
+CMD BLE:SCAN:STOP kind=command summary="Stop BLE scanning"
+CMD BLE:SCAN:STATe? kind=query summary="1 = scanning, 0 = idle/finished" returns=bool
+CMD BLE:SCAN:COUNt? kind=query summary="Number of BLE devices found" returns=u32
+CMD BLE:SCAN:RESult? kind=query summary="Get scan result by index (addr,rssi,name)" param=index:u32:req returns=string
+CMD BLE:SCAN:CLEar kind=command summary="Clear scan results"
+WF ble-scan type=trigger_poll_fetch trigger=BLE:SCAN:START done=BLE:SCAN:STATe?:0 count=BLE:SCAN:COUNt? fetch=BLE:SCAN:RESult?#index timeout_ms=30000 poll_ms=500

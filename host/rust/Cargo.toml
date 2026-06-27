@@ -1,0 +1,28 @@
+[package]
+name = "iotsploit-host"
+version = "0.1.0"
+edition = "2021"
+description = "Generic SCPI-over-USBTMC host for iotsploit-usb devices"
+license = "MIT"
+
+[lib]
+name = "iotsploit_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "iotsploit-host"
+path = "src/bin/iotsploit-host.rs"
+
+[features]
+default = ["kernel"]
+kernel = []                         # Linux /dev/usbtmcN backend
+raw-usb = ["rusb"]                  # Windows/Linux/macOS raw USBTMC backend
+
+# No serde, no toml, no serde_json — the host crate stays zero-dependency.
+# Profile/descriptor/workflow modules parse line-record text with std only.
+
+[dependencies]
+rusb = { version = "0.9", optional = true }
+
+[profile.release]
+opt-level = 2

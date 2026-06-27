@@ -28,6 +28,9 @@ glue/usbscpi_tinyusb.c          optional TinyUSB USBTMC adapter
 examples/minimal_host.c         host-side integration sketch
 examples/pico2/                 Raspberry Pi Pico (RP2040) TinyUSB demo
 examples/esp32s3/               ESP32-S3 (ESP-IDF + TinyUSB) demo, hardware-verified
+host/rust/                     generic Rust CLI host (cross-platform)
+host/rust/profiles/             line-record profiles (esp32s3.txt, nrf52840.txt)
+host/python/                   Python smoke-test host (ESP32-S3 workflows)
 tests/test_usbscpi.c            host unit tests
 ```
 
@@ -71,6 +74,13 @@ usbscpi_on_rx(scpi, data, len, eom);
 - `*OPC?`
 - `SYSTem:ERRor?`
 - `DATA:FREE?`
+- `SYSTem:HELP:HEADers?` — list all registered command headers
+- `SYSTem:HELP:DESCription?` — emit a **line-record descriptor** (optional;
+  set `cfg.descriptor` to enable). Returns an IEEE 488.2 block containing
+  `DEV`, `CMD`, and `WF` records that the Rust host parses to discover
+  commands, parameters, and workflows. See
+  [`include/usbscpi/usbscpi.h`](include/usbscpi/usbscpi.h) for the
+  `usbscpi_descriptor_t` struct.
 
 Register project-specific commands with:
 
@@ -174,6 +184,9 @@ These interfaces are deliberately present in the MVP so later features can be ad
 - `data_free`: implement `DATA:FREE?` with a ring buffer or downstream queue.
 - `lock`/`unlock`: protect callbacks when called from an ISR or USB task.
 - `usbscpi_clear`: map USBTMC clear/abort requests and SCPI reset paths to one state reset.
+- `descriptor`: optional `usbscpi_descriptor_t` that enables `SYSTem:HELP:DESCription?`
+  to emit command/workflow metadata as line-record text. The Rust host uses
+  this for typed help, parameter validation, and workflow automation.
 
 ## Scope
 

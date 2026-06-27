@@ -1,6 +1,7 @@
 #include "usbscpi/usbscpi.h"
 
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -205,6 +206,117 @@ static scpi_result_t cmd_data_read(scpi_t *scpi) {
     return SCPI_RES_OK;
 }
 
+/* ------------------------------------------------------------------ */
+/* SYSTem:HELP:DESCription? — line-record descriptor (no heap)        */
+/* ------------------------------------------------------------------ */
+
+/* Append formatted text to buf at *len. Returns 0 on success, -1 on
+ * overflow. Uses vsnprintf for safe truncation. */
+static int lr_printf(char *buf, size_t *len, size_t cap, const char *fmt, ...) {
+    if (*len >= cap) return -1;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *len, cap - *len, fmt, ap);
+    va_end(ap);
+    if (n < 0 || *len + (size_t)n >= cap) return -1;
+    *len += (size_t)n;
+    return 0;
+}
+
+/* Emit the descriptor as line-record text into buf. Returns bytes written,
+ * or 0 on overflow. No heap allocation — just sequential snprintf calls,
+ * one CMD/WF/DEV line per record. */
+static size_t emit_descriptor(const usbscpi_descriptor_t *desc,
+                               const char *idn, unsigned proto,
+                               size_t mtu, size_t max_block,
+                               char *buf, size_t buf_len) {
+    size_t len = 0;
+
+    /* DEV line */
+    if (lr_printf(buf, &len, buf_len,
+            "DEV idn=\"%s\" proto=%u mtu=%zu max_block=%zu\n",
+            idn ? idn : "", proto, mtu, max_block) < 0)
+        return 0;
+
+    /* CMD lines */
+    for (size_t i = 0; desc && i < desc->command_count; i++) {
+        const usbscpi_command_desc_t *c = &desc->commands[i];
+        if (lr_printf(buf, &len, buf_len, "CMD %s", c->pattern) < 0) return 0;
+        if (c->kind && lr_printf(buf, &len, buf_len, " kind=%s", c->kind) < 0) return 0;
+        if (c->summary && lr_printf(buf, &len, buf_len, " summary=\"%s\"", c->summary) < 0) return 0;
+        for (size_t j = 0; j < c->param_count; j++) {
+            const usbscpi_param_desc_t *p = &c->params[j];
+            if (lr_printf(buf, &len, buf_len, " param=%s:%s:%s",
+                    p->name ? p->name : "",
+                    p->type ? p->type : "",
+                    p->required ? "req" : "opt") < 0) return 0;
+        }
+        if (c->return_type && lr_printf(buf, &len, buf_len, " returns=%s", c->return_type) < 0) return 0;
+        if (lr_printf(buf, &len, buf_len, "\n") < 0) return 0;
+    }
+
+    /* WF lines */
+    for (size_t i = 0; desc && i < desc->workflow_count; i++) {
+        const usbscpi_workflow_desc_t *wf = &desc->workflows[i];
+        if (lr_printf(buf, &len, buf_len, "WF %s", wf->name) < 0) return 0;
+        if (wf->type && lr_printf(buf, &len, buf_len, " type=%s", wf->type) < 0) return 0;
+        if (wf->summary && lr_printf(buf, &len, buf_len, " summary=\"%s\"", wf->summary) < 0) return 0;
+        if (wf->trigger_cmd && lr_printf(buf, &len, buf_len, " trigger=%s", wf->trigger_cmd) < 0) return 0;
+        if (wf->done_query) {
+            if (lr_printf(buf, &len, buf_len, " done=%s:%s",
+                    wf->done_query,
+                    wf->done_value ? wf->done_value : "") < 0) return 0;
+        }
+        if (wf->count_query && lr_printf(buf, &len, buf_len, " count=%s", wf->count_query) < 0) return 0;
+        if (wf->fetch_query) {
+            if (lr_printf(buf, &len, buf_len, " fetch=%s#index", wf->fetch_query) < 0) return 0;
+        }
+        if (wf->state_query && lr_printf(buf, &len, buf_len, " state=%s", wf->state_query) < 0) return 0;
+        if (wf->success_value && lr_printf(buf, &len, buf_len, " success=%s", wf->success_value) < 0) return 0;
+        if (lr_printf(buf, &len, buf_len, " timeout_ms=%u poll_ms=%u\n",
+                wf->timeout_ms, wf->poll_ms) < 0) return 0;
+    }
+
+    return len;
+}
+
+static scpi_result_t cmd_syst_help_desc(scpi_t *scpi) {
+    usbscpi_t *ctx = scpi_owner(scpi);
+    if (!ctx) return SCPI_RES_ERR;
+
+    if (!ctx->cfg.descriptor) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_UNDEFINED_HEADER);
+        return SCPI_RES_ERR;
+    }
+
+    if (!ctx->cfg.io_buf || ctx->cfg.io_buf_len < 32) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+
+    size_t text_len = emit_descriptor(
+        ctx->cfg.descriptor,
+        ctx->cfg.idn,
+        ctx->cfg.proto,
+        ctx->cfg.mtu,
+        ctx->cfg.max_block_len,
+        (char *)ctx->cfg.io_buf,
+        ctx->cfg.io_buf_len);
+
+    if (text_len == 0) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_TOO_MUCH_DATA);
+        return SCPI_RES_ERR;
+    }
+
+    if (ctx->cfg.max_block_len && text_len > ctx->cfg.max_block_len) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_TOO_MUCH_DATA);
+        return SCPI_RES_ERR;
+    }
+
+    SCPI_ResultArbitraryBlock(scpi, ctx->cfg.io_buf, text_len);
+    return SCPI_RES_OK;
+}
+
 static const scpi_command_t core_commands[] = {
     { "*IDN?", cmd_idn, 0 },
     { "*RST", SCPI_CoreRst, 0 },
@@ -214,6 +326,7 @@ static const scpi_command_t core_commands[] = {
     { "SYSTem:ERRor:COUNt?", SCPI_SystemErrorCountQ, 0 },
     { "SYSTem:CAPabilities?", cmd_syst_cap, 0 },
     { "SYSTem:HELP:HEADers?", cmd_syst_help_head, 0 },
+    { "SYSTem:HELP:DESCription?", cmd_syst_help_desc, 0 },
     { "DATA:FREE?", cmd_data_free, 0 },
     { "DATA:COUNt?", cmd_data_count, 0 },
     { "DATA:READ?", cmd_data_read, 0 },

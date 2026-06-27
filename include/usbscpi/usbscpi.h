@@ -27,6 +27,45 @@ typedef void (*usbscpi_lock_t)(void *user);
 typedef size_t (*usbscpi_data_avail_t)(void *user);
 typedef size_t (*usbscpi_data_read_t)(void *user, uint8_t *buf, size_t len);
 
+/* ---- Descriptor metadata (SYSTem:HELP:DESCription?) ---- */
+
+typedef struct {
+    const char *name;
+    const char *type;     /* "u32", "bool", "string", "float" */
+    bool required;
+} usbscpi_param_desc_t;
+
+typedef struct {
+    const char *pattern;      /* SCPI pattern, e.g. "GPIO:SET" */
+    const char *kind;         /* "command", "query", "block" */
+    const char *summary;      /* one-line description */
+    const usbscpi_param_desc_t *params;
+    size_t param_count;
+    const char *return_type;  /* "none", "text", "u32", "bool", "block" */
+} usbscpi_command_desc_t;
+
+typedef struct {
+    const char *name;
+    const char *type;         /* "trigger_poll_fetch", "trigger_poll_interactive" */
+    const char *summary;
+    const char *trigger_cmd;
+    const char *done_query;
+    const char *done_value;
+    const char *count_query;
+    const char *fetch_query;
+    const char *state_query;       /* interactive only */
+    const char *success_value;     /* interactive only */
+    uint32_t timeout_ms;
+    uint32_t poll_ms;
+} usbscpi_workflow_desc_t;
+
+typedef struct {
+    const usbscpi_command_desc_t *commands;
+    size_t command_count;
+    const usbscpi_workflow_desc_t *workflows;
+    size_t workflow_count;
+} usbscpi_descriptor_t;
+
 typedef struct {
     usbscpi_usb_tx_t usb_tx;
     usbscpi_block_begin_t on_block_begin;
@@ -49,6 +88,7 @@ typedef struct {
     size_t io_buf_len;
     unsigned proto;
     size_t mtu;
+    const usbscpi_descriptor_t *descriptor;  /* optional, NULL = unsupported */
 } usbscpi_config_t;
 
 typedef enum {

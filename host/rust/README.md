@@ -5,11 +5,12 @@ your PC over a standard USB cable. The device speaks **SCPI over USBTMC**; this
 host talks to it through the Linux kernel's `/dev/usbtmcN` driver, so you do
 not need any board-specific code on the PC — one binary controls every board.
 
-> This implements **Milestones 0–3** of the host plan
-> ([`docs/iotsploit-usb-rust-host-plan.md`](../../docs/iotsploit-usb-rust-host-plan.md)):
+> This implements **Milestones 0–10** of the host plan
+> ([`docs/iotsploit-usb-rust-host-plan-updated.md`](../../docs/iotsploit-usb-rust-host-plan-updated.md)):
 > a dependency-free core with text query/write, IEEE 488.2 binary-block
-> support, capabilities parsing, and command-header discovery. Profiles,
-> workflows, and the device descriptor arrive in later milestones.
+> support, capabilities parsing, command-header discovery, line-record
+> profiles, workflow engine, device descriptor, and cross-platform raw
+> USB backend.
 
 ---
 
@@ -26,52 +27,80 @@ not need any board-specific code on the PC — one binary controls every board.
 9. [How it works](#9-how-it-works)
 10. [Troubleshooting](#10-troubleshooting)
 11. [Testing](#11-testing)
+12. [Platform setup](#12-platform-setup)
 
 ---
 
 ## 1. What you can do with it
 
-- Discover and open any `/dev/usbtmc*` device automatically.
+- Discover and open any `iotsploit-usb` device automatically.
 - Send SCPI commands and read text responses.
 - Read **binary block** responses (e.g. `DATA:READ?`) without corrupting them
   as text.
 - Parse `*IDN?`, `SYSTem:CAPabilities?`, and `SYSTem:HELP:HEADers?`.
+- Query the on-device **line-record descriptor** (`SYSTem:HELP:DESCription?`)
+  to discover commands, parameters, and workflows.
+- Load **line-record profiles** (`profiles/*.txt`) and run **generic
+  workflows** (`trigger → poll → count → fetch` or interactive polling).
 - Drain the SCPI error queue.
 - Drive everything from a one-liner or an interactive prompt.
 
 It is **device-independent**: it learns what commands exist from the device
-itself (`SYSTem:HELP:HEADers?`), so the same binary works for the nRF52840,
-ESP32-S3, Pico2, and any future `iotsploit-usb` board.
+itself, and profiles provide metadata for workflow automation. The same
+binary works for the nRF52840, ESP32-S3, Pico2, and any future
+`iotsploit-usb` board.
 
 ## 2. Prerequisites
 
-- A **Linux** PC (the backend uses the kernel USBTMC character device).
+- **Linux**, **Windows**, or **macOS** PC.
+  - Linux: uses the kernel `/dev/usbtmcN` driver by default (no extra deps).
+  - Windows/macOS: uses the raw USB backend (`rusb`/libusb). See
+    [Platform setup](#platform-setup) below.
 - The **Rust toolchain** (`rustc` + `cargo`). Any recent stable version works.
   ```sh
   rustc --version   # e.g. 1.93.1
   ```
-- An `iotsploit-usb` device flashed and plugged in over USB. After enumeration
-  it appears as `/dev/usbtmc0` (or `usbtmc1`, …).
+- An `iotsploit-usb` device flashed and plugged in over USB. On Linux it
+  appears as `/dev/usbtmc0` (or `usbtmc1`, …). On Windows/macOS the raw
+  backend auto-detects it by VID/PID.
 
-Check that the kernel sees it:
+Check that the OS sees it:
 
 ```sh
+# Linux
 ls -l /dev/usbtmc*
-# crw------- 1 root root 180, 176 ... /dev/usbtmc0
-
 lsusb | grep 1209:0001
-# Bus 002 Device 018: ID 1209:0001 Generic pid.codes Test PID
+
+# macOS
+system_profiler SPUSBDataType | grep -A5 1209
+
+# Windows (PowerShell, with libusb installed)
+# Use Zadig to bind WinUSB first — see Platform setup below
 ```
 
 ## 3. Build
 
 ```sh
-cd examples/host-rs
+cd host/rust
 cargo build --release
 ```
 
-The binary is at `target/release/iotsploit-host`. There are **no external
-crate dependencies**, so the build works offline.
+The binary is at `target/release/iotsploit-host`. The core crate has **zero
+external dependencies** — the only optional dependency is `rusb` behind the
+`raw-usb` feature (needed on Windows/macOS, optional on Linux).
+
+**Platform-specific build:**
+
+```sh
+# Linux (default: kernel backend, no extra deps)
+cargo build --release
+
+# Windows / macOS (raw USB backend via rusb/libusb)
+cargo build --release --features raw-usb
+
+# Linux with both backends (kernel + raw)
+cargo build --release --all-features
+```
 
 For convenience you can copy it onto your `PATH`:
 
@@ -143,6 +172,33 @@ BLE:SCAN:STOP
 If `list` shows exactly one node, every other command auto-detects it — no
 `--device` needed.
 
+Profiles and workflows:
+
+```sh
+$ iotsploit-host profile               # list built-in profiles
+  esp32s3
+  nrf52840
+
+$ iotsploit-host --profile esp32s3 workflow wifi-scan   # run a workflow
+trigger: WLAN:SCAN
+done after 1.4s
+results (2):
+  [0] MyWiFi,-52,cc:cc:cc:cc:cc:cc
+  [1] GuestNet,-78,aa:bb:cc:dd:ee:ff
+
+$ iotsploit-host describe               # on-device descriptor (if supported)
+DEV name=esp32s3 idn="IoTSploit,ESP32S3,0001,0.1.0" proto=1 mtu=256 max_block=4096
+CMD GPIO:SET kind=command summary="Set GPIO output level" param=pin:u32:req param=value:bool:req returns=none
+...
+WF wifi-scan type=trigger_poll_fetch trigger=WLAN:SCAN done=WLAN:SCAN:DONE?:1 count=WLAN:SCAN:COUNt? fetch=WLAN:SCAN?#index
+```
+
+On Windows/macOS, use the raw USB backend with `--backend raw`:
+
+```sh
+iotsploit-host --backend raw --vid 1209 --pid 0001 idn
+```
+
 ## 6. Command reference
 
 General form:
@@ -155,14 +211,17 @@ iotsploit-host [--device <path>] <command> [args]
 
 | Command | What it does |
 |---|---|
-| `list` | Print every `/dev/usbtmc*` node (does not open the device). |
+| `list` | Print every `/dev/usbtmc*` node (Linux only, does not open the device). |
 | `idn` | Query `*IDN?` and print the identity string. |
 | `caps` | Query `SYSTem:CAPabilities?`, parse it, print structured fields. |
 | `headers` | Fetch and list all command headers (`SYSTem:HELP:HEADers?`). |
+| `describe` | Query `SYSTem:HELP:DESCription?` (line-record descriptor). |
 | `query '<cmd>'` | Send any SCPI query, print its text response. |
 | `write '<cmd>'` | Send a non-query SCPI command (no response printed). |
 | `block-read '<cmd>' [--out <file>]` | Query a binary-block response and write the payload to a file (or stdout). |
 | `errors` | Drain the `SYSTem:ERRor?` queue until "No error". |
+| `workflow <name> [params]` | Run a profile-driven workflow (e.g. `wifi-scan`, `ble-scan`). |
+| `profile [name]` | Show profile info or list built-in profiles. |
 | `repl` | Interactive SCPI prompt. |
 | `-h, --help` | Show built-in help. |
 | `-V, --version` | Show version. |
@@ -221,8 +280,7 @@ one-liner commands above (they are easy to script).
 ## 8. Worked example: a BLE scan on the nRF52840
 
 The nRF52840 example firmware exposes a small BLE-scan command set. The
-profile/workflow engine is a later milestone, so for now drive it by hand with
-raw SCPI. From the REPL (or as separate one-liners):
+built-in `nrf52840` profile knows how to drive it:
 
 ```text
 > BLE:SCAN:CLEar        # forget previous results
@@ -247,35 +305,48 @@ ok
 (no errors)
 ```
 
-As one-liners (e.g. inside a shell loop):
+Or with the profile-driven workflow engine (does all the polling for you):
 
 ```sh
-sudo iotsploit-host write  'BLE:SCAN:CLEar'
-sudo iotsploit-host write  'BLE:SCAN:START'
-# poll until state reports 0
-while [ "$(sudo iotsploit-host query 'BLE:SCAN:STATe?')" = "1" ]; do sleep 0.5; done
-n=$(sudo iotsploit-host query 'BLE:SCAN:COUNt?')
-for i in $(seq 0 $((n-1))); do
-  sudo iotsploit-host query "BLE:SCAN:RESult? $i"
-done
+# Load nrf52840 profile, trigger scan, poll until done, fetch all results
+iotsploit-host --profile nrf52840 workflow ble-scan
+# output:
+# trigger: BLE:SCAN:START
+# done after 3.2s
+# results (3):
+#   [0] AA:BB:CC:DD:EE:FF,-67,MySensor
+#   [1] 11:22:33:44:55:66,-81,(unknown)
+#   [2] DE:AD:BE:EF:00:01,-55,Headphones
+```
+
+You can also list available profiles:
+
+```sh
+iotsploit-host profile                # list built-in profiles
+iotsploit-host profile nrf52840       # show nRF52840 profile details
+iotsploit-host profile esp32s3        # show ESP32-S3 profile details
 ```
 
 ## 9. How it works
 
 ```
-your shell ──► iotsploit-host (Rust) ──► /dev/usbtmc0 (kernel USBTMC driver)
-                                                  │
-                                                  ▼
-                                         USB cable (USBTMC)
-                                                  │
-                                                  ▼
-                                      iotsploit-usb firmware
-                                      (libscpi + TinyUSB)
+your shell ──► iotsploit-host (Rust) ──► Transport trait
+                                           │
+                          ┌────────────────┼────────────────┐
+                          │                │                │
+                  /dev/usbtmcN      rusb/libusb       (future TCP)
+                  Linux kernel       Win / mac / Linux
+                                           │
+                                  USB cable (USBTMC)
+                                           │
+                                  iotsploit-usb firmware
+                                  (libscpi + TinyUSB)
 ```
 
 - **Transport** (`transport.rs`): an abstract `write_msg` / `read_msg` trait.
-  The only backend today is `usbtmc_kernel.rs`, which lets the kernel handle
-  USBTMC framing — exactly like the original Python host.
+  - `usbtmc_kernel.rs`: Linux `/dev/usbtmcN` backend (default, zero-dep).
+  - `usbtmc_raw.rs`: raw USBTMC bulk transfers via `rusb`/libusb
+    (`--features raw-usb`). Used on Windows/macOS and optionally on Linux.
 - **Session** (`session.rs`): appends the SCPI `\n` terminator, trims trailing
   CR/LF from text, and never decodes binary blocks as text.
 - **Block** (`block.rs`): parses/encodes IEEE 488.2 definite-length arbitrary
@@ -283,9 +354,14 @@ your shell ──► iotsploit-host (Rust) ──► /dev/usbtmc0 (kernel USBTMC
 - **Caps** (`caps.rs`): tolerantly parses `SYSTem:CAPabilities?`.
 - **Headers** (`headers.rs`): lists commands; falls back to paging for large
   command sets.
+- **Descriptor** (`descriptor.rs`): shared line-record parser for both local
+  profile files (`profiles/*.txt`) and on-device `SYSTem:HELP:DESCription?`.
+  Zero-dependency — plain `std`, no `serde`/`toml`/`serde_json`.
+- **Workflow** (`workflow.rs`): generic `trigger → poll → count → fetch`
+  engine driven by profile/descriptor metadata.
 
-The whole crate is dependency-free on purpose, so it builds anywhere a Rust
-toolchain exists.
+The core crate is dependency-free on purpose. The only optional dependency
+is `rusb` behind the `raw-usb` feature.
 
 ## 10. Troubleshooting
 
@@ -317,7 +393,7 @@ SCPI error queue.
 Unit + fake-transport integration tests (no hardware needed):
 
 ```sh
-cargo test
+cargo test          # 61 tests, zero external deps
 ```
 
 Hardware smoke test (nRF52840, after granting access):
@@ -326,7 +402,93 @@ Hardware smoke test (nRF52840, after granting access):
 iotsploit-host idn
 iotsploit-host caps
 iotsploit-host headers
+iotsploit-host describe
+iotsploit-host --profile nrf52840 workflow ble-scan
 iotsploit-host query 'BLE:SCAN:STATe?'
 iotsploit-host block-read 'DATA:READ? 64' --out /tmp/adc.bin
 iotsploit-host errors
 ```
+
+---
+
+## 12. Platform setup
+
+### Linux
+
+The kernel `/dev/usbtmcN` backend works out of the box. For non-root access,
+install the udev rule from [§4](#4-granting-usb-access-one-time).
+
+For the raw USB backend (optional, useful when the kernel driver is
+unavailable):
+
+```sh
+sudo apt install libusb-1.0-0-dev   # Debian/Ubuntu
+cargo build --release --features raw-usb
+iotsploit-host --backend raw --vid 1209 --pid 0001 idn
+```
+
+### Windows
+
+Windows has no `/dev/usbtmcN` equivalent. Use the raw USB backend:
+
+1. Install the Rust toolchain (`rustup`).
+2. Build with the raw-usb feature:
+   ```sh
+   cargo build --release --features raw-usb --target x86_64-pc-windows-msvc
+   ```
+3. **Driver binding** (one-time per device): use
+   [Zadig](https://zadig.akeo.ie/) to bind the USBTMC interface to
+   **WinUSB** (recommended) or **libusbK**.
+   - In Zadig, select `Options → List All Devices`.
+   - Find the `iotsploit-usb` device (VID 1209, PID 0001).
+   - Set the driver to `WinUSB` and click `Replace Driver`.
+4. Run:
+   ```sh
+   iotsploit-host.exe --backend raw --vid 1209 --pid 0001 idn
+   ```
+
+No NI-VISA dependency is required.
+
+### macOS
+
+macOS also needs the raw USB backend:
+
+1. Install libusb via Homebrew:
+   ```sh
+   brew install libusb
+   ```
+2. Build with the raw-usb feature:
+   ```sh
+   cargo build --release --features raw-usb
+   # Apple Silicon:  aarch64-apple-darwin (default on M-series Macs)
+   # Intel:          x86_64-apple-darwin
+   ```
+3. Run (the first time macOS will prompt for USB permission):
+   ```sh
+   iotsploit-host --backend raw --vid 1209 --pid 0001 idn
+   ```
+
+For distribution, the binary should be code-signed and notarized. This is a
+future packaging task; for development, running locally is fine.
+
+### Release artifact naming
+
+```text
+iotsploit-host-linux-x86_64
+iotsploit-host-windows-x86_64.exe
+iotsploit-host-macos-x86_64
+iotsploit-host-macos-aarch64
+```
+
+### Smoke-test checklist (per OS)
+
+| Check | Linux | Windows | macOS |
+|---|---|---|---|
+| `--backend auto idn` works | ✓ (kernel) | ✓ (raw) | ✓ (raw) |
+| `--backend raw --vid 1209 --pid 0001 idn` | ✓ | ✓ | ✓ |
+| `headers` returns all commands | ✓ | ✓ | ✓ |
+| `query '*IDN?'` matches expected IDN | ✓ | ✓ | ✓ |
+| `block-read 'DATA:READ? 64' --out /tmp/adc.bin` | ✓ | ✓ | ✓ |
+| `--profile esp32s3 workflow wifi-scan` | ✓ | ✓ | ✓ |
+| `--profile nrf52840 workflow ble-scan` | ✓ | ✓ | ✓ |
+| `describe` returns line-record descriptor | ✓ (if fw supports) | ✓ | ✓ |

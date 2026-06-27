@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct {
@@ -283,6 +284,117 @@ static void test_new_default_commands(void) {
     assert(strstr(f.tx, "SYSTem:ERRor?") != NULL);
 }
 
+/* ---- Descriptor (SYSTem:HELP:DESCription?) test data ---- */
+
+static const usbscpi_param_desc_t desc_gpio_params[] = {
+    { "pin", "u32", true },
+    { "value", "bool", true },
+};
+
+static const usbscpi_command_desc_t desc_commands[] = {
+    { "GPIO:SET", "command", "Set GPIO output level", desc_gpio_params, 2, "none" },
+    { "WLAN:SCAN", "command", "Start Wi-Fi scan", NULL, 0, NULL },
+    { "WLAN:SCAN?", "query", "Get scan result by index", NULL, 0, "string" },
+};
+
+static const usbscpi_workflow_desc_t desc_workflows[] = {
+    {
+        .name = "wifi-scan",
+        .type = "trigger_poll_fetch",
+        .summary = "Scan for Wi-Fi access points",
+        .trigger_cmd = "WLAN:SCAN",
+        .done_query = "WLAN:SCAN:DONE?",
+        .done_value = "1",
+        .count_query = "WLAN:SCAN:COUNt?",
+        .fetch_query = "WLAN:SCAN?",
+        .state_query = NULL,
+        .success_value = NULL,
+        .timeout_ms = 15000,
+        .poll_ms = 250,
+    },
+};
+
+static const usbscpi_descriptor_t test_descriptor = {
+    .commands = desc_commands,
+    .command_count = 3,
+    .workflows = desc_workflows,
+    .workflow_count = 1,
+};
+
+static void test_descriptor_query(void) {
+    fixture_t f;
+    uint8_t storage[2048];
+    char line[96];
+    uint8_t io_buf[512];
+    usbscpi_config_t cfg = {
+        .usb_tx = tx_cb,
+        .line_buf = line,
+        .line_buf_len = sizeof(line),
+        .max_block_len = 4096,
+        .idn = "Test,USBSCPI,SN1,0.1.0",
+        .io_buf = io_buf,
+        .io_buf_len = sizeof(io_buf),
+        .proto = 1,
+        .mtu = 256,
+        .descriptor = &test_descriptor,
+        .user = &f,
+    };
+    usbscpi_t *dev = usbscpi_init(storage, sizeof(storage), &cfg);
+    assert(dev);
+
+    /* SYST:HELP:DESC? should return an IEEE 488.2 block with line-record text */
+    f.tx_len = 0;
+    f.tx[0] = '\0';
+    assert(usbscpi_on_rx(dev, "SYST:HELP:DESC?\n", 17, true) == USBSCPI_OK);
+
+    /* Response must be a definite-length arbitrary block: #<ndigits><len><payload> */
+    assert(f.tx[0] == '#');
+    int ndigits = f.tx[1] - '0';
+    assert(ndigits >= 1 && ndigits <= 9);
+
+    /* Parse block length */
+    char len_str[16] = {0};
+    memcpy(len_str, &f.tx[2], (size_t)ndigits);
+    size_t block_len = (size_t)atoi(len_str);
+    assert(block_len > 0);
+
+    /* Block payload starts after #<ndigits><length> */
+    const char *content = &f.tx[2 + ndigits];
+
+    /* Verify line-record content */
+    assert(strstr(content, "DEV idn=") != NULL);
+    assert(strstr(content, "proto=1") != NULL);
+    assert(strstr(content, "mtu=256") != NULL);
+    assert(strstr(content, "CMD GPIO:SET") != NULL);
+    assert(strstr(content, "kind=command") != NULL);
+    assert(strstr(content, "summary=\"Set GPIO output level\"") != NULL);
+    assert(strstr(content, "param=pin:u32:req") != NULL);
+    assert(strstr(content, "param=value:bool:req") != NULL);
+    assert(strstr(content, "returns=none") != NULL);
+    assert(strstr(content, "CMD WLAN:SCAN") != NULL);
+    assert(strstr(content, "CMD WLAN:SCAN?") != NULL);
+    assert(strstr(content, "WF wifi-scan") != NULL);
+    assert(strstr(content, "type=trigger_poll_fetch") != NULL);
+    assert(strstr(content, "trigger=WLAN:SCAN") != NULL);
+    assert(strstr(content, "done=WLAN:SCAN:DONE?:1") != NULL);
+    assert(strstr(content, "fetch=WLAN:SCAN?#index") != NULL);
+    assert(strstr(content, "timeout_ms=15000") != NULL);
+    assert(strstr(content, "poll_ms=250") != NULL);
+}
+
+static void test_descriptor_unsupported(void) {
+    fixture_t f;
+    uint8_t storage[2048];
+    char line[96];
+    usbscpi_t *dev = make_device(&f, storage, sizeof(storage), line, sizeof(line));
+    /* descriptor is NULL by default in make_device */
+
+    f.tx_len = 0;
+    f.tx[0] = '\0';
+    /* Should push SCPI error (undefined header) and return non-OK */
+    assert(usbscpi_on_rx(dev, "SYST:HELP:DESC?\n", 17, true) != USBSCPI_OK);
+}
+
 static void test_ring_buffer(void) {
     uint8_t backing[8];
     uint8_t out[8];
@@ -302,6 +414,8 @@ int main(void) {
     test_binary_block_split_and_special_bytes();
     test_error_queue_and_free_query();
     test_new_default_commands();
+    test_descriptor_query();
+    test_descriptor_unsupported();
     test_ring_buffer();
     puts("usbscpi tests passed");
     return 0;

@@ -1,0 +1,27 @@
+# ESP32-S3 iotsploit-usb profile
+# VID 1209:0001, *IDN? -> IoTSploit,ESP32-S3,<sn>,<ver>
+DEV name=esp32s3 idn_match="ESP32" idn="IoTSploit,ESP32S3,0001,0.1.0" proto=1 mtu=256 max_block=4096
+CMD GPIO:SET kind=command summary="Set GPIO output level" param=pin:u32:req param=value:bool:req returns=none
+CMD GPIO:GET? kind=query summary="Read GPIO input level" param=pin:u32:req returns=u32
+CMD ADC:READ? kind=query summary="Read ADC value" param=channel:u32:req returns=u32
+CMD WLAN:SCAN kind=command summary="Trigger a Wi-Fi SSID scan"
+CMD WLAN:SCAN:DONE? kind=query summary="1 = scan finished, 0 = still scanning" returns=bool
+CMD WLAN:SCAN:COUNt? kind=query summary="Number of access points found" returns=u32
+CMD WLAN:SCAN? kind=query summary="Get scan result by index (ssid,rssi,channel,authmode,bssid)" param=index:u32:req returns=string
+CMD BLE:SCAN kind=command summary="Start BLE scan for N seconds" param=duration:u32:req
+CMD BLE:SCAN:DONE? kind=query summary="1 = scan finished, 0 = still scanning" returns=bool
+CMD BLE:SCAN:COUNt? kind=query summary="Number of BLE devices found" returns=u32
+CMD BLE:SCAN? kind=query summary="Get BLE scan result by index (addr,rssi,name,adv_type)" param=index:u32:req returns=string
+CMD BLE:CONNect kind=command summary="Connect to BLE scan result by index" param=index:u32:req
+CMD BLE:CONNect:STATe? kind=query summary="0=idle 1=connecting 2=connected 3=failed" returns=u32
+CMD BLE:DISConnect kind=command summary="Disconnect active BLE connection"
+CMD BLE:PAIR kind=command summary="Initiate BLE pairing"
+CMD BLE:PAIR:STATe? kind=query summary="0=idle 1=in-progress 2=passkey-needed 3=numcmp-needed 4=done 5=failed 6=display-key" returns=u32
+CMD BLE:PAIR:PASSKey kind=command summary="Enter the 6-digit passkey shown on the peer" param=key:string:req
+CMD BLE:PAIR:PASSKey? kind=query summary="Get the passkey to enter on the peer" returns=string
+CMD BLE:PAIR:NUMCmp? kind=query summary="Get the numeric comparison value" returns=u32
+CMD BLE:PAIR:CONFirm kind=command summary="Confirm (1) or reject (0) numeric comparison" param=accept:bool:req
+CMD BLE:SEC? kind=query summary="Security info: mac,level,encrypted,authenticated,bonded,key_size" returns=string
+WF wifi-scan type=trigger_poll_fetch trigger=WLAN:SCAN done=WLAN:SCAN:DONE?:1 count=WLAN:SCAN:COUNt? fetch=WLAN:SCAN?#index timeout_ms=15000 poll_ms=250
+WF ble-scan type=trigger_poll_fetch trigger=BLE:SCAN done=BLE:SCAN:DONE?:1 count=BLE:SCAN:COUNt? fetch=BLE:SCAN?#index timeout_ms=30000 poll_ms=500
+WF ble-connect type=trigger_poll_interactive trigger=BLE:CONNect state=BLE:CONNect:STATe? success=2 failed=3 timeout_ms=15000 poll_ms=200

@@ -7,10 +7,15 @@
 
 pub mod block;
 pub mod caps;
+pub mod descriptor;
 pub mod headers;
 pub mod session;
 pub mod transport;
 pub mod usbtmc_kernel;
+pub mod workflow;
+
+#[cfg(feature = "raw-usb")]
+pub mod usbtmc_raw;
 
 use std::fmt;
 
