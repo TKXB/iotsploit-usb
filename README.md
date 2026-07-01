@@ -20,9 +20,8 @@ The host project owns USB initialization and device-specific I/O. This component
 ```text
 include/usbscpi/usbscpi.h       public component API
 include/usbscpi/ring_buffer.h   optional SPSC ring helper
-include/scpi/scpi.h             small libscpi-compatible subset for examples/tests
 src/usbscpi.c                   core receive path and standard commands
-src/scpi_compat.c               minimal SCPI parser/result/error implementation
+third_party/libscpi/            vendored libscpi v2.3
 helpers/ring_buffer.c           optional ring helper
 glue/usbscpi_tinyusb.c          optional TinyUSB USBTMC adapter
 examples/pico2/                 Raspberry Pi Pico (RP2040) TinyUSB demo
