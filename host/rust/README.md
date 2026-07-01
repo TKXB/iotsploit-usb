@@ -6,7 +6,7 @@ host talks to it through the Linux kernel's `/dev/usbtmcN` driver, so you do
 not need any board-specific code on the PC — one binary controls every board.
 
 > This implements **Milestones 0–10** of the host plan
-> ([`docs/iotsploit-usb-rust-host-plan-updated.md`](../../docs/iotsploit-usb-rust-host-plan-updated.md)):
+> ([`docs/iotsploit-usb-rust-host-plan.md`](../../docs/iotsploit-usb-rust-host-plan.md)):
 > a dependency-free core with text query/write, IEEE 488.2 binary-block
 > support, capabilities parsing, command-header discovery, line-record
 > profiles, workflow engine, device descriptor, and cross-platform raw

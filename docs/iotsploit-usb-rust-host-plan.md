@@ -1,220 +1,271 @@
-# iotsploit-usb Generic Rust Host Plan
+# iotsploit-usb Generic Rust Host Plan (Updated 2026-06-26)
 
 ## Summary
 
-Build a generic Rust host for `iotsploit-usb` that can control devices through SCPI over USBTMC without hardcoding every board-specific workflow in Rust code.
+Build a generic Rust host for `iotsploit-usb` that can control devices through
+SCPI over USBTMC without hardcoding every board-specific workflow in Rust code.
 
-The recommended target is:
+**Current state**: Milestones 0–4 are **complete and merged to `main`**. The
+Rust host currently lives at `examples/host-rs/` and is a fully functional,
+dependency-free Linux CLI tool through the kernel `/dev/usbtmcN` interface. The
+`feat/host-rs` branch pointer currently matches `main` — all host code was
+merged directly.
 
-1. A stable Rust core that speaks SCPI over `/dev/usbtmcN`.
-2. Runtime discovery using existing device commands such as `*IDN?`, `SYSTem:CAPabilities?`, and `SYSTem:HELP:HEADers?`.
-3. A machine-readable optional descriptor command that exposes parameters, return types, and higher-level workflow metadata.
-4. A profile fallback for devices that only expose command headers but not a full descriptor yet.
+**Directory restructure (Decided 2026-06-26, Layout A)**: The Rust host is a
+first-class deliverable, not a demo, so it moves out of `examples/` into a
+dedicated top-level `host/` directory that groups *all* upper-computer
+implementations by language. The existing Python host (`scan_test.py`) moves
+alongside it. See [Repository Layout](#repository-layout-decided-2026-06-26)
+below. This restructure ships as its own `refactor/host-layout` PR *before* the
+Milestone 5 work begins.
 
-This gives a practical migration path from the current Python host script to one host binary that can control multiple `iotsploit-usb` devices.
+**Updated requirement**: the Rust host must support **Linux, Windows, and
+macOS**. Linux should keep the existing `/dev/usbtmcN` backend because it is
+simple and already working. Windows and macOS need a raw USBTMC backend based on
+USB bulk transfers, implemented behind the same `Transport` trait.
+
+---
+
+## Repository Layout (Decided 2026-06-26)
+
+The Rust host moves from `examples/host-rs/` to a dedicated top-level `host/`
+directory. `host/` is the home for *all* upper-computer implementations, split
+by language, so `examples/` is reserved for firmware demos only.
+
+**Target layout (Layout A):**
+
+```
+iotsploit-usb/
+├── host/
+│   ├── rust/               # was examples/host-rs/ — moved wholesale
+│   │   ├── Cargo.toml
+│   │   ├── README.md
+│   │   ├── src/
+│   │   └── profiles/       # Milestone 5: esp32s3.txt / nrf52840.txt (line records)
+│   ├── python/             # scan_test.py and any other Python host code
+│   └── README.md           # explains the role of each host implementation
+└── examples/               # firmware-only demos (esp32s3, nrf52840, ...)
+```
+
+**Rationale**: by its planned scope (multiple transport backends, profiles,
+workflows, descriptor client, cross-platform release artifacts) the Rust host is
+a first-class product, not an example. `host/rust` + `host/python` keeps each
+host independent and gives the directory clean, future-proof semantics.
+
+**Migration rules** (single `refactor/host-layout` PR, no functional changes):
+
+1. `git mv examples/host-rs host/rust` and `git mv scan_test.py host/python/`
+   (adjust for the real Python host path) to preserve commit history.
+2. The crate is path-relative and zero-dep, so `cargo build`/`cargo test` need
+   no changes after the move; but update any workspace `Cargo.toml` `members`,
+   `README.md` example paths, and CI/scripts that hard-code `examples/host-rs`.
+3. Add `host/README.md` describing the Rust vs Python host roles.
+4. Keep this restructure isolated from the Milestone 5/6 feature work — it lands
+   first, on its own branch, off `main`.
+5. Firmware example paths (`examples/esp32s3/...`, `examples/nrf52840/...`) stay
+   put; only host code moves.
+
+The architecture trees and paths elsewhere in this plan reflect the post-move
+`host/rust/` location.
+
+---
+
+## Metadata Format: Line Records (Decided 2026-06-26)
+
+Command/parameter/workflow metadata uses **neither TOML nor JSON**. It uses a
+flat, line-oriented `TAG key=value` text format — the "line-record" format. The
+**same** text is used in two places:
+
+1. As an on-device descriptor returned by `SYST:HELP:DESC?` (M7/M8).
+2. As a local profile file bundled with the host for firmware that does not yet
+   implement the descriptor (M5).
+
+### Why line records (not JSON/TOML)
+
+- **Firmware can emit it with `printf`** into a fixed buffer — no heap, no JSON
+  encoder, no bracket/quote pairing. This directly removes the M8 "no-heap JSON
+  serialization" pain that motivated dropping JSON.
+- **Host stays zero-dependency** — no `serde`/`serde_json`/`toml`. The parser is
+  plain `std`: split lines, tokenize on whitespace honoring quotes, skip unknown
+  keys — the same tolerant style already in `caps.rs` and `headers.rs`.
+- **One format, two uses** — profile file and descriptor response are literally
+  the same text, so profiles can be auto-generated by dumping a device.
+- **Backward compatible** — it is `SYST:HELP:HEAD?` with annotations; a parser
+  reading old firmware (bare headers, no annotations) degrades cleanly.
+
+### Grammar (v1)
+
+- One record per line. Blank lines and lines starting with `#` are ignored.
+- A record is a leading **TAG** followed by space-separated `key=value` tokens.
+- Values containing spaces are double-quoted; `\"` and `\\` are the only
+  escapes. Unknown keys are ignored (forward-compatible).
+- Repeatable keys (e.g. `param=`) may appear multiple times on one record.
+
+Tags:
+
+- `CMD <pattern>` — one command. Keys: `kind` (`command`|`query`), `summary`,
+  `param=<name>:<type>:<req|opt>` (repeatable), `returns=<type>`.
+- `WF <name>` — one workflow. Keys: `type` (`trigger_poll_fetch` |
+  `trigger_poll_interactive`), `trigger=<cmd>`, `done=<query>:<done_value>`,
+  `count=<query>`, `fetch=<query>#<index_param>`, `timeout_ms`, `poll_ms`.
+- `DEV` — optional device header. Keys: `idn`, `proto`, `mtu`, `max_block`.
+
+### Example (`profiles/esp32s3.txt` / `SYST:HELP:DESC?` output)
+
+```
+# iotsploit line-record descriptor v1
+DEV idn="IoTSploit,ESP32S3,0001,0.1.0" proto=1 mtu=256 max_block=4096
+CMD GPIO:SET kind=command summary="Set GPIO output level" param=pin:u32:req param=value:bool:req returns=none
+CMD WLAN:SCAN kind=command summary="Start Wi-Fi scan"
+CMD WLAN:SCAN:COUNt? kind=query returns=u32
+WF wifi-scan type=trigger_poll_fetch trigger=WLAN:SCAN done=WLAN:SCAN:DONE?:1 count=WLAN:SCAN:COUNt? fetch=WLAN:SCAN?#index timeout_ms=15000 poll_ms=250
+```
+
+Both the M5 profile loader and the M7 descriptor client parse this into the
+**same** Rust structs via one shared `descriptor` module.
+
+---
 
 ## Implementation Status
 
-Tracked on branch `feat/host-rs` (work uncommitted, ready for review).
+| Milestone | Scope | Status | Notes |
+|---|---|---|---|
+| 0 | Planning & skeleton | ✅ DONE | `cargo check` passes, `--help` works |
+| 1 | Linux `/dev/usbtmc` transport | ✅ DONE | `UsbtmcKernel` with auto-detect |
+| 2 | SCPI session & text queries | ✅ DONE | `write`, `query`, `drain_errors` |
+| 3 | Binary block support | ✅ DONE | `block.rs` parser/encoder, `query_block`, `write_block` |
+| 4 | Command discovery & REPL | ✅ DONE | `headers.rs`, interactive REPL |
+| R | Directory restructure → `host/rust` | ✅ DONE | Layout A; `host/rust` + `host/python` |
+| 5 | Profile metadata (line records) | ✅ DONE | Line-based `TAG key=value` text; zero-dep, shared with M7 |
+| 6 | Workflow engine | ✅ DONE | `trigger_poll_fetch` + `trigger_poll_interactive` patterns |
+| 7 | Descriptor client (Rust) | ✅ DONE | `SYST:HELP:DESC?` line-record consumer, shared parser |
+| 8 | Firmware descriptor (`SYST:HELP:DESC?`) | ✅ DONE | `snprintf` line records, no heap, IEEE 488.2 block |
+| 9 | Desktop cross-platform USB backend | ✅ DONE | `UsbtmcRaw` via `rusb`/libusb, `--backend` selector |
+| 10 | Packaging and platform docs | ✅ DONE | Linux udev, Windows driver, macOS permissions |
 
-| Milestone | Scope | Status |
-|---|---|---|
-| 0 | Planning & skeleton | DONE |
-| 1 | Linux `/dev/usbtmc` transport | DONE |
-| 2 | SCPI session & text queries | DONE |
-| 3 | Binary block support | DONE |
-| 4 | Profile metadata (TOML) | TODO |
-| 5 | Workflow engine | TODO |
-| 6 | Descriptor client (Rust) | TODO |
-| 7 | Firmware descriptor (`SYST:HELP:DESC?`) | TODO |
-| 8 | Optional raw USB backend (`rusb`) | TODO (optional) |
+---
 
-### Completed (Milestones 0-3 = First PR scope)
+## What's Built (Milestones 0–4)
 
-Implemented under `examples/host-rs/` as a dependency-free crate:
+### Architecture
 
-- `src/lib.rs`, `transport.rs`, `usbtmc_kernel.rs`, `block.rs`, `session.rs`,
-  `caps.rs`, `headers.rs`, `src/bin/iotsploit-host.rs`
-- CLI: `list`, `idn`, `caps`, `headers`, `query`, `write`, `block-read`,
-  `errors`, `repl`, plus `--device`, `--help`, `--version`
-- 32 unit + fake-transport tests pass (`cargo test`); `cargo build --release`
-  is clean with **no external dependencies**.
-
-Verified on hardware (nRF52840, VID `1209:0001`, `/dev/usbtmc0`):
-
-- `idn` -> `IoTSploit,nRF52840,0001,0.1.0`
-- `caps` -> tolerates the nRF libc `%zu`->`zu` quirk (mtu/maxblock reported
-  as `None` with a warning instead of failing)
-- `headers` -> all 17 registered commands
-- `query 'BLE:SCAN:STATe?'` -> `0`
-- `block-read 'DATA:READ? 64' --out /tmp/adc.bin` -> 0-byte file (empty `#10`
-  block; this board wires no data source to `DATA:READ?`)
-- `write 'BLE:SCAN:CLEar'` -> returns in ~21 ms with no hang; follow-up
-  `*OPC?`/`*IDN?` confirm no read desync
-- `errors` -> `(no errors)`
-
-Protocol note (confirmed from libscpi source, not just probing): non-query
-commands produce no SCPI output, but the TinyUSB glue answers every kernel IN
-request with a dummy `\n`. `session::write_and_drain` consumes that dummy so
-the transport stays in sync without ever blocking.
-
-### Remaining work
-
-- **Milestone 4** (Second PR): TOML profile parser + `profiles/*.toml`. Note:
-  the crate is currently dependency-free, so TOML parsing needs either a crate
-  (`toml` + `serde`) or a small hand-rolled parser.
-- **Milestone 5** (Second PR): generic `trigger_poll_fetch` workflow engine.
-  Heads-up: the nRF52840 BLE scan commands differ from the ESP32-S3 demo
-  (`BLE:SCAN:START`/`STOP`/`STATe?`/`COUNt?`/`RESult?`/`CLEar` vs the
-  ESP32-S3 `BLE:SCAN`/`SCAN:DONE?`/`SCAN:COUNt?`/`SCAN?`), so workflow
-  metadata and any `nrf52840.toml` profile must reflect the nRF command set.
-- **Milestone 6** (Third PR): `SYST:HELP:DESC?` client + JSON parser +
-  `describe` CLI, with clean fallback when the command is absent.
-- **Milestone 7** (Fourth PR): firmware-side descriptor structs + the
-  `SYSTem:HELP:DESCription?` core command returning a JSON block.
-- **Milestone 8** (optional): `rusb` raw-USB backend behind a feature flag.
-
-## Current State
-
-The current ESP32-S3 host example is:
-
-- `examples/esp32s3/host/scan_test.py`
-
-It opens `/dev/usbtmcN` directly and relies on the Linux kernel USBTMC driver for framing. The script writes SCPI text lines and reads text responses.
-
-Current limitations:
-
-- Device-specific commands are hardcoded in Python:
-  - `WLAN:SCAN`
-  - `WLAN:SCAN:DONE?`
-  - `WLAN:SCAN:COUNt?`
-  - `WLAN:SCAN?`
-  - `BLE:SCAN`
-  - `BLE:SCAN:DONE?`
-  - `BLE:SCAN:COUNt?`
-  - `BLE:SCAN?`
-  - `BLE:CONNect`
-  - `BLE:PAIR`
-  - `BLE:SEC?`
-- The script assumes all responses are UTF-8-ish text.
-- It cannot correctly handle binary block responses such as `DATA:READ?`.
-- Adding a new device or workflow means editing Python code.
-
-The device core already exposes useful generic commands in:
-
-- `src/usbscpi.c`
-
-Relevant core commands:
-
-- `*IDN?`
-- `*RST`
-- `*CLS`
-- `*OPC?`
-- `SYSTem:ERRor?`
-- `SYSTem:ERRor:COUNt?`
-- `SYSTem:CAPabilities?`
-- `SYSTem:HELP:HEADers?`
-- `DATA:FREE?`
-- `DATA:COUNt?`
-- `DATA:READ?`
-
-The ESP32-S3 demo command table is in:
-
-- `examples/esp32s3/main/app_main.c`
-
-That table proves the firmware already has a clear command registry. The missing piece is a machine-readable description of each command's parameters, response type, and workflow semantics.
-
-## Design Decision
-
-Do not make the first Rust version depend on a full descriptor being present.
-
-Instead, implement three levels:
-
-### Level 1: Generic SCPI Session
-
-This is the first required milestone.
-
-The host supports:
-
-- open `/dev/usbtmcN`
-- write SCPI commands
-- query text responses
-- query IEEE 488.2 definite-length arbitrary blocks
-- write arbitrary blocks for `:DATA:WRITE`
-- parse `*IDN?`
-- parse `SYSTem:CAPabilities?`
-- fetch command headers from `SYSTem:HELP:HEADers?`
-- drain `SYSTem:ERRor?`
-
-This level is device-independent.
-
-### Level 2: Host Profile Fallback
-
-Use a TOML profile to describe parameter and response metadata for known devices while firmware descriptor support is not available.
-
-This allows the Rust host to replace `scan_test.py` quickly without blocking on firmware changes.
-
-Example profile use cases:
-
-- Wi-Fi scan workflow.
-- BLE scan workflow.
-- BLE connect and pair workflow.
-- GPIO read/write commands.
-- ADC read commands.
-
-### Level 3: Device Descriptor
-
-Add a device-side descriptor command as a compliant SCPI extension.
-
-Recommended command:
-
-- `SYSTem:HELP:DESCription?`
-
-Short form accepted by the host:
-
-- `SYST:HELP:DESC?`
-
-The descriptor is not a complete built-in SCPI standard schema. It is an `iotsploit-usb` extension under the SCPI tree. It should return JSON or CBOR wrapped in an IEEE 488.2 definite-length arbitrary block.
-
-This is still compatible with SCPI message framing because the payload is carried as arbitrary bytes inside a definite-length block.
-
-## Repository Layout
-
-Recommended initial location:
-
-```text
-examples/host-rs/
-├── Cargo.toml
-├── README.md
-├── profiles/
-│   └── esp32s3.toml
-└── src/
-    ├── lib.rs
-    ├── transport.rs
-    ├── usbtmc_kernel.rs
-    ├── block.rs
-    ├── session.rs
-    ├── caps.rs
-    ├── headers.rs
-    ├── descriptor.rs
-    ├── profile.rs
-    ├── workflow.rs
-    ├── repl.rs
-    └── bin/
-        └── iotsploit-host.rs
+```
+host/rust/                  # (was examples/host-rs/ — see Repository Layout)
+├── Cargo.toml              # zero external dependencies
+├── README.md               # comprehensive usage guide
+├── src/
+│   ├── lib.rs              # Error enum, Result alias
+│   ├── transport.rs        # Transport trait (write_msg / read_msg)
+│   ├── usbtmc_kernel.rs    # /dev/usbtmcN backend (open, auto_detect)
+│   ├── block.rs            # IEEE 488.2 definite-length block parse/encode
+│   ├── session.rs          # ScpiSession: write, query, query_block, write_block, drain_errors
+│   ├── caps.rs             # SYSTem:CAPabilities? parser (tolerant, handles %zu quirk)
+│   ├── headers.rs          # SYSTem:HELP:HEADers? fetch with paged fallback
+│   └── bin/
+│       └── iotsploit-host.rs  # CLI binary
+└── target/
+    ├── debug/              # debug build artifacts
+    └── release/
+        └── iotsploit-host  # optimized binary (~0 external deps = fast build)
 ```
 
-Reasoning:
+### Key Design Decisions
 
-- It keeps the host next to the examples it replaces.
-- It does not disturb the existing C library or ESP-IDF component layout.
-- It can be moved to a standalone crate later if it becomes a reusable tool.
+1. **Zero dependencies** — the entire crate builds with only `std`. No `serde`,
+   `toml`, `clap`, or `anyhow`. CLI parsing is hand-rolled. This means the host
+   builds anywhere a Rust toolchain exists, including offline/embedded dev
+   machines.
 
-## Rust Module Plan
+2. **Transport trait** — `write_msg`/`read_msg` abstraction allows future
+   backends (`rusb`, TCP/VISA) without changing session logic.
 
-### `transport.rs`
+3. **Binary correctness** — `block.rs` parses IEEE 488.2 blocks at the byte
+   level, never decoding binary as UTF-8. This is a hard improvement over the
+   Python host which does `os.read(...).decode()`.
 
-Define the transport abstraction.
+4. **Tolerant parsing** — `caps.rs` handles the nRF52840 libc quirk where
+   `%zu` prints literally as `zu`. Instead of failing, it records parse errors
+   and falls back to safe defaults (mtu=256, maxblock=4096).
+
+5. **`write_and_drain`** — non-query SCPI commands produce no real output, but
+   the TinyUSB glue answers every kernel IN request with a dummy `\n`. The
+   session consumes that dummy to keep the transport in sync.
+
+### CLI Commands
+
+```
+iotsploit-host list                          # list /dev/usbtmc* nodes
+iotsploit-host idn                           # *IDN?
+iotsploit-host caps                          # SYSTem:CAPabilities? (parsed)
+iotsploit-host headers                       # SYSTem:HELP:HEADers? (all)
+iotsploit-host query '<cmd>'                 # text query
+iotsploit-host write '<cmd>'                 # non-query command
+iotsploit-host block-read '<cmd>' [--out F]  # binary block → file/stdout
+iotsploit-host errors                        # drain SYSTem:ERRor? queue
+iotsploit-host repl                          # interactive SCPI prompt
+```
+
+---
+
+## Updated Cross-Platform Requirement: Linux, Windows, macOS
+
+The host should have one shared Rust SCPI/session/workflow stack and multiple
+transport backends.
+
+### Required Transport Strategy
+
+```
+                 ┌──────────────────────────────┐
+                 │ shared Rust host core         │
+                 │ session/block/caps/headers    │
+                 │ profile/workflow/descriptor   │
+                 └───────────────┬──────────────┘
+                                 │ Transport trait
+         ┌───────────────────────┼───────────────────────┐
+         │                       │                       │
+ ┌───────▼────────┐      ┌───────▼────────┐      ┌───────▼────────┐
+ │ Linux kernel   │      │ Raw USBTMC     │      │ future network │
+ │ /dev/usbtmcN   │      │ rusb/libusb    │      │ TCP/VISA bridge│
+ │ already built  │      │ Win/Linux/macOS│      │ optional       │
+ └────────────────┘      └────────────────┘      └────────────────┘
+```
+
+The existing `UsbtmcKernel` backend stays as the fastest Linux path. The new
+cross-platform backend should be `UsbtmcRaw`, built on `rusb`/libusb and the
+USBTMC bulk protocol.
+
+### Backend Selection
+
+Recommended CLI behavior:
+
+```text
+iotsploit-host --backend auto idn
+iotsploit-host --backend kernel --device /dev/usbtmc0 idn
+iotsploit-host --backend raw --vid 1209 --pid 0001 idn
+iotsploit-host --backend raw --serial 0001 headers
+```
+
+`auto` should mean:
+
+1. On Linux, try `/dev/usbtmcN` first if present.
+2. If no kernel node exists, try raw USB backend.
+3. On Windows and macOS, use raw USB backend.
+
+### Raw USBTMC Backend Scope
+
+`UsbtmcRaw` must implement USBTMC device-dependent message transfers directly:
+
+- enumerate USB devices by VID/PID/interface class
+- find USBTMC interface and bulk IN/OUT endpoints
+- claim the interface
+- send DEV_DEP_MSG_OUT with USBTMC header
+- read DEV_DEP_MSG_IN response packets
+- reassemble multi-packet responses
+- honor EOM
+- implement clear/abort later if needed
+- expose timeouts consistently across platforms
+
+This backend should still implement the existing `Transport` trait:
 
 ```rust
 pub trait Transport {
@@ -223,837 +274,446 @@ pub trait Transport {
 }
 ```
 
-The transport should treat one write as one USBTMC device-dependent message and one read as one response message.
+The `ScpiSession`, block parser, capabilities parser, headers fetcher, profile
+engine, workflow engine, and descriptor client must not care which backend is
+used.
 
-### `usbtmc_kernel.rs`
+### Linux Support
 
-Linux MVP backend using `/dev/usbtmcN`.
+Linux has two supported paths:
 
-Responsibilities:
+1. **Kernel backend**: `/dev/usbtmcN`, already implemented and verified.
+2. **Raw backend**: libusb/rusb, useful when the kernel driver is unavailable
+   or when behavior must match Windows/macOS.
 
-- open path read/write
-- auto-detect `/dev/usbtmc*`
-- configure read timeout if practical
-- expose clear errors when permission is denied
+Linux requirements:
 
-This backend matches the current Python behavior and avoids implementing raw USBTMC framing in the first phase.
+- keep existing `/dev/usbtmcN` behavior stable
+- add udev documentation for non-root access
+- raw backend should handle kernel-driver-detach only when needed and only when
+  explicitly selected or documented
+- `auto` mode should prefer kernel backend because it is already stable
 
-### `block.rs`
+Linux acceptance:
 
-Implement IEEE 488.2 definite-length arbitrary block support.
+- `iotsploit-host --backend kernel idn` works
+- `iotsploit-host --backend raw --vid 1209 --pid 0001 idn` works
+- `query`, `write`, `headers`, `block-read`, and workflows behave the same on
+  both backends
 
-Required parser behavior:
+### Windows Support
 
-- accept block header `#<digits><len>`
-- read exactly `len` payload bytes
-- preserve arbitrary bytes, including `0x00`, newline, carriage return, comma, quote, and `#`
-- reject malformed headers
-- reject lengths larger than configured maximum
+Windows does not provide a `/dev/usbtmcN` equivalent. The Rust host needs the
+raw USB backend.
 
-Required encoder behavior:
+Windows requirements:
 
-- produce `#<digits><len><payload>`
-- support `:DATA:WRITE #...` command construction
+- support `x86_64-pc-windows-msvc` first
+- use `rusb`/libusb for USB access
+- document driver binding requirements:
+  - WinUSB or libusbK through Zadig, or
+  - a project-provided INF later
+- device selection by VID/PID and serial
+- no dependency on NI-VISA for the first Windows implementation
 
-This is a major improvement over the current Python host because binary data must not be decoded as text.
+Windows acceptance:
 
-### `session.rs`
+- `iotsploit-host.exe --backend raw --vid 1209 --pid 0001 idn` works
+- `headers`, text `query`, non-query `write`, and `block-read` work
+- permission/driver errors explain the WinUSB/libusbK requirement
 
-High-level SCPI session.
+### macOS Support
 
-```rust
-pub struct ScpiSession<T: Transport> {
-    transport: T,
-    read_size: usize,
-    max_block_len: usize,
-}
-```
+macOS also needs the raw USB backend.
 
-Required methods:
+macOS requirements:
 
-- `write(cmd: &str) -> Result<()>`
-- `query(cmd: &str) -> Result<String>`
-- `query_raw(cmd: &str) -> Result<Vec<u8>>`
-- `query_block(cmd: &str) -> Result<Vec<u8>>`
-- `write_block(prefix: &str, payload: &[u8]) -> Result<()>`
-- `drain_errors() -> Result<Vec<ScpiError>>`
+- support Apple Silicon and Intel:
+  - `aarch64-apple-darwin`
+  - `x86_64-apple-darwin`
+- use `rusb`/libusb through Homebrew or bundled packaging later
+- document device permission and code-signing/notarization constraints
+- avoid relying on Linux-specific device paths or ioctls
 
-Important behavior:
+macOS acceptance:
 
-- Text commands should append exactly one newline.
-- Text responses should trim trailing CR/LF only.
-- Binary responses should never go through UTF-8 decoding.
-- Errors should include the SCPI command that failed.
+- `iotsploit-host --backend raw --vid 1209 --pid 0001 idn` works on Apple
+  Silicon
+- same command set passes on Intel when hardware is available
+- `headers`, `query`, `write`, and `block-read` match Linux behavior
 
-### `caps.rs`
+### Cross-Platform Build Matrix
 
-Parse `SYSTem:CAPabilities?`.
-
-Current firmware returns values shaped like:
-
-```text
-proto=1;mtu=256;maxblock=4096;feat=
-```
-
-The parser should be tolerant:
-
-- unknown keys are retained
-- missing keys use safe defaults
-- numeric parse failures return structured errors
-
-Result type:
-
-```rust
-pub struct Capabilities {
-    pub proto: Option<u32>,
-    pub mtu: Option<usize>,
-    pub max_block: Option<usize>,
-    pub features: Vec<String>,
-    pub raw: String,
-}
-```
-
-### `headers.rs`
-
-Fetch command headers from `SYSTem:HELP:HEADers?`.
-
-Responsibilities:
-
-- support pagination with `offset count`
-- handle current line-based response
-- later support block-based response if firmware is tightened for stricter SCPI compatibility
-- normalize command aliases and short/long forms for display
-
-The host should attempt:
-
-1. `SYST:HELP:HEAD? 0 64`
-2. Continue paging until fewer than requested are returned.
-3. Fall back to `SYST:HELP:HEAD?` with no pagination for older firmware.
-
-### `descriptor.rs`
-
-Parse the optional device descriptor returned by `SYST:HELP:DESC?`.
-
-The host should treat descriptor support as optional:
-
-- If present: use it for dynamic command validation, REPL help, and workflow generation.
-- If absent: continue with headers plus profile.
-
-Descriptor query strategy:
-
-1. Query `SYST:HELP:DESC?`.
-2. If response starts with `#`, parse as arbitrary block.
-3. Decode JSON first.
-4. If JSON is not supported later, allow CBOR behind a feature flag.
-5. If the command errors with undefined header, mark descriptor as unavailable.
-
-### `profile.rs`
-
-TOML fallback for command metadata.
-
-Profile data should be mergeable with device discovery:
-
-- Discovery says what commands exist right now.
-- Profile says what parameters and workflows mean.
-- Descriptor, when present, has priority over profile.
-
-The profile must not hide missing commands. If a profile references `BLE:PAIR` but the device does not advertise that header, the host should show it as unavailable.
-
-### `workflow.rs`
-
-Generic workflow engine for common command patterns.
-
-First supported pattern:
+Required CI/build targets:
 
 ```text
-trigger -> poll done -> query count -> fetch indexed rows
+x86_64-unknown-linux-gnu
+x86_64-pc-windows-msvc
+x86_64-apple-darwin
+aarch64-apple-darwin
 ```
 
-This covers:
-
-- `WLAN:SCAN`
-- `BLE:SCAN`
-
-Second supported pattern:
+Optional later:
 
 ```text
-trigger -> poll state -> handle interactive prompts -> query final result
+aarch64-linux-android
+x86_64-linux-android
 ```
 
-This covers:
-
-- `BLE:CONNect`
-- `BLE:PAIR`
-
-The workflow engine should be driven by descriptor/profile metadata, not Rust code hardcoded for Wi-Fi or BLE.
-
-### `repl.rs`
-
-Interactive mode.
-
-Required features:
-
-- list discovered commands
-- show descriptor/profile help for one command
-- run raw SCPI commands
-- run named workflows
-- print text responses
-- save binary block responses to file
-
-REPL should be useful for development but not required for automation.
-
-### CLI Binary
-
-Recommended binary name:
+Recommended cargo features:
 
 ```text
-iotsploit-host
+default = ["kernel"]
+kernel = []          # Linux /dev/usbtmcN backend
+raw-usb = ["rusb"]   # Windows/Linux/macOS raw USBTMC backend
 ```
 
-MVP commands:
+There is **no metadata feature flag and no metadata dependency**: the
+line-record profile (M5) and descriptor client (M7) parse plain text with `std`
+only. The only optional dependency in the whole crate is `rusb` behind
+`raw-usb`. No `serde`, no `serde_json`, no `toml`.
 
-```text
-iotsploit-host list
-iotsploit-host idn
-iotsploit-host caps
-iotsploit-host headers
-iotsploit-host query '*IDN?'
-iotsploit-host write 'GPIO:SET 2,1'
-iotsploit-host block-read 'DATA:READ? 64' --out adc.bin
-iotsploit-host repl
+For Windows/macOS release builds, `raw-usb` should be enabled.
+
+### Dependency Decision Update
+
+The current host has zero external dependencies. The cross-platform USB work is
+the only thing that changes that.
+
+Recommendation:
+
+- keep the core session/block/caps/headers code dependency-light
+- keep the line-record profile (M5) and descriptor client (M7) on `std` only —
+  no serialization crate at all
+- add `rusb` behind a `raw-usb` feature — the **only** optional dependency
+
+This keeps the simple Linux kernel backend small, keeps metadata parsing
+dependency-free, and still allows real Windows/macOS support.
+
+### Hardware Verification (nRF52840)
+
+All commands verified on nRF52840 (`VID 1209:0001`, `/dev/usbtmc0`):
+
+- `idn` → `IoTSploit,nRF52840,0001,0.1.0`
+- `caps` → tolerates `mtu=zu` quirk, reports `proto=Some(1)`
+- `headers` → all 17 registered commands
+- `query 'BLE:SCAN:STATe?'` → `0`
+- `write 'BLE:SCAN:CLEar'` → returns in ~21ms, no hang, no read desync
+- `block-read 'DATA:READ? 64' --out /tmp/adc.bin` → 0-byte file (empty block,
+  expected — no data source wired on this board)
+- `errors` → `(no errors)`
+
+### Tests
+
+32+ unit and fake-transport integration tests pass (`cargo test`):
+
+- Block parser: valid blocks, empty blocks, malformed headers, too-large,
+  payload-too-short, roundtrip encode/parse
+- Caps parser: normal response, features list, `%zu` tolerance, unknown keys,
+  missing keys, empty input, whitespace
+- Headers fetch: unpaged short-circuit, paged fallback, short-page termination
+- Session: query trims newlines, block returns payload only, write appends
+  newline, drain_errors stops at "No error", write_block constructs correct
+  message
+
+---
+
+## Remaining Work
+
+### Milestone 5: Profile Metadata (Line Records) — Second PR
+
+**Format decision (2026-06-26): no TOML, no JSON.** Metadata uses a **line-based
+`TAG key=value` text format** (the "line-record" format, specified under
+[Metadata Format](#metadata-format-line-records-decided-2026-06-26) above). A
+profile is simply a *local, bundled copy of a device descriptor* — the exact
+same text a descriptor-capable device would emit — shipped with the host for
+boards whose firmware does not yet implement `SYST:HELP:DESC?`. One format is
+shared by the offline profile (M5) and the on-device descriptor (M7/M8), parsed
+by one tolerant line parser. **No `serde`, no `serde_json`, no `toml`** — the
+host crate stays zero-dependency.
+
+**Goal**: Describe command parameters and workflows in a line-record text file
+so the host can provide typed help and parameter validation without firmware
+changes.
+
+**Deliverables**:
+- Line-record parser in a shared `descriptor` module (reused verbatim by M7),
+  built on `std` only — split by line, tokenize on whitespace honoring quotes,
+  skip unknown keys (same tolerant style as `caps.rs`/`headers.rs`)
+- `profiles/esp32s3.txt` — Wi-Fi scan, BLE scan, BLE connect/pair, GPIO, ADC
+- `profiles/nrf52840.txt` — BLE scan (different command set than ESP32-S3!)
+- Command metadata merge with discovered headers
+- Validation: warn when profile references a command not in `SYST:HELP:HEAD?`
+- Merge precedence (shared with M7): `device descriptor > local profile >
+  headers-only`
+
+**Why line records beat JSON/TOML here**:
+- Zero host dependencies — parser is plain `std`, in the existing tolerant
+  line-parser style already used by `caps.rs` and `headers.rs`.
+- Firmware-friendly: the device emits records with simple `printf` into a fixed
+  buffer — no heap, no JSON encoder, no bracket/quote matching (this is the M8
+  pain point that motivated dropping JSON).
+- One format, two uses: the profile file and the `SYST:HELP:DESC?` response are
+  the same text, so a profile can be **auto-generated** later by dumping a
+  descriptor-capable device's output straight to a `profiles/*.txt` file.
+- Backward compatible: it is essentially `SYST:HELP:HEAD?` with annotations;
+  the parser degrades cleanly on old firmware that only lists bare headers.
+
+**Key challenge**: The nRF52840 and ESP32-S3 BLE scan commands differ:
+- nRF52840: `BLE:SCAN:START`/`STOP`/`STATe?`/`COUNt?`/`RESult?`/`CLEar`
+- ESP32-S3: `BLE:SCAN`/`SCAN:DONE?`/`SCAN:COUNt?`/`SCAN?`
+
+The record schema must express both command sets, and the workflow engine must
+be generic enough to drive either pattern.
+
+**Estimated effort**: 1.5–2 days (no serialization library to integrate on
+either side)
+
+### Milestone 6: Workflow Engine — Second PR (same)
+
+**Goal**: Generic `trigger → poll → count → fetch` engine driven by
+profile/descriptor metadata.
+
+**Pattern 1: trigger_poll_fetch** (Wi-Fi scan, BLE scan)
+```
+write trigger_cmd
+loop: query done_query until done_value
+query count_query
+for i in 0..count: query fetch_query(i)
 ```
 
-Profile/workflow commands:
-
-```text
-iotsploit-host --profile profiles/esp32s3.toml workflow wifi-scan
-iotsploit-host --profile profiles/esp32s3.toml workflow ble-scan --secs 5
-iotsploit-host --profile profiles/esp32s3.toml workflow ble-connect-pair --index 0
+**Pattern 2: trigger_poll_interactive** (BLE connect/pair)
+```
+write trigger_cmd
+loop: query state, handle passkey/numcmp prompts
+query final result
 ```
 
-Descriptor-first commands:
+**Deliverables**:
+- `workflow.rs` with `run_trigger_poll_fetch()`
+- REPL integration: `workflow wifi-scan`, `workflow ble-scan`
+- Shell-friendly output (one result per line, machine-parseable)
 
-```text
-iotsploit-host describe
-iotsploit-host call GPIO:SET --pin 2 --value 1
-iotsploit-host call ADC:READ --ch 0
+**Estimated effort**: 2–3 days
+
+### Milestone 7: Descriptor Client — Third PR
+
+**Goal**: Rust host can consume an optional `SYST:HELP:DESC?` response and use
+it instead of profile metadata.
+
+**Deliverables**:
+- `descriptor.rs` — query `SYST:HELP:DESC?`, parse the IEEE 488.2 block as
+  line-record text (the **shared** parser also used by the M5 profile loader)
+- Line-record `v1` validation (recognize tags/keys, tolerate unknowns)
+- Merge logic: descriptor > profile > headers-only
+- CLI `describe` command
+- Clean fallback when command is absent (SCPI error → mark unavailable)
+
+**Descriptor schema**: the line-record format specified under
+[Metadata Format](#metadata-format-line-records-decided-2026-06-26). The
+`SYST:HELP:DESC?` response is exactly that text wrapped in an IEEE 488.2 block,
+e.g.:
+
+```
+DEV idn="IoTSploit,ESP32S3,0001,0.1.0" proto=1 mtu=256 max_block=4096
+CMD GPIO:SET kind=command summary="Set GPIO output level" param=pin:u32:req param=value:bool:req returns=none
+WF wifi-scan type=trigger_poll_fetch trigger=WLAN:SCAN done=WLAN:SCAN:DONE?:1 count=WLAN:SCAN:COUNt? fetch=WLAN:SCAN?#index timeout_ms=15000 poll_ms=250
 ```
 
-## Descriptor Schema
+The M5 profile loader and this descriptor client deserialize into the **same**
+Rust structs through one shared `descriptor` module — there is no second schema.
 
-Recommended wire format:
+**Estimated effort**: 1.5–2 days
 
-- command: `SYSTem:HELP:DESCription?`
-- response: IEEE 488.2 definite-length arbitrary block
-- payload: UTF-8 JSON
-- versioned schema
+### Milestone 8: Firmware Descriptor — Fourth PR
 
-Example response bytes:
+**Goal**: Device-side `SYSTem:HELP:DESCription?` returning **line-record text**
+in an IEEE 488.2 definite-length arbitrary block (no JSON).
 
-```text
-#41234{...1234 bytes JSON...}
+**Deliverables**:
+- Static descriptor metadata structs in C (`usbscpi_param_desc_t`,
+  `usbscpi_command_desc_t`)
+- Core `SYSTem:HELP:DESCription?` command in `src/usbscpi.c`
+- Line-record emission into a caller-supplied buffer via plain `snprintf`
+  (no heap, no JSON encoder) — append one `CMD`/`WF`/`DEV` line per record
+- ESP32-S3 descriptor entries for GPIO, ADC, WLAN, BLE, DATA commands
+- C tests
+
+**Implementation rules**:
+- No heap allocation
+- Bounded output buffer; emit records until full
+- Return as definite-length arbitrary block (SCPI-compliant)
+- If the record text exceeds `max_block_len`, return SCPI error (add pagination
+  later if needed)
+- Existing `SYST:HELP:HEAD?` behavior unchanged
+
+**Why this is simpler than JSON on-device**: line records are just sequential
+`snprintf("CMD %s kind=%s ...")` calls into the buffer. There is no nested
+object/array bookkeeping, no comma/brace placement, and no need to escape into a
+JSON string context — only quoting of `summary` values, which is a single
+helper.
+
+**Estimated effort**: 2–4 days
+
+### Milestone 9: Desktop Cross-Platform USB — Required
+
+**Goal**: `rusb` (libusb) backend for Windows, Linux, and macOS.
+
+**Deliverables**:
+- `UsbtmcRaw` transport implementing USBTMC bulk-OUT/IN framing
+- 12-byte USBTMC header construction
+- USB enumeration by VID/PID/serial
+- interface claiming and endpoint discovery
+- response reassembly across multiple USBTMC packets
+- EOM handling
+- timeouts and clear errors across platforms
+- feature-gated build: `cargo build --features raw-usb`
+- backend selector: `--backend auto|kernel|raw`
+- Linux parity test: kernel backend vs raw backend
+- Windows test through WinUSB/libusbK
+- macOS test through libusb
+
+**Platform rules**:
+- Linux keeps `/dev/usbtmcN` as the default path.
+- Windows uses raw USB only.
+- macOS uses raw USB only.
+- Android remains optional and should not block desktop support.
+
+**Estimated effort**: 4–7 days
+
+### Milestone 10: Packaging and Platform Docs — Required
+
+**Goal**: Make the cross-platform host practical to install and run.
+
+**Deliverables**:
+- Linux udev rule example for non-root `/dev/usbtmcN`
+- Windows driver setup doc for WinUSB/libusbK via Zadig or project INF
+- macOS libusb install instructions and notarization/signing notes
+- release artifact naming:
+  - `iotsploit-host-linux-x86_64`
+  - `iotsploit-host-windows-x86_64.exe`
+  - `iotsploit-host-macos-x86_64`
+  - `iotsploit-host-macos-aarch64`
+- smoke-test checklist per OS
+
+**Estimated effort**: 1–2 days
+
+---
+
+## Updated Architecture Diagram
+
+```
+                         ┌──────────────────────┐
+                         │   iotsploit-host CLI  │
+                         │   (iotsploit-host.rs) │
+                         └──────────┬───────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    │               │               │
+              ┌─────▼─────┐  ┌─────▼─────┐  ┌─────▼─────┐
+              │  session   │  │   caps    │  │  headers  │
+              │ write/query│  │  parse    │  │  fetch    │
+              └─────┬──────┘  └───────────┘  └───────────┘
+                    │
+              ┌─────▼──────┐
+              │   block    │  IEEE 488.2 parse/encode
+              └─────┬──────┘
+                    │
+              ┌─────▼──────┐
+              │ transport  │  trait: write_msg / read_msg
+              └─────┬──────┘
+                    │
+         ┌──────────┼──────────┐
+         │          │          │
+   ┌─────▼─────┐ ┌─────▼─────┐ ┌────▼────┐
+   │usbtmc_    │ │usbtmc_raw │ │ (future │
+   │kernel     │ │rusb/libusb│ │  tcp)   │
+   │Linux only │ │Win/Lin/mac│ │         │
+   └───────────┘ └───────────┘ └─────────┘
+         │
+    USB cable (USBTMC)
+         │
+   ┌─────▼──────────┐
+   │ iotsploit-usb  │
+   │ firmware       │
+   │ (libscpi +     │
+   │  TinyUSB)      │
+   └────────────────┘
 ```
 
-Example JSON:
+Future additions (profile, workflow, descriptor) sit between the CLI and
+session layers:
 
-```json
-{
-  "schema": "iotsploit.scpi.descriptor.v1",
-  "device": {
-    "idn": "IoTSploit,ESP32S3,0001,0.1.0",
-    "proto": 1,
-    "mtu": 256,
-    "max_block": 4096
-  },
-  "commands": [
-    {
-      "pattern": "GPIO:SET",
-      "kind": "command",
-      "summary": "Set GPIO output level",
-      "params": [
-        { "name": "pin", "type": "u32", "required": true },
-        { "name": "value", "type": "bool", "required": true }
-      ],
-      "returns": { "type": "none" }
-    },
-    {
-      "pattern": "GPIO:GET?",
-      "kind": "query",
-      "summary": "Read GPIO input level",
-      "params": [
-        { "name": "pin", "type": "u32", "required": true }
-      ],
-      "returns": { "type": "bool" }
-    },
-    {
-      "pattern": "DATA:READ?",
-      "kind": "query",
-      "summary": "Read binary data from the device data source",
-      "params": [
-        { "name": "count", "type": "u32", "required": true, "max": 4096 }
-      ],
-      "returns": { "type": "block", "encoding": "raw" }
-    }
-  ],
-  "workflows": [
-    {
-      "name": "wifi-scan",
-      "type": "trigger_poll_fetch",
-      "trigger": { "command": "WLAN:SCAN" },
-      "done": { "query": "WLAN:SCAN:DONE?", "done_value": "1" },
-      "count": { "query": "WLAN:SCAN:COUNt?" },
-      "fetch": { "query": "WLAN:SCAN?", "index_param": "index" },
-      "timeout_ms": 15000,
-      "poll_ms": 250
-    }
-  ]
-}
+```
+   CLI → profile → workflow → session → transport → device
+              ↑
+         descriptor (optional, overrides profile)
 ```
 
-Required descriptor fields:
+---
 
-- `schema`
-- `commands[].pattern`
-- `commands[].kind`
-- `commands[].params`
-- `commands[].returns`
-
-Optional descriptor fields:
-
-- `summary`
-- `params[].min`
-- `params[].max`
-- `params[].enum`
-- `params[].default`
-- `returns.fields`
-- `workflows`
-- `units`
-- `examples`
-
-Supported parameter types for v1:
-
-- `bool`
-- `u8`
-- `u16`
-- `u32`
-- `i32`
-- `float`
-- `string`
-- `bytes`
-- `enum`
-
-Supported return types for v1:
-
-- `none`
-- `bool`
-- `u32`
-- `i32`
-- `float`
-- `string`
-- `csv`
-- `block`
-
-## Firmware Plan
-
-Firmware changes should be staged after the Rust host MVP is working.
-
-### Firmware Phase 1: Keep Existing Commands Stable
-
-Do not change existing behavior for:
-
-- `SYSTem:CAPabilities?`
-- `SYSTem:HELP:HEADers?`
-- `DATA:READ?`
-- `DATA:FREE?`
-- `DATA:COUNt?`
-- ESP32-S3 WLAN/BLE commands
-
-This lets the Rust host replace the Python host without firmware risk.
-
-### Firmware Phase 2: Add Descriptor Types
-
-Add a small metadata layer next to command registration.
-
-Possible C shape:
-
-```c
-typedef enum {
-    USBSCPI_PARAM_BOOL,
-    USBSCPI_PARAM_U32,
-    USBSCPI_PARAM_I32,
-    USBSCPI_PARAM_STRING,
-    USBSCPI_PARAM_BYTES
-} usbscpi_param_type_t;
-
-typedef enum {
-    USBSCPI_RET_NONE,
-    USBSCPI_RET_BOOL,
-    USBSCPI_RET_U32,
-    USBSCPI_RET_I32,
-    USBSCPI_RET_STRING,
-    USBSCPI_RET_CSV,
-    USBSCPI_RET_BLOCK
-} usbscpi_return_type_t;
-
-typedef struct {
-    const char *name;
-    usbscpi_param_type_t type;
-    bool required;
-    int32_t min_value;
-    int32_t max_value;
-} usbscpi_param_desc_t;
-
-typedef struct {
-    const char *pattern;
-    const char *summary;
-    const usbscpi_param_desc_t *params;
-    size_t param_count;
-    usbscpi_return_type_t return_type;
-} usbscpi_command_desc_t;
-```
-
-Avoid dynamic allocation. The descriptor should be generated from static tables into the existing `io_buf` or another caller-supplied buffer.
-
-### Firmware Phase 3: Add `SYSTem:HELP:DESCription?`
-
-Add a core command in `src/usbscpi.c`.
-
-Implementation rules:
-
-- No heap allocation.
-- Use a bounded output buffer.
-- Return JSON as a definite-length arbitrary block.
-- If descriptor is too large for `mtu`, support pagination or chunking.
-- If descriptor is larger than `max_block_len`, return a SCPI error.
-
-Two viable approaches:
-
-1. Single block if descriptor fits.
-2. Paged descriptor:
-
-```text
-SYST:HELP:DESC? <offset>,<count>
-```
-
-For v1, prefer single block for simplicity. If the ESP32-S3 descriptor grows too large, add pagination before adding more metadata.
-
-### Firmware Phase 4: Make HELP Headers More Strict Later
-
-Current `SYSTem:HELP:HEADers?` returns line-separated text. That is workable and should not block the host.
-
-For stricter SCPI alignment later, consider returning headers as a definite-length arbitrary block as well. The Rust host should support both the current text form and a future block form.
-
-## Profile Fallback Plan
-
-Create:
-
-```text
-examples/host-rs/profiles/esp32s3.toml
-```
-
-Example:
-
-```toml
-[device]
-name = "esp32s3"
-
-[[commands]]
-pattern = "GPIO:SET"
-kind = "command"
-params = [
-  { name = "pin", type = "u32", required = true },
-  { name = "value", type = "bool", required = true },
-]
-returns = { type = "none" }
-
-[[commands]]
-pattern = "ADC:READ?"
-kind = "query"
-params = [
-  { name = "ch", type = "u32", required = false, default = 0 },
-]
-returns = { type = "u32" }
-
-[[workflows]]
-name = "wifi-scan"
-type = "trigger_poll_fetch"
-trigger = "WLAN:SCAN"
-done_query = "WLAN:SCAN:DONE?"
-count_query = "WLAN:SCAN:COUNt?"
-fetch_query = "WLAN:SCAN?"
-timeout_ms = 15000
-poll_ms = 250
-```
-
-The profile should be treated as host-side metadata, not as a substitute for device truth. The host must compare profile commands against discovered headers and warn when a profiled command is missing.
-
-## Development Milestones
-
-### Milestone 0: Planning and Skeleton — Status: DONE
-
-Deliverables:
-
-- Add `examples/host-rs/` Cargo project.
-- Add module skeletons.
-- Add README with usage.
-- Add CI/build instructions.
-
-Acceptance:
-
-- `cargo check` passes.
-- `iotsploit-host --help` works.
-
-Estimated effort: 0.5 to 1 day.
-
-### Milestone 1: Linux `/dev/usbtmc` Transport — Status: DONE
-
-Deliverables:
-
-- `Transport` trait.
-- `UsbtmcKernel` backend.
-- device auto-detection.
-- clear permission and missing-device errors.
-
-Acceptance:
-
-- `iotsploit-host --device /dev/usbtmc0 query '*IDN?'` works on hardware.
-- auto-detect works when exactly one `/dev/usbtmc*` exists.
-
-Estimated effort: 1 day.
-
-### Milestone 2: SCPI Session and Text Queries — Status: DONE
-
-Deliverables:
-
-- `ScpiSession`.
-- `write`, `query`, `query_raw`.
-- error queue drain.
-- `idn`, `caps`, and `headers` CLI commands.
-
-Acceptance:
-
-- `*IDN?` returns expected identity.
-- `SYST:CAP?` parses into structured fields.
-- `SYST:HELP:HEAD?` lists core and app commands.
-- `SYST:ERR?` can be drained.
-
-Estimated effort: 1 to 1.5 days.
-
-### Milestone 3: Binary Block Support — Status: DONE
-
-Deliverables:
-
-- `block.rs` parser and encoder.
-- `query_block`.
-- `write_block`.
-- CLI support for saving block output to a file.
-
-Acceptance:
-
-- `iotsploit-host block-read 'DATA:READ? 64' --out adc.bin` writes exactly the payload bytes.
-- malformed block unit tests pass.
-- oversized block is rejected before allocation pressure.
-
-Estimated effort: 1 to 1.5 days.
-
-### Milestone 4: Profile Metadata — Status: TODO
-
-Deliverables:
-
-- TOML profile parser.
-- `profiles/esp32s3.toml`.
-- command metadata merge with discovered headers.
-- validation warnings for missing commands.
-
-Acceptance:
-
-- Host can show typed help for GPIO, ADC, WLAN, and BLE commands.
-- Host can reject missing required params before sending invalid SCPI.
-- Profile commands are marked unavailable if missing from `SYST:HELP:HEAD?`.
-
-Estimated effort: 1.5 to 2 days.
-
-### Milestone 5: Workflow Engine — Status: TODO
-
-Deliverables:
-
-- generic `trigger_poll_fetch` workflow.
-- Wi-Fi scan workflow.
-- BLE scan workflow.
-- BLE connect/pair interactive workflow.
-
-Acceptance:
-
-- Rust host reproduces `scan_test.py --wifi-only`.
-- Rust host reproduces `scan_test.py --ble-only`.
-- Rust host supports connect by index.
-- Rust host supports passkey and numeric comparison prompts.
-
-Estimated effort: 2 to 3 days.
-
-### Milestone 6: Descriptor Client Support — Status: TODO
-
-Deliverables:
-
-- `SYST:HELP:DESC?` query support.
-- JSON descriptor parser.
-- descriptor/profile/discovery merge logic.
-- CLI `describe` command.
-
-Acceptance:
-
-- If descriptor command is missing, host falls back cleanly.
-- If descriptor is present, descriptor metadata overrides profile metadata.
-- Invalid descriptor gives a useful error and does not break raw SCPI mode.
-
-Estimated effort: 1.5 to 2 days.
-
-### Milestone 7: Firmware Descriptor Support — Status: TODO
-
-Deliverables:
-
-- static descriptor metadata structs.
-- core `SYSTem:HELP:DESCription?` command.
-- JSON block response.
-- descriptor tests.
-
-Acceptance:
-
-- `SYST:HELP:DESC?` returns a valid definite-length block.
-- JSON validates against schema v1.
-- Host can build typed command help from device descriptor without profile.
-- Existing commands remain compatible.
-
-Estimated effort: 2 to 4 days depending on descriptor size and pagination needs.
-
-### Milestone 8: Optional Raw USB Backend — Status: TODO (optional)
-
-Deliverables:
-
-- `rusb` backend behind a cargo feature.
-- USBTMC bulk OUT/IN framing.
-- device selection by VID/PID/serial.
-
-Acceptance:
-
-- Linux backend still works through `/dev/usbtmcN`.
-- Raw backend can communicate without the kernel USBTMC character device.
-
-Estimated effort: 3 to 5 days.
-
-This is not required for the first useful Rust replacement.
-
-## Testing Plan
-
-### Rust Unit Tests
-
-Required unit tests:
-
-- block parser accepts valid `#<digits><len>` blocks.
-- block parser rejects malformed headers.
-- block parser rejects too-large lengths.
-- capabilities parser handles normal and unknown keys.
-- descriptor parser validates required fields.
-- profile parser loads `esp32s3.toml`.
-- workflow formatter builds indexed query commands correctly.
-
-### Rust Integration Tests Without Hardware
-
-Use a fake `Transport` implementation.
-
-Test flows:
-
-- `query("*IDN?")`
-- `caps()`
-- `headers()` with paged responses
-- `query_block("DATA:READ? 64")`
-- workflow `trigger_poll_fetch`
-- missing descriptor fallback
-
-### Hardware Smoke Tests
-
-Run against ESP32-S3 over `/dev/usbtmcN`.
-
-Required tests:
-
-```text
-iotsploit-host idn
-iotsploit-host caps
-iotsploit-host headers
-iotsploit-host query 'ADC:READ?'
-iotsploit-host write 'GPIO:SET 2,1'
-iotsploit-host query 'GPIO:GET? 2'
-iotsploit-host block-read 'DATA:READ? 64' --out adc.bin
-iotsploit-host workflow wifi-scan --profile profiles/esp32s3.toml
-iotsploit-host workflow ble-scan --profile profiles/esp32s3.toml --secs 5
-```
-
-Compare Wi-Fi and BLE output against the existing Python script before removing or deprecating it.
-
-### Firmware Tests
-
-Existing C tests should continue to pass.
-
-Add tests for:
-
-- `SYST:HELP:DESC?` returns block format.
-- descriptor JSON includes all registered command patterns.
-- descriptor command fails cleanly when output buffer is too small.
-- existing `SYST:HELP:HEAD?` behavior remains unchanged for compatibility.
-
-## Compatibility Rules
+## Compatibility Rules (Unchanged)
 
 1. Do not break existing SCPI command strings.
 2. Do not require descriptor support for raw SCPI query/write mode.
 3. Do not decode binary blocks as strings.
-4. Keep `/dev/usbtmcN` as the first backend.
+4. Keep `/dev/usbtmcN` stable as the Linux default backend.
 5. Treat descriptor as optional enhancement.
 6. Keep profile fallback until all target firmware exposes descriptor.
-7. Keep `scan_test.py` until Rust host has hardware parity.
+7. Keep `scan_test.py` (now under `host/python/`) until Rust host has hardware
+   parity for ESP32-S3.
+8. Use the same host core on Linux, Windows, and macOS; only the transport
+   backend should vary by platform.
+9. Windows/macOS support must not require NI-VISA in the first implementation.
 
-## Risks and Mitigations
+---
 
-### Risk: Descriptor Becomes Too Large for `mtu`
+## Risk Update
 
-Mitigation:
+| Risk | Status | Notes |
+|---|---|---|
+| Descriptor too large for mtu | Mitigated | Block response bypasses mtu; use `max_block_len` |
+| Host assumes too much from names | Mitigated | Never infer types from names; use descriptor/profile |
+| Breaking Python workflow | Mitigated | Rust host is additive; Python still works |
+| Linux permissions | Mitigated | Clear error messages; udev rule documented |
+| nRF52840 vs ESP32-S3 command差异 | Active | Profile format must handle both command sets |
+| Profile format | Decided | No TOML, no JSON; line-record `TAG key=value` text, one `std`-only parser shared by profile (M5) and descriptor (M7); firmware emits via `snprintf`, no heap |
+| Windows USB driver binding | Active | Document WinUSB/libusbK setup; no NI-VISA dependency in v1 |
+| macOS USB permissions/packaging | Active | Document libusb install; handle signing/notarization later |
+| Kernel/raw backend behavior drift | Active | Add shared fake-transport tests plus Linux hardware parity tests |
 
-- Return descriptor as a block.
-- Enforce `max_block_len`.
-- Add pagination if needed.
+---
 
-### Risk: Host Assumes Too Much from Command Names
+## Next Steps (Recommended)
 
-Mitigation:
+1. **Directory restructure first** (`refactor/host-layout` PR): move
+   `examples/host-rs/` → `host/rust/` and the Python host → `host/python/` per
+   [Repository Layout](#repository-layout-decided-2026-06-26). No functional
+   changes; land it before any Milestone 5 work so later PRs branch from the new
+   paths.
 
-- Never infer parameter types from names alone.
-- Use descriptor or profile for parameters.
-- Use headers only to know what exists.
+2. **Decide on branch strategy**: The `feat/host-rs` branch currently matches
+   `main`. Future work (profiles, workflows, descriptor) should use feature
+   branches off `main`.
 
-### Risk: Firmware Metadata Duplicates Command Table
+3. **Second PR** (Milestones 5+6): Profile + Workflow — this is the highest
+   value next step because it lets the Rust host replace `scan_test.py` for
+   both ESP32-S3 and nRF52840.
 
-Mitigation:
+4. **Metadata format (decided)**: No TOML, no JSON — line-record `TAG key=value`
+   text (see [Metadata Format](#metadata-format-line-records-decided-2026-06-26)).
+   One `std`-only parser in a shared `descriptor` module, used by both the M5
+   profile loader and the M7 descriptor client; no serialization crate. Design
+   the record structs once in M5 so M7 reuses them verbatim.
 
-- Keep descriptor fields small in v1.
-- Consider macros later to define command callback and descriptor together.
-- Start with static hand-written descriptors for ESP32-S3 only.
+5. **Profile authoring**: Create `host/rust/profiles/esp32s3.txt` and
+   `host/rust/profiles/nrf52840.txt` (line records) based on the existing command
+   tables in `examples/esp32s3/main/app_main.c` and
+   `examples/nrf52840/ble_scan_handler.c`.
 
-### Risk: Breaking Current Python Workflow
+6. **Third PR** (Milestones 7+8): Descriptor end-to-end — Rust client + firmware
+   `SYST:HELP:DESC?`.
 
-Mitigation:
-
-- Make firmware descriptor additive.
-- Do not change existing command output in the first firmware phase.
-- Use hardware comparison with `scan_test.py`.
-
-### Risk: Linux Permissions
-
-Mitigation:
-
-- Print clear error for permission denied.
-- Document udev rules later.
-- Use `sudo` only as a temporary workaround.
-
-## Proposed Implementation Order
-
-Recommended order:
-
-1. Rust host skeleton under `examples/host-rs/`.
-2. `/dev/usbtmc` transport.
-3. SCPI text session.
-4. capabilities and headers discovery.
-5. binary block support.
-6. `esp32s3.toml` profile.
-7. Wi-Fi and BLE workflows.
-8. descriptor client support in Rust.
-9. firmware `SYST:HELP:DESC?`.
-10. profile becomes fallback instead of primary metadata.
-11. optional raw USB backend.
-
-This order gives useful value before firmware changes and keeps risk low.
-
-## First PR Scope — Status: DONE
-
-The first PR should not touch firmware descriptor support.
-
-Recommended first PR contents:
-
-- `examples/host-rs/Cargo.toml`
-- `examples/host-rs/src/transport.rs`
-- `examples/host-rs/src/usbtmc_kernel.rs`
-- `examples/host-rs/src/session.rs`
-- `examples/host-rs/src/block.rs`
-- `examples/host-rs/src/caps.rs`
-- `examples/host-rs/src/headers.rs`
-- `examples/host-rs/src/bin/iotsploit-host.rs`
-- unit tests for block and caps parsing
-- README with basic commands
-
-First PR acceptance:
-
-- `cargo test` passes.
-- On hardware, these commands work:
-  - `iotsploit-host idn`
-  - `iotsploit-host caps`
-  - `iotsploit-host headers`
-  - `iotsploit-host query 'ADC:READ?'`
-  - `iotsploit-host block-read 'DATA:READ? 64' --out adc.bin`
-
-## Second PR Scope — Status: TODO
-
-Recommended second PR contents:
-
-- profile parser
-- `profiles/esp32s3.toml`
-- workflow engine
-- Wi-Fi scan workflow
-- BLE scan workflow
-- BLE connect/pair workflow
-
-Second PR acceptance:
-
-- Rust host can replace `scan_test.py` for the current ESP32-S3 demo.
-- Existing Python script remains available for comparison.
-
-## Third PR Scope — Status: TODO
-
-Recommended third PR contents:
-
-- descriptor schema document
-- descriptor client support in Rust
-- optional `describe` CLI command
-- fake transport tests for descriptor present and descriptor missing
-
-Third PR acceptance:
-
-- Host can consume descriptor if firmware provides one.
-- Host still works with current firmware where descriptor is missing.
-
-## Fourth PR Scope — Status: TODO
-
-Recommended fourth PR contents:
-
-- firmware descriptor metadata structs
-- `SYSTem:HELP:DESCription?`
-- JSON block output
-- C tests for descriptor command
-- ESP32-S3 descriptor entries for GPIO, ADC, WLAN, BLE, and DATA commands
-
-Fourth PR acceptance:
-
-- Rust host can control ESP32-S3 with descriptor only, without `esp32s3.toml`.
-- Profile remains as fallback.
-
-## Definition of Done
-
-The project is done when:
-
-- One Rust host binary can talk to the ESP32-S3 demo over `/dev/usbtmcN`.
-- The binary supports raw SCPI write/query for any discovered command.
-- The binary supports binary block read/write without text decoding.
-- The binary can list device capabilities and command headers.
-- Wi-Fi scan and BLE scan work from generic workflow metadata.
-- BLE connect/pair works with interactive prompts.
-- Descriptor support is optional but implemented end to end.
-- New devices can be supported by firmware descriptor alone or by adding a TOML profile.
-- Existing SCPI commands and Python smoke test behavior are not broken.
-
+7. **Fourth PR** (Milestones 9+10): Desktop cross-platform backend —
+   `UsbtmcRaw` using `rusb`/libusb, with Linux raw parity, Windows WinUSB/libusbK
+   docs, macOS libusb docs, and release artifact notes.
