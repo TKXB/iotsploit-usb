@@ -25,7 +25,6 @@ src/usbscpi.c                   core receive path and standard commands
 src/scpi_compat.c               minimal SCPI parser/result/error implementation
 helpers/ring_buffer.c           optional ring helper
 glue/usbscpi_tinyusb.c          optional TinyUSB USBTMC adapter
-examples/minimal_host.c         host-side integration sketch
 examples/pico2/                 Raspberry Pi Pico (RP2040) TinyUSB demo
 examples/esp32s3/               ESP32-S3 (ESP-IDF + TinyUSB) demo, hardware-verified
 host/rust/                     generic Rust CLI host (cross-platform)

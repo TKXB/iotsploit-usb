@@ -143,7 +143,7 @@ usbscpi_t *usbscpi_init(void *storage, size_t len, const usbscpi_config_t *cfg) 
 }
 ```
 
-> **`*IDN?` 处理(C6 / Medium 反馈)**:当前公共 API 是**单串** `cfg.idn`(tests / minimal_host / pico2
+> **`*IDN?` 处理(C6 / Medium 反馈)**:当前公共 API 是**单串** `cfg.idn`(tests / pico2
 > 各传各的),而 libscpi 内建 `SCPI_CoreIdnQ` 要 4 个独立字段。为避免拆串、保持各 example 配置不变,
 > **保留自定义 `*IDN?` 回调**,原样回 `cfg.idn`:
 > ```c
@@ -341,7 +341,7 @@ SCPI_Input(&ctx->scpi, line_buf, len);     /* libscpi:同名,签名兼容,自己
 ### ⚪ 不用动
 `glue/usbscpi_tinyusb.c/.h`(USBTMC 路径不变;SRQ 经 control 回调挂接,可选)、
 `include/usbscpi/usbscpi.h`(**公共 API 签名不变**)、
-`examples/*/tusb_config.h`、`usb_descriptors.c`、`examples/minimal_host.c`、
+`examples/*/tusb_config.h`、`usb_descriptors.c`、
 `helpers/ring_buffer.c`、`sdkconfig.defaults`。
 
 > **一句话**:重写集中在 `src/usbscpi.c`;`app_main.c`/`pico2/main.c` 的**每个查询回调**要做两处机械
