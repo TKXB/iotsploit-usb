@@ -27,7 +27,6 @@ glue/usbscpi_tinyusb.c          optional TinyUSB USBTMC adapter
 examples/pico2/                 Raspberry Pi Pico (RP2040) TinyUSB demo
 examples/esp32s3/               ESP32-S3 (ESP-IDF + TinyUSB) demo, hardware-verified
 host/rust/                     generic Rust CLI host (cross-platform)
-host/python/                   Python smoke-test host (ESP32-S3 workflows)
 tests/test_usbscpi.c            host unit tests
 ```
 

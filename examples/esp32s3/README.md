@@ -105,7 +105,7 @@ while True:
 print(d.query('BLE:SEC?'))
 ```
 
-The `host/scan_test.py` helper wraps this: `sudo python3 scan_test.py --connect 0`.
+The Rust host wraps this: `sudo iotsploit-host workflow ble-connect-pair`.
 
 ### Connect / pair command reference
 
