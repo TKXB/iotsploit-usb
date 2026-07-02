@@ -70,8 +70,8 @@ usbscpi_on_rx(scpi, data, len, eom);
 - `*OPC?`
 - `SYSTem:ERRor?`
 - `DATA:FREE?`
-- `SYSTem:HELP:HEADers?` — list all registered command headers
-- `SYSTem:HELP:DESCription?` — emit a **line-record descriptor** (optional;
+- `SYSTem:HELP:HEADers?` - list all registered command headers
+- `SYSTem:HELP:DESCription?` - emit a **line-record descriptor** (optional;
   set `cfg.descriptor` to enable). Returns an IEEE 488.2 block containing
   `DEV`, `CMD`, and `WF` records that the Rust host parses to discover
   commands, parameters, and workflows. See
@@ -128,6 +128,103 @@ include(path/to/iotsploit-usb/cmake/iotsploit-usb-pico.cmake)
 target_link_libraries(your_firmware PRIVATE usbscpi)
 ```
 
+## ESP32-S3 Example Build and Flash
+
+Example path:
+
+```bash
+cd /home/tkxb/Projects/esp32s3_demo/iotsploit-usb/examples/esp32s3
+```
+
+Use the installed ESP-IDF v5.2.2 environment:
+
+```bash
+source /home/tkxb/HDD/Projects/esp-idf/export.sh
+```
+
+Verified tools:
+
+```text
+ESP-IDF v5.2.2
+idf.py: /home/tkxb/HDD/Projects/esp-idf/tools/idf.py
+compiler: /home/tkxb/.espressif/tools/xtensa-esp-elf/esp-13.2.0_20230928/xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc
+```
+
+Note: an ESP-IDF v5.4 checkout exists at `/home/tkxb/HDD/Projects/esp-idf_master/esp-idf`, but its export failed because the v5.4 `xtensa-esp-elf` tool was not installed.
+
+Build the firmware:
+
+```bash
+source /home/tkxb/HDD/Projects/esp-idf/export.sh
+idf.py build
+```
+
+The build generates:
+
+```text
+build/esp32s3_usbscpi_demo.bin
+```
+
+List connected serial adapters:
+
+```bash
+python3 -m serial.tools.list_ports -v
+```
+
+The ESP32-S3 board was found on:
+
+```text
+/dev/ttyUSB2
+CP2102N USB to UART Bridge Controller
+VID:PID=10C4:EA60
+SER=4c4818609ae7ec11bcd67e60e89bdf6f
+```
+
+Flash through the CP2102N UART adapter:
+
+```bash
+source /home/tkxb/HDD/Projects/esp-idf/export.sh
+idf.py -p /dev/ttyUSB2 flash
+```
+
+`idf.py flash` uses esptool's default reset behavior, which toggles CP210x RTS/DTR to place the ESP32-S3 into download mode automatically.
+
+Flash result:
+
+```text
+Chip is ESP32-S3 (QFN56) revision v0.1
+MAC: 34:85:18:41:c6:ac
+Writing bootloader, app, and partition table succeeded
+Hard resetting via RTS pin
+```
+
+Verify boot with:
+
+```bash
+source /home/tkxb/HDD/Projects/esp-idf/export.sh
+idf.py -p /dev/ttyUSB2 monitor
+```
+
+Verified boot output:
+
+```text
+Project name: esp32s3_usbscpi_demo
+App version: 399bc25-dirty
+ESP-IDF: v5.2.2
+Calling app_main()
+Returned from app_main()
+Wi-Fi and BLE initialization logs appeared
+```
+
+Observed warning:
+
+```text
+Detected size(8192k) larger than the size in the binary image header(2048k).
+Using the size in the binary image header.
+```
+
+This means the board has 8 MB flash, while the current firmware image is configured for 2 MB flash.
+
 ## TinyUSB Glue
 
 The core does not depend on TinyUSB. Projects that use TinyUSB can either wire callbacks directly or build `glue/usbscpi_tinyusb.c` and configure:
@@ -159,13 +256,13 @@ Because of this, integrators using the glue **must not** also define any of:
 `tud_usbtmc_bulkOut_clearFeature_cb`, `tud_usbtmc_msgBulkIn_request_cb`,
 `tud_usbtmc_msgBulkIn_complete_cb`, `tud_usbtmc_bulkIn_clearFeature_cb`,
 `tud_usbtmc_get_stb_cb` (the glue provides them; duplicates break linking).
-Route any out-of-band device→host bytes (e.g. UDS replies) through
+Route any out-of-band device-to-host bytes (e.g. UDS replies) through
 `usbscpi_tinyusb_queue_response()` rather than calling
 `tud_usbtmc_transmit_dev_msg_data()` directly.
 
 The glue does **not** cover the remaining strong-symbol USBTMC callbacks that
 TinyUSB's `usbtmc_device.c` requires (they have no library default). Every
-application must still define them or the link fails — see `examples/pico2/main.c`:
+application must still define them or the link fails - see `examples/pico2/main.c`:
 `tud_usbtmc_get_capabilities_cb`, `tud_usbtmc_msgBulkOut_start_cb`,
 `tud_usbtmc_initiate_abort_bulk_out_cb`, `tud_usbtmc_check_abort_bulk_out_cb`,
 `tud_usbtmc_initiate_abort_bulk_in_cb`, `tud_usbtmc_check_abort_bulk_in_cb`,
