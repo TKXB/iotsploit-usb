@@ -73,6 +73,23 @@ impl UsbtmcRaw {
         Self::from_device(device)
     }
 
+    /// Open a device by its USB topology address (bus number + device address).
+    ///
+    /// This is useful when several identical devices have the same VID/PID and
+    /// no serial number.
+    pub fn open_by_bus_address(bus_number: u8, device_address: u8) -> Result<Self> {
+        let info = nusb::list_devices()
+            .map_err(map_io_err)?
+            .find(|d| d.bus_number() == bus_number && d.device_address() == device_address)
+            .ok_or_else(|| {
+                Error::Device(format!(
+                    "no USB device at bus {bus_number} address {device_address}"
+                ))
+            })?;
+        let device = info.open().map_err(map_io_err)?;
+        Self::from_device(device)
+    }
+
     /// Auto-detect a single USBTMC device by interface class.
     pub fn auto_detect() -> Result<Self> {
         let mut matches: Vec<_> = nusb::list_devices()
