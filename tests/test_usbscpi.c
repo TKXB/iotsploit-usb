@@ -307,6 +307,14 @@ static const usbscpi_prompt_desc_t desc_ble_pair_prompts[] = {
     { "6", "display", NULL,               "BLE:PAIR:PASSKey?" },
 };
 
+static const char *const desc_ble_connpair_failed[] = { "7" };
+
+static const usbscpi_prompt_desc_t desc_ble_connpair_prompts[] = {
+    { "3", "passkey", "BLE:PAIR:PASSKey", NULL },
+    { "4", "confirm", "BLE:PAIR:CONFirm", "BLE:PAIR:NUMCmp?" },
+    { "5", "display", NULL,               "BLE:PAIR:PASSKey?" },
+};
+
 static const usbscpi_workflow_desc_t desc_workflows[] = {
     {
         .name = "wifi-scan",
@@ -354,20 +362,34 @@ static const usbscpi_workflow_desc_t desc_workflows[] = {
         .timeout_ms = 30000,
         .poll_ms = 200,
     },
+    {
+        .name = "ble-connect-pair",
+        .type = "trigger_poll_interactive",
+        .summary = "Connect to a BLE device and pair in one step",
+        .trigger_cmd = "BLE:CPAIR",
+        .state_query = "BLE:CPAIR:STATe?",
+        .success_value = "6",
+        .failed_values = desc_ble_connpair_failed,
+        .failed_value_count = 1,
+        .prompts = desc_ble_connpair_prompts,
+        .prompt_count = 3,
+        .timeout_ms = 45000,
+        .poll_ms = 200,
+    },
 };
 
 static const usbscpi_descriptor_t test_descriptor = {
     .commands = desc_commands,
     .command_count = 3,
     .workflows = desc_workflows,
-    .workflow_count = 3,
+    .workflow_count = 4,
 };
 
 static void test_descriptor_query(void) {
     fixture_t f;
     uint8_t storage[2048];
     char line[96];
-    uint8_t io_buf[1024];
+    uint8_t io_buf[2048];
     usbscpi_config_t cfg = {
         .usb_tx = tx_cb,
         .line_buf = line,
@@ -434,6 +456,13 @@ static void test_descriptor_query(void) {
     assert(strstr(content, "prompt=2|passkey|BLE:PAIR:PASSKey") != NULL);
     assert(strstr(content, "prompt=3|confirm|BLE:PAIR:CONFirm|BLE:PAIR:NUMCmp?") != NULL);
     assert(strstr(content, "prompt=6|display||BLE:PAIR:PASSKey?") != NULL);
+    /* Verify the combined one-step connect+pair workflow and its prompts */
+    assert(strstr(content, "WF ble-connect-pair") != NULL);
+    assert(strstr(content, "trigger=BLE:CPAIR") != NULL);
+    assert(strstr(content, "state=BLE:CPAIR:STATe?") != NULL);
+    assert(strstr(content, "prompt=3|passkey|BLE:PAIR:PASSKey") != NULL);
+    assert(strstr(content, "prompt=4|confirm|BLE:PAIR:CONFirm|BLE:PAIR:NUMCmp?") != NULL);
+    assert(strstr(content, "prompt=5|display||BLE:PAIR:PASSKey?") != NULL);
 }
 
 static void test_descriptor_unsupported(void) {

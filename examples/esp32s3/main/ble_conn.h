@@ -31,6 +31,21 @@ enum {
     BLE_PAIR_DISPLAY_KEY  = 6,  /* host must show our passkey  -> ble_pair_passkey_get() */
 };
 
+/* Combined connect+pair state returned by ble_connpair_state(): a single state
+ * machine folding the connection and pairing phases so one interactive workflow
+ * can drive both. The passkey/numcmp/display prompts reuse the existing
+ * BLE:PAIR:PASSKey / BLE:PAIR:CONFirm / BLE:PAIR:PASSKey? commands. */
+enum {
+    BLE_CP_IDLE       = 0,
+    BLE_CP_CONNECTING = 1,
+    BLE_CP_PAIRING    = 2,  /* connected; pairing in progress            */
+    BLE_CP_PASSKEY    = 3,  /* inject passkey   -> BLE:PAIR:PASSKey       */
+    BLE_CP_NUMCMP     = 4,  /* confirm number   -> BLE:PAIR:CONFirm       */
+    BLE_CP_DISPLAY    = 5,  /* show our passkey -> BLE:PAIR:PASSKey?      */
+    BLE_CP_DONE       = 6,
+    BLE_CP_FAILED     = 7,
+};
+
 /* Connect to the device at scan result #index (reuses the address + type stored
  * by the last BLE:SCAN). Returns 0 on success, -1 on error. Async: poll
  * ble_conn_state(). */
@@ -38,6 +53,14 @@ int ble_conn_start(size_t scan_index);
 
 /* Current connection state (one of BLE_CONN_*). */
 int ble_conn_state(void);
+
+/* Connect to scan result #index and, once connected, automatically initiate
+ * pairing — the one-step equivalent of ble_conn_start() then ble_pair_start().
+ * Returns 0 on success, -1 on error. Async: poll ble_connpair_state(). */
+int ble_connpair_start(size_t scan_index);
+
+/* Combined connect+pair state (one of BLE_CP_*). */
+int ble_connpair_state(void);
 
 /* Last GAP status/reason code (connect status, disconnect reason, or
  * encryption-change status) — for diagnostics. 0 means success/none. */

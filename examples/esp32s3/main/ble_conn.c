@@ -22,6 +22,7 @@ static volatile uint16_t s_conn_handle;
 static volatile uint32_t s_disp_passkey;   /* passkey we generated (DISPLAY)  */
 static volatile uint32_t s_numcmp_val;     /* number to compare (NUMCMP)      */
 static volatile int      s_last_status = 0;/* last GAP connect/disc/enc status */
+static volatile int      s_auto_pair = 0;  /* start pairing on connect (CPAIR) */
 
 void ble_conn_init(void) {
     ble_hs_cfg.sm_io_cap   = BLE_HS_IO_KEYBOARD_DISPLAY;  /* PC is the keyboard/display via SCPI */
@@ -44,8 +45,17 @@ static int gap_conn_cb(struct ble_gap_event *event, void *arg) {
         if (event->connect.status == 0) {
             s_conn_handle = event->connect.conn_handle;
             s_conn_state  = BLE_CONN_CONNECTED;
+            /* One-step connect+pair: kick off pairing as soon as we connect. */
+            if (s_auto_pair) {
+                s_auto_pair  = 0;
+                s_pair_state = BLE_PAIR_PROGRESS;
+                if (ble_gap_security_initiate(s_conn_handle) != 0) {
+                    s_pair_state = BLE_PAIR_FAILED;
+                }
+            }
         } else {
-            s_conn_state  = BLE_CONN_FAILED;
+            s_conn_state = BLE_CONN_FAILED;
+            s_auto_pair  = 0;
         }
         return 0;
 
@@ -53,6 +63,7 @@ static int gap_conn_cb(struct ble_gap_event *event, void *arg) {
         s_last_status = event->disconnect.reason;
         s_conn_state = BLE_CONN_IDLE;
         s_pair_state = BLE_PAIR_IDLE;
+        s_auto_pair  = 0;
         return 0;
 
     case BLE_GAP_EVENT_ENC_CHANGE:
@@ -119,6 +130,7 @@ int ble_conn_start(size_t scan_index) {
 
     s_conn_state = BLE_CONN_CONNECTING;
     s_pair_state = BLE_PAIR_IDLE;
+    s_auto_pair  = 0;   /* plain connect never auto-pairs; ble_connpair_start re-arms */
     if (ble_gap_connect(own_type, &addr, 10000, NULL, gap_conn_cb, NULL) != 0) {
         s_conn_state = BLE_CONN_FAILED;
         return -1;
@@ -128,6 +140,36 @@ int ble_conn_start(size_t scan_index) {
 
 int ble_conn_state(void) {
     return s_conn_state;
+}
+
+int ble_connpair_start(size_t scan_index) {
+    /* ble_conn_start() clears s_auto_pair, so arm it after a successful start.
+     * The async CONNECT event arrives later on the host task, by which point
+     * the flag is set, and the handler initiates pairing on the fresh link. */
+    int rc = ble_conn_start(scan_index);
+    if (rc == 0) {
+        s_auto_pair = 1;
+    }
+    return rc;
+}
+
+int ble_connpair_state(void) {
+    /* Connection phase first; once connected, report the pairing phase. */
+    switch (s_conn_state) {
+    case BLE_CONN_IDLE:       return BLE_CP_IDLE;
+    case BLE_CONN_CONNECTING: return BLE_CP_CONNECTING;
+    case BLE_CONN_FAILED:     return BLE_CP_FAILED;
+    default:                  break;  /* BLE_CONN_CONNECTED */
+    }
+    switch (s_pair_state) {
+    case BLE_PAIR_IDLE:
+    case BLE_PAIR_PROGRESS:      return BLE_CP_PAIRING;
+    case BLE_PAIR_INPUT_NEEDED:  return BLE_CP_PASSKEY;
+    case BLE_PAIR_NUMCMP_NEEDED: return BLE_CP_NUMCMP;
+    case BLE_PAIR_DISPLAY_KEY:   return BLE_CP_DISPLAY;
+    case BLE_PAIR_DONE:          return BLE_CP_DONE;
+    default:                     return BLE_CP_FAILED;  /* BLE_PAIR_FAILED */
+    }
 }
 
 int ble_conn_last_status(void) {

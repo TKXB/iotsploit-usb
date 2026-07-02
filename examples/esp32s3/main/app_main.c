@@ -155,6 +155,17 @@ static scpi_result_t cmd_ble_disconn(scpi_t *ctx) {
     return ble_conn_disconnect() == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
 }
 
+static scpi_result_t cmd_ble_connpair(scpi_t *ctx) {
+    uint32_t idx = 0;
+    if (SCPI_ParamUInt32(ctx, &idx, TRUE) != TRUE) return SCPI_RES_ERR;
+    return ble_connpair_start((size_t)idx) == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
+}
+
+static scpi_result_t cmd_ble_connpair_state(scpi_t *ctx) {
+    SCPI_ResultInt32(ctx, ble_connpair_state());
+    return SCPI_RES_OK;
+}
+
 static scpi_result_t cmd_ble_pair(scpi_t *ctx) {
     (void)ctx;
     return ble_pair_start() == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
@@ -267,6 +278,10 @@ static const usbscpi_command_desc_t desc_commands[] = {
       NULL, 0, "u32" },
     { "BLE:CONNect:STATus?",  "query",   "Last disconnect status code",
       NULL, 0, "u32" },
+    { "BLE:CPAIR",            "command", "Connect to BLE scan result by index and pair in one step",
+      desc_ble_conn_params, 1, NULL },
+    { "BLE:CPAIR:STATe?",     "query",   "0=idle 1=connecting 2=pairing 3=passkey 4=numcmp 5=display 6=done 7=failed",
+      NULL, 0, "u32" },
     { "BLE:DISConnect",       "command", "Disconnect active BLE connection",
       NULL, 0, NULL },
     { "BLE:PAIR",             "command", "Initiate BLE pairing",
@@ -297,6 +312,17 @@ static const usbscpi_prompt_desc_t desc_ble_pair_prompts[] = {
     { "2", "passkey", "BLE:PAIR:PASSKey", NULL },
     { "3", "confirm", "BLE:PAIR:CONFirm", "BLE:PAIR:NUMCmp?" },
     { "6", "display", NULL,               "BLE:PAIR:PASSKey?" },
+};
+
+static const char *const desc_ble_connpair_failed[] = { "7" };
+
+/* One-step connect+pair prompts, keyed by BLE:CPAIR:STATe? (the combined
+ * state machine). The passkey/confirm/display responses reuse the same
+ * BLE:PAIR:* commands as the standalone ble-pair workflow. */
+static const usbscpi_prompt_desc_t desc_ble_connpair_prompts[] = {
+    { "3", "passkey", "BLE:PAIR:PASSKey", NULL },
+    { "4", "confirm", "BLE:PAIR:CONFirm", "BLE:PAIR:NUMCmp?" },
+    { "5", "display", NULL,               "BLE:PAIR:PASSKey?" },
 };
 
 static const usbscpi_workflow_desc_t desc_workflows[] = {
@@ -366,6 +392,20 @@ static const usbscpi_workflow_desc_t desc_workflows[] = {
         .timeout_ms = 30000,
         .poll_ms = 200,
     },
+    {
+        .name = "ble-connect-pair",
+        .type = "trigger_poll_interactive",
+        .summary = "Connect to a BLE device and pair in one step",
+        .trigger_cmd = "BLE:CPAIR",
+        .state_query = "BLE:CPAIR:STATe?",
+        .success_value = "6",
+        .failed_values = desc_ble_connpair_failed,
+        .failed_value_count = 1,
+        .prompts = desc_ble_connpair_prompts,
+        .prompt_count = sizeof(desc_ble_connpair_prompts) / sizeof(desc_ble_connpair_prompts[0]),
+        .timeout_ms = 45000,
+        .poll_ms = 200,
+    },
 };
 
 static const usbscpi_descriptor_t s_descriptor = {
@@ -390,6 +430,8 @@ static const scpi_command_t demo_commands[] = {
     { "BLE:CONNect",          cmd_ble_conn,         0 },
     { "BLE:CONNect:STATe?",   cmd_ble_conn_state,   0 },
     { "BLE:CONNect:STATus?",  cmd_ble_conn_status,  0 },
+    { "BLE:CPAIR",            cmd_ble_connpair,       0 },
+    { "BLE:CPAIR:STATe?",     cmd_ble_connpair_state, 0 },
     { "BLE:DISConnect",       cmd_ble_disconn,      0 },
     { "BLE:PAIR",             cmd_ble_pair,         0 },
     { "BLE:PAIR:STATe?",      cmd_ble_pair_state,   0 },
