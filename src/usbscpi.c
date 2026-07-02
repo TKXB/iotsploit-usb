@@ -277,6 +277,15 @@ static size_t emit_descriptor(const usbscpi_descriptor_t *desc,
             if (lr_printf(buf, &len, buf_len, " failed=%s",
                     wf->failed_values[k] ? wf->failed_values[k] : "") < 0) return 0;
         }
+        for (size_t k = 0; k < wf->prompt_count; k++) {
+            const usbscpi_prompt_desc_t *pr = &wf->prompts[k];
+            if (lr_printf(buf, &len, buf_len, " prompt=%s|%s|%s",
+                    pr->state ? pr->state : "",
+                    pr->kind ? pr->kind : "",
+                    pr->send_cmd ? pr->send_cmd : "") < 0) return 0;
+            if (pr->value_query &&
+                lr_printf(buf, &len, buf_len, "|%s", pr->value_query) < 0) return 0;
+        }
         if (lr_printf(buf, &len, buf_len, " timeout_ms=%u poll_ms=%u\n",
                 wf->timeout_ms, wf->poll_ms) < 0) return 0;
     }

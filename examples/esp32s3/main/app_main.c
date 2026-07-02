@@ -287,6 +287,18 @@ static const usbscpi_command_desc_t desc_commands[] = {
 
 static const char *const desc_ble_connect_failed[] = { "3" };
 
+static const char *const desc_ble_pair_failed[] = { "5" };
+
+/* Interactive prompts for the ble-pair workflow, keyed by BLE:PAIR:STATe?:
+ *   2 passkey-needed  -> user types the passkey the peer shows
+ *   3 numcmp-needed   -> user compares BLE:PAIR:NUMCmp? and accepts/rejects
+ *   6 display-key     -> device shows BLE:PAIR:PASSKey? for the user to enter on the peer */
+static const usbscpi_prompt_desc_t desc_ble_pair_prompts[] = {
+    { "2", "passkey", "BLE:PAIR:PASSKey", NULL },
+    { "3", "confirm", "BLE:PAIR:CONFirm", "BLE:PAIR:NUMCmp?" },
+    { "6", "display", NULL,               "BLE:PAIR:PASSKey?" },
+};
+
 static const usbscpi_workflow_desc_t desc_workflows[] = {
     {
         .name = "wifi-scan",
@@ -334,6 +346,24 @@ static const usbscpi_workflow_desc_t desc_workflows[] = {
         .failed_values = desc_ble_connect_failed,
         .failed_value_count = 1,
         .timeout_ms = 15000,
+        .poll_ms = 200,
+    },
+    {
+        .name = "ble-pair",
+        .type = "trigger_poll_interactive",
+        .summary = "Pair with the connected BLE device",
+        .trigger_cmd = "BLE:PAIR",
+        .done_query = NULL,
+        .done_value = NULL,
+        .count_query = NULL,
+        .fetch_query = NULL,
+        .state_query = "BLE:PAIR:STATe?",
+        .success_value = "4",
+        .failed_values = desc_ble_pair_failed,
+        .failed_value_count = 1,
+        .prompts = desc_ble_pair_prompts,
+        .prompt_count = sizeof(desc_ble_pair_prompts) / sizeof(desc_ble_pair_prompts[0]),
+        .timeout_ms = 30000,
         .poll_ms = 200,
     },
 };

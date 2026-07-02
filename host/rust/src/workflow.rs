@@ -6,7 +6,7 @@
 //! - [`WorkflowType::TriggerPollInteractive`]: write trigger → poll state
 //!   until success/failure. Used for BLE connect.
 
-use crate::descriptor::{Profile, WorkflowDesc, WorkflowType};
+use crate::descriptor::{Profile, PromptDesc, PromptKind, WorkflowDesc, WorkflowType};
 use crate::session::ScpiSession;
 use crate::transport::Transport;
 use crate::{Error, Result};
@@ -133,7 +133,8 @@ pub fn run_trigger_poll_fetch<T: Transport>(
 ///
 /// 1. `write_and_drain(trigger_cmd + params)`
 /// 2. Poll `state_query` until it returns `success_value` or a `failed_values`
-///    entry (or timeout)
+///    entry (or timeout). When the state matches a `prompt` (edge-triggered on
+///    entry into the state), collect the user's response and send it.
 pub fn run_trigger_poll_interactive<T: Transport>(
     session: &mut ScpiSession<T>,
     wf: &WorkflowDesc,
@@ -156,6 +157,9 @@ pub fn run_trigger_poll_interactive<T: Transport>(
     let deadline = Instant::now() + Duration::from_millis(wf.timeout_ms);
     let poll = Duration::from_millis(wf.poll_ms);
 
+    // Edge-trigger prompts on state change so a prompt fires once per entry into
+    // its state, but re-arms if the state is left and re-entered.
+    let mut prev_state: Option<String> = None;
     loop {
         let resp = session.query(state_query)?;
         let state = resp.trim().to_string();
@@ -171,10 +175,84 @@ pub fn run_trigger_poll_interactive<T: Transport>(
                 success: false,
             });
         }
+        if prev_state.as_deref() != Some(state.as_str()) {
+            if let Some(prompt) = wf.prompts.iter().find(|p| p.state == state) {
+                if let PromptOutcome::Reject = handle_prompt(session, prompt)? {
+                    return Ok(InteractiveResult {
+                        final_state: state,
+                        success: false,
+                    });
+                }
+            }
+        }
+        prev_state = Some(state);
         if Instant::now() >= deadline {
             return Err(Error::Timeout);
         }
         std::thread::sleep(poll);
+    }
+}
+
+/// Result of servicing one interactive prompt.
+enum PromptOutcome {
+    /// Continue polling (value entered, comparison accepted, or display ack'd).
+    Continue,
+    /// User rejected a `confirm` prompt — the workflow should end as failed.
+    Reject,
+}
+
+/// Drive one interactive prompt over stdin/stdout and send the response.
+fn handle_prompt<T: Transport>(
+    session: &mut ScpiSession<T>,
+    prompt: &PromptDesc,
+) -> Result<PromptOutcome> {
+    use std::io::Write;
+
+    // Read any value the user needs to see (numeric-compare digits, display key).
+    let shown = match &prompt.value_query {
+        Some(q) => Some(session.query(q)?.trim().to_string()),
+        None => None,
+    };
+
+    let read_line = |prompt_text: &str| -> Result<String> {
+        print!("{prompt_text}");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| Error::Device(format!("stdin: {e}")))?;
+        Ok(line.trim().to_string())
+    };
+
+    match prompt.kind {
+        PromptKind::Display => {
+            println!(
+                "pairing: enter this on the peer: {}",
+                shown.as_deref().unwrap_or("?")
+            );
+            Ok(PromptOutcome::Continue)
+        }
+        PromptKind::Confirm => {
+            if let Some(v) = &shown {
+                println!("pairing: compare value = {v}");
+            }
+            let answer = read_line("accept? [y/N]: ")?;
+            let accept = matches!(answer.as_str(), "y" | "Y" | "yes" | "YES");
+            session.write_and_drain(&format!("{} {}", prompt.send_cmd, if accept { 1 } else { 0 }))?;
+            Ok(if accept {
+                PromptOutcome::Continue
+            } else {
+                PromptOutcome::Reject
+            })
+        }
+        PromptKind::Passkey | PromptKind::Number | PromptKind::Text => {
+            if let Some(v) = &shown {
+                println!("pairing: {v}");
+            }
+            let value = read_line("enter value: ")?;
+            session.write_and_drain(&format!("{} {}", prompt.send_cmd, value))?;
+            Ok(PromptOutcome::Continue)
+        }
     }
 }
 

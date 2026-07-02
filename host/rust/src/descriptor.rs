@@ -105,6 +105,8 @@ pub struct WorkflowDesc {
     pub state_query: Option<String>,
     pub success_value: Option<String>,
     pub failed_values: Vec<String>,
+    /// Interactive prompts fired when `state_query` reaches a prompt's state.
+    pub prompts: Vec<PromptDesc>,
     // Timing
     pub timeout_ms: u64,
     pub poll_ms: u64,
@@ -125,10 +127,40 @@ impl Default for WorkflowDesc {
             state_query: None,
             success_value: None,
             failed_values: Vec::new(),
+            prompts: Vec::new(),
             timeout_ms: 15_000,
             poll_ms: 250,
         }
     }
+}
+
+/// How the host should collect the user's response for an interactive prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptKind {
+    /// Enter a passkey the peer displays.
+    Passkey,
+    /// Enter a numeric value.
+    Number,
+    /// Enter free text.
+    Text,
+    /// Compare a value and accept/reject (`send_cmd 1` / `send_cmd 0`).
+    Confirm,
+    /// Display a value for the user to act on elsewhere; nothing is sent back.
+    Display,
+}
+
+/// One interactive prompt in a `trigger_poll_interactive` workflow.
+///
+/// Parsed from `prompt=<state>|<kind>|<send_cmd>[|<value_query>]`.
+#[derive(Debug, Clone)]
+pub struct PromptDesc {
+    /// `state_query` value at which this prompt fires.
+    pub state: String,
+    pub kind: PromptKind,
+    /// SCPI header the response is sent with. Empty for [`PromptKind::Display`].
+    pub send_cmd: String,
+    /// Optional query whose value is read and shown to the user.
+    pub value_query: Option<String>,
 }
 
 /// Workflow type discriminator.
@@ -421,12 +453,46 @@ fn parse_wf(name: &str, kv: &[(String, String)]) -> WorkflowDesc {
             "state" => wf.state_query = Some(value.clone()),
             "success" => wf.success_value = Some(value.clone()),
             "failed" => wf.failed_values.push(value.clone()),
+            "prompt" => {
+                if let Some(p) = parse_prompt(value) {
+                    wf.prompts.push(p);
+                }
+            }
             "timeout_ms" => wf.timeout_ms = value.parse().unwrap_or(15_000),
             "poll_ms" => wf.poll_ms = value.parse().unwrap_or(250),
             _ => {} // unknown key, skip
         }
     }
     wf
+}
+
+/// Parse a `prompt=<state>|<kind>|<send_cmd>[|<value_query>]` value.
+///
+/// `|` (not `:`) separates the fields because SCPI headers contain `:`.
+/// Returns `None` for malformed records or unknown kinds (forward-compatible).
+fn parse_prompt(value: &str) -> Option<PromptDesc> {
+    let parts: Vec<&str> = value.split('|').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let kind = match parts[1] {
+        "passkey" => PromptKind::Passkey,
+        "number" => PromptKind::Number,
+        "text" => PromptKind::Text,
+        "confirm" => PromptKind::Confirm,
+        "display" => PromptKind::Display,
+        _ => return None,
+    };
+    let value_query = parts
+        .get(3)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    Some(PromptDesc {
+        state: parts[0].to_string(),
+        kind,
+        send_cmd: parts[2].to_string(),
+        value_query,
+    })
 }
 
 // ── File loading ────────────────────────────────────────────────────────────
@@ -662,6 +728,39 @@ WF ble-connect type=trigger_poll_interactive trigger=BLE:CONNect state=BLE:CONNe
         assert_eq!(wf.state_query.as_deref(), Some("BLE:CONNect:STATe?"));
         assert_eq!(wf.success_value.as_deref(), Some("2"));
         assert_eq!(wf.failed_values, vec!["3", "5"]);
+    }
+
+    #[test]
+    fn parse_interactive_workflow_with_prompts() {
+        let txt = "\
+WF ble-pair type=trigger_poll_interactive trigger=BLE:PAIR state=BLE:PAIR:STATe? success=4 failed=5 prompt=2|passkey|BLE:PAIR:PASSKey prompt=3|confirm|BLE:PAIR:CONFirm|BLE:PAIR:NUMCmp? prompt=6|display||BLE:PAIR:PASSKey? timeout_ms=30000 poll_ms=200
+";
+        let p = parse_str(txt).unwrap();
+        let wf = &p.workflows[0];
+        assert_eq!(wf.prompts.len(), 3);
+
+        assert_eq!(wf.prompts[0].state, "2");
+        assert_eq!(wf.prompts[0].kind, PromptKind::Passkey);
+        assert_eq!(wf.prompts[0].send_cmd, "BLE:PAIR:PASSKey");
+        assert_eq!(wf.prompts[0].value_query, None);
+
+        assert_eq!(wf.prompts[1].state, "3");
+        assert_eq!(wf.prompts[1].kind, PromptKind::Confirm);
+        assert_eq!(wf.prompts[1].send_cmd, "BLE:PAIR:CONFirm");
+        assert_eq!(wf.prompts[1].value_query.as_deref(), Some("BLE:PAIR:NUMCmp?"));
+
+        assert_eq!(wf.prompts[2].state, "6");
+        assert_eq!(wf.prompts[2].kind, PromptKind::Display);
+        assert_eq!(wf.prompts[2].send_cmd, "");
+        assert_eq!(wf.prompts[2].value_query.as_deref(), Some("BLE:PAIR:PASSKey?"));
+    }
+
+    #[test]
+    fn parse_prompt_rejects_malformed_and_unknown() {
+        // too few fields, and unknown kind — both skipped, workflow still parses.
+        let txt = "WF w type=trigger_poll_interactive trigger=T state=S? success=1 prompt=2|onlytwo prompt=3|bogus|CMD";
+        let p = parse_str(txt).unwrap();
+        assert!(p.workflows[0].prompts.is_empty());
     }
 
     #[test]

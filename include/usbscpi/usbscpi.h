@@ -44,6 +44,17 @@ typedef struct {
     const char *return_type;  /* "none", "text", "u32", "bool", "block" */
 } usbscpi_command_desc_t;
 
+/* An interactive prompt fired when an interactive workflow reaches `state`.
+ * Emitted as `prompt=<state>|<kind>|<send_cmd>|<value_query>` (the trailing
+ * `|<value_query>` is omitted when NULL). `|` is used instead of `:` because
+ * SCPI headers contain `:`. */
+typedef struct {
+    const char *state;        /* state value at which this prompt fires */
+    const char *kind;         /* "passkey", "number", "text", "confirm", "display" */
+    const char *send_cmd;     /* SCPI header for the response; NULL/empty for display */
+    const char *value_query;  /* optional query whose value is shown to the user; NULL if none */
+} usbscpi_prompt_desc_t;
+
 typedef struct {
     const char *name;
     const char *type;         /* "trigger_poll_fetch", "trigger_poll_interactive" */
@@ -57,6 +68,8 @@ typedef struct {
     const char *success_value;     /* interactive only */
     const char *const *failed_values;  /* failure state values, NULL if none */
     size_t failed_value_count;
+    const usbscpi_prompt_desc_t *prompts;  /* interactive prompts, NULL if none */
+    size_t prompt_count;
     uint32_t timeout_ms;
     uint32_t poll_ms;
 } usbscpi_workflow_desc_t;

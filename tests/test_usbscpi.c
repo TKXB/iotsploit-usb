@@ -299,6 +299,14 @@ static const usbscpi_command_desc_t desc_commands[] = {
 
 static const char *const desc_ble_connect_failed[] = { "3" };
 
+static const char *const desc_ble_pair_failed[] = { "5" };
+
+static const usbscpi_prompt_desc_t desc_ble_pair_prompts[] = {
+    { "2", "passkey", "BLE:PAIR:PASSKey", NULL },
+    { "3", "confirm", "BLE:PAIR:CONFirm", "BLE:PAIR:NUMCmp?" },
+    { "6", "display", NULL,               "BLE:PAIR:PASSKey?" },
+};
+
 static const usbscpi_workflow_desc_t desc_workflows[] = {
     {
         .name = "wifi-scan",
@@ -332,13 +340,27 @@ static const usbscpi_workflow_desc_t desc_workflows[] = {
         .timeout_ms = 15000,
         .poll_ms = 200,
     },
+    {
+        .name = "ble-pair",
+        .type = "trigger_poll_interactive",
+        .summary = "Pair with the connected BLE device",
+        .trigger_cmd = "BLE:PAIR",
+        .state_query = "BLE:PAIR:STATe?",
+        .success_value = "4",
+        .failed_values = desc_ble_pair_failed,
+        .failed_value_count = 1,
+        .prompts = desc_ble_pair_prompts,
+        .prompt_count = 3,
+        .timeout_ms = 30000,
+        .poll_ms = 200,
+    },
 };
 
 static const usbscpi_descriptor_t test_descriptor = {
     .commands = desc_commands,
     .command_count = 3,
     .workflows = desc_workflows,
-    .workflow_count = 2,
+    .workflow_count = 3,
 };
 
 static void test_descriptor_query(void) {
@@ -407,6 +429,11 @@ static void test_descriptor_query(void) {
     assert(strstr(content, "state=BLE:CONNect:STATe?") != NULL);
     assert(strstr(content, "success=2") != NULL);
     assert(strstr(content, "failed=3") != NULL);
+    /* Verify ble-pair interactive workflow emits its prompt= records */
+    assert(strstr(content, "WF ble-pair") != NULL);
+    assert(strstr(content, "prompt=2|passkey|BLE:PAIR:PASSKey") != NULL);
+    assert(strstr(content, "prompt=3|confirm|BLE:PAIR:CONFirm|BLE:PAIR:NUMCmp?") != NULL);
+    assert(strstr(content, "prompt=6|display||BLE:PAIR:PASSKey?") != NULL);
 }
 
 static void test_descriptor_unsupported(void) {
