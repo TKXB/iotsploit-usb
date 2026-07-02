@@ -291,10 +291,15 @@ static const usbscpi_param_desc_t desc_gpio_params[] = {
     { "value", "bool", true },
 };
 
+/* A param that advertises an options source (count + fetch queries). */
+static const usbscpi_param_desc_t desc_wlan_get_params[] = {
+    { "index", "u32", true, "WLAN:SCAN:COUNt?", "WLAN:SCAN?" },
+};
+
 static const usbscpi_command_desc_t desc_commands[] = {
     { "GPIO:SET", "command", "Set GPIO output level", desc_gpio_params, 2, "none" },
     { "WLAN:SCAN", "command", "Start Wi-Fi scan", NULL, 0, NULL },
-    { "WLAN:SCAN?", "query", "Get scan result by index", NULL, 0, "string" },
+    { "WLAN:SCAN?", "query", "Get scan result by index", desc_wlan_get_params, 1, "string" },
 };
 
 static const char *const desc_ble_connect_failed[] = { "3" };
@@ -437,6 +442,8 @@ static void test_descriptor_query(void) {
     assert(strstr(content, "returns=none") != NULL);
     assert(strstr(content, "CMD WLAN:SCAN") != NULL);
     assert(strstr(content, "CMD WLAN:SCAN?") != NULL);
+    /* Options-source param emits the |count|fetch suffix */
+    assert(strstr(content, "param=index:u32:req|WLAN:SCAN:COUNt?|WLAN:SCAN?") != NULL);
     assert(strstr(content, "WF wifi-scan") != NULL);
     assert(strstr(content, "type=trigger_poll_fetch") != NULL);
     assert(strstr(content, "trigger=WLAN:SCAN") != NULL);

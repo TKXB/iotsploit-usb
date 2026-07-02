@@ -18,7 +18,8 @@
 //!
 //! Tags:
 //! - `CMD <pattern>` — one command. Keys: `kind`, `summary`,
-//!   `param=<name>:<type>:<req|opt>` (repeatable), `returns=<type>`.
+//!   `param=<name>:<type>:<req|opt>[|<count_query>|<fetch_query>]` (repeatable,
+//!   the trailing options-source is optional), `returns=<type>`.
 //! - `WF <name>` — one workflow. Keys: `type` (`trigger_poll_fetch` |
 //!   `trigger_poll_interactive`), `trigger=<cmd>`, `done=<query>:<done_value>`,
 //!   `count=<query>`, `fetch=<query>#<index_param>`, `timeout_ms`, `poll_ms`.
@@ -81,6 +82,12 @@ pub struct ParamDesc {
     /// `u32`, `bool`, `string`, `float`, ...
     pub param_type: String,
     pub required: bool,
+    /// Optional "options source". When both are `Some`, the parameter's value
+    /// is a row index into a result set: `options_count_query` returns the row
+    /// count and `options_fetch_query` is queried per index for each row's
+    /// label. Hosts can offer a picker instead of free-text entry.
+    pub options_count_query: Option<String>,
+    pub options_fetch_query: Option<String>,
 }
 
 /// A workflow definition.
@@ -399,13 +406,19 @@ fn parse_cmd(pattern: &str, kv: &[(String, String)]) -> CommandDesc {
             "kind" => cmd.kind = value.clone(),
             "summary" => cmd.summary = value.clone(),
             "param" => {
-                // param=<name>:<type>:<req|opt>
-                let parts: Vec<&str> = value.splitn(3, ':').collect();
+                // param=<name>:<type>:<req|opt>[|<count_query>|<fetch_query>]
+                // The optional options-source uses `|` because SCPI queries
+                // contain `:`; only the leading segment is `:`-delimited.
+                let mut segments = value.split('|');
+                let head = segments.next().unwrap_or("");
+                let parts: Vec<&str> = head.splitn(3, ':').collect();
                 if parts.len() == 3 {
                     cmd.params.push(ParamDesc {
                         name: parts[0].to_string(),
                         param_type: parts[1].to_string(),
                         required: parts[2] == "req",
+                        options_count_query: segments.next().map(str::to_string),
+                        options_fetch_query: segments.next().map(str::to_string),
                     });
                 }
             }
@@ -776,6 +789,30 @@ WF ble-pair type=trigger_poll_interactive trigger=BLE:PAIR state=BLE:PAIR:STATe?
         let txt = "CMD FOO kind=query unknown_key=val another=123";
         let p = parse_str(txt).unwrap();
         assert_eq!(p.commands[0].kind, "query");
+    }
+
+    #[test]
+    fn parse_param_options_source() {
+        // A param with an options source; the SCPI queries contain ':'.
+        let txt = "CMD BLE:CPAIR kind=command param=index:u32:req|BLE:SCAN:COUNt?|BLE:SCAN?";
+        let p = parse_str(txt).unwrap();
+        let param = &p.commands[0].params[0];
+        assert_eq!(param.name, "index");
+        assert_eq!(param.param_type, "u32");
+        assert!(param.required);
+        assert_eq!(param.options_count_query.as_deref(), Some("BLE:SCAN:COUNt?"));
+        assert_eq!(param.options_fetch_query.as_deref(), Some("BLE:SCAN?"));
+    }
+
+    #[test]
+    fn parse_param_without_options_source() {
+        // A plain param leaves the options-source fields empty (backward compat).
+        let txt = "CMD GPIO:SET kind=command param=pin:u32:req";
+        let p = parse_str(txt).unwrap();
+        let param = &p.commands[0].params[0];
+        assert!(param.required);
+        assert!(param.options_count_query.is_none());
+        assert!(param.options_fetch_query.is_none());
     }
 
     #[test]

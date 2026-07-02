@@ -33,6 +33,15 @@ typedef struct {
     const char *name;
     const char *type;     /* "u32", "bool", "string", "float" */
     bool required;
+    /* Optional "options source". When both queries are non-NULL, this
+     * parameter's value is a row index into a result set, so hosts should
+     * offer a picker instead of a free-text field. `options_count_query`
+     * returns the number of rows (e.g. "BLE:SCAN:COUNt?") and
+     * `options_fetch_query` is queried per index for each row's label
+     * (e.g. "BLE:SCAN?"). Both NULL for a plain free-text parameter.
+     * Emitted after the base fields as `|<count_query>|<fetch_query>`. */
+    const char *options_count_query;
+    const char *options_fetch_query;
 } usbscpi_param_desc_t;
 
 typedef struct {

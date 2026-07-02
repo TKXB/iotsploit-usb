@@ -250,6 +250,11 @@ static size_t emit_descriptor(const usbscpi_descriptor_t *desc,
                     p->name ? p->name : "",
                     p->type ? p->type : "",
                     p->required ? "req" : "opt") < 0) return 0;
+            /* Optional options-source suffix: `|<count_query>|<fetch_query>`. */
+            if (p->options_count_query && p->options_fetch_query &&
+                lr_printf(buf, &len, buf_len, "|%s|%s",
+                    p->options_count_query,
+                    p->options_fetch_query) < 0) return 0;
         }
         if (c->return_type && lr_printf(buf, &len, buf_len, " returns=%s", c->return_type) < 0) return 0;
         if (lr_printf(buf, &len, buf_len, "\n") < 0) return 0;

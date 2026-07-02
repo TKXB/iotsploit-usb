@@ -239,8 +239,11 @@ static const usbscpi_param_desc_t desc_ble_scan_params[] = {
 static const usbscpi_param_desc_t desc_ble_scan_get_params[] = {
     { "index", "u32", true },
 };
+/* The connect/connect-pair index is a row in the BLE scan-results table, so it
+ * advertises an options source: hosts populate a picker from BLE:SCAN results
+ * instead of asking for a raw index (which is meaningless without a scan). */
 static const usbscpi_param_desc_t desc_ble_conn_params[] = {
-    { "index", "u32", true },
+    { "index", "u32", true, "BLE:SCAN:COUNt?", "BLE:SCAN?" },
 };
 static const usbscpi_param_desc_t desc_ble_pair_passkey_params[] = {
     { "key", "string", true },
