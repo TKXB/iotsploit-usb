@@ -166,7 +166,12 @@ static void ble_evt_handler(ble_evt_t const *p_ble_evt, void *p_context)
         break;
 
     case BLE_GAP_EVT_DISCONNECTED:
-        s_last_status = gap->params.disconnected.reason;
+        /* Preserve a root-cause code already recorded (e.g. the SMP auth status
+         * that triggered our own disconnect); only fall back to the disconnect
+         * reason when nothing more specific was captured. */
+        if (s_last_status == 0) {
+            s_last_status = gap->params.disconnected.reason;
+        }
         s_conn_handle = BLE_CONN_HANDLE_INVALID;
         s_auto_pair   = 0;
         /* If pairing already completed, keep the DONE outcome (BLE:SEC? reads the
@@ -328,11 +333,17 @@ void ble_conn_task(void)
     if (s_auto_phase != BLE_AUTO_SCANNING) {
         return;
     }
+    /* Let the full (bounded) scan window run first: picking the first advertiser
+     * seen often lands on a weak or transient one that fails to connect. */
+    if (ble_scan_is_scanning()) {
+        return;
+    }
 
-    /* Pick the first connectable device (adv_type == 0) whose name contains the
-     * filter (or any connectable device when no filter was given). Selecting the
-     * first match keeps this deterministic and free of a settle timer; the outer
-     * workflow timeout bounds how long we keep scanning. */
+    /* Scan finished: choose the strongest connectable (adv_type == 0) device
+     * matching the optional name filter — strong, persistent advertisers connect
+     * far more reliably than the first one that happened to appear. */
+    int      best = -1;
+    int8_t   best_rssi = -128;
     uint16_t n = ble_scan_count();
     for (uint16_t i = 0; i < n; i++) {
         ble_scan_result_t r;
@@ -345,19 +356,23 @@ void ble_conn_task(void)
         if (s_auto_filter[0] && !strstr(r.name, s_auto_filter)) {
             continue;  /* name filter set and does not match */
         }
+        if (best < 0 || r.rssi > best_rssi) {
+            best = i;
+            best_rssi = r.rssi;
+        }
+    }
 
-        /* Found a pairable candidate: connect and auto-pair. */
-        s_auto_phase = BLE_AUTO_CONNECTING;
-        connect_to(r.addr, r.addr_type, true);
+    if (best < 0) {
+        /* Nothing pairable in range: end as FAILED so the workflow reports a
+         * result instead of polling until its own timeout. */
+        s_auto_phase = BLE_AUTO_FAILED;
         return;
     }
 
-    /* No connectable candidate yet. Once the bounded scan window has closed with
-     * nothing to pair, end as FAILED so the workflow reports a result instead of
-     * polling until its own timeout. */
-    if (!ble_scan_is_scanning()) {
-        s_auto_phase = BLE_AUTO_FAILED;
-    }
+    ble_scan_result_t chosen;
+    ble_scan_get_result((uint16_t)best, &chosen);
+    s_auto_phase = BLE_AUTO_CONNECTING;
+    connect_to(chosen.addr, chosen.addr_type, true);
 }
 
 int ble_conn_last_status(void)
