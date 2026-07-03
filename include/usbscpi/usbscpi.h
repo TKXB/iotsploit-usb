@@ -79,6 +79,10 @@ typedef struct {
     size_t failed_value_count;
     const usbscpi_prompt_desc_t *prompts;  /* interactive prompts, NULL if none */
     size_t prompt_count;
+    /* Interactive only: query issued once the workflow reaches success_value;
+     * its response is surfaced to the user (e.g. "BLE:SEC?"). NULL if none.
+     * Emitted as `result=<query>`. */
+    const char *result_query;
     uint32_t timeout_ms;
     uint32_t poll_ms;
 } usbscpi_workflow_desc_t;

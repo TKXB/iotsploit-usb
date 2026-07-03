@@ -378,6 +378,7 @@ static const usbscpi_workflow_desc_t desc_workflows[] = {
         .failed_value_count = 1,
         .prompts = desc_ble_connpair_prompts,
         .prompt_count = 3,
+        .result_query = "BLE:SEC?",
         .timeout_ms = 45000,
         .poll_ms = 200,
     },
@@ -470,6 +471,8 @@ static void test_descriptor_query(void) {
     assert(strstr(content, "prompt=3|passkey|BLE:PAIR:PASSKey") != NULL);
     assert(strstr(content, "prompt=4|confirm|BLE:PAIR:CONFirm|BLE:PAIR:NUMCmp?") != NULL);
     assert(strstr(content, "prompt=5|display||BLE:PAIR:PASSKey?") != NULL);
+    /* Verify the interactive result= query is emitted (queried on success) */
+    assert(strstr(content, "result=BLE:SEC?") != NULL);
 }
 
 static void test_descriptor_unsupported(void) {

@@ -291,6 +291,7 @@ static size_t emit_descriptor(const usbscpi_descriptor_t *desc,
             if (pr->value_query &&
                 lr_printf(buf, &len, buf_len, "|%s", pr->value_query) < 0) return 0;
         }
+        if (wf->result_query && lr_printf(buf, &len, buf_len, " result=%s", wf->result_query) < 0) return 0;
         if (lr_printf(buf, &len, buf_len, " timeout_ms=%u poll_ms=%u\n",
                 wf->timeout_ms, wf->poll_ms) < 0) return 0;
     }

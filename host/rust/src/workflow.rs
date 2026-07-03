@@ -28,6 +28,9 @@ pub struct InteractiveResult {
     pub final_state: String,
     /// Whether the workflow reached the `success_value`.
     pub success: bool,
+    /// Response of the workflow's `result_query`, queried once on success.
+    /// `None` when the workflow declares no `result=` query or did not succeed.
+    pub result: Option<String>,
 }
 
 /// Run a workflow by name from a profile.
@@ -56,6 +59,9 @@ pub fn run_workflow<T: Transport>(
             let result = run_trigger_poll_interactive(session, wf, params)?;
             if result.success {
                 println!("workflow `{name}` succeeded (state={})", result.final_state);
+                if let Some(r) = &result.result {
+                    println!("  result: {r}");
+                }
             } else {
                 println!("workflow `{name}` failed (state={})", result.final_state);
             }
@@ -164,15 +170,22 @@ pub fn run_trigger_poll_interactive<T: Transport>(
         let resp = session.query(state_query)?;
         let state = resp.trim().to_string();
         if state == success_value {
+            // Surface the workflow's result (e.g. security info) once, on success.
+            let result = match &wf.result_query {
+                Some(q) => Some(session.query(q)?.trim().to_string()),
+                None => None,
+            };
             return Ok(InteractiveResult {
                 final_state: state,
                 success: true,
+                result,
             });
         }
         if wf.failed_values.iter().any(|f| f == &state) {
             return Ok(InteractiveResult {
                 final_state: state,
                 success: false,
+                result: None,
             });
         }
         if prev_state.as_deref() != Some(state.as_str()) {
@@ -181,6 +194,7 @@ pub fn run_trigger_poll_interactive<T: Transport>(
                     return Ok(InteractiveResult {
                         final_state: state,
                         success: false,
+                        result: None,
                     });
                 }
             }
@@ -385,6 +399,40 @@ mod tests {
         let result = run_trigger_poll_interactive(&mut s, wf, &["0".into()]).unwrap();
         assert!(result.success);
         assert_eq!(result.final_state, "2");
+    }
+
+    #[test]
+    fn interactive_success_with_result() {
+        // On success, a workflow with `result=` issues one extra query and
+        // surfaces its response.
+        const AUTO_PROFILE: &str = "DEV name=test\nWF ble-auto type=trigger_poll_interactive trigger=BLE:AUTO state=BLE:AUTO:STATe? success=6 failed=7 result=BLE:SEC? timeout_ms=5000 poll_ms=10";
+        let mut s = session(&[
+            b"\n".to_vec(),   // drain after BLE:AUTO
+            b"2\n".to_vec(),  // pairing
+            b"6\n".to_vec(),  // done
+            b"AA:BB:CC:DD:EE:FF,4,1,1,1,16\n".to_vec(), // BLE:SEC?
+        ]);
+        let p = descriptor::parse_str(AUTO_PROFILE).unwrap();
+        let wf = p.workflow("ble-auto").unwrap();
+        let result = run_trigger_poll_interactive(&mut s, wf, &[]).unwrap();
+        assert!(result.success);
+        assert_eq!(result.final_state, "6");
+        assert_eq!(result.result.as_deref(), Some("AA:BB:CC:DD:EE:FF,4,1,1,1,16"));
+    }
+
+    #[test]
+    fn interactive_failure_has_no_result() {
+        const AUTO_PROFILE: &str = "DEV name=test\nWF ble-auto type=trigger_poll_interactive trigger=BLE:AUTO state=BLE:AUTO:STATe? success=6 failed=7 result=BLE:SEC? timeout_ms=5000 poll_ms=10";
+        let mut s = session(&[
+            b"\n".to_vec(),   // drain
+            b"2\n".to_vec(),  // pairing
+            b"7\n".to_vec(),  // failed — result query must NOT be issued
+        ]);
+        let p = descriptor::parse_str(AUTO_PROFILE).unwrap();
+        let wf = p.workflow("ble-auto").unwrap();
+        let result = run_trigger_poll_interactive(&mut s, wf, &[]).unwrap();
+        assert!(!result.success);
+        assert!(result.result.is_none());
     }
 
     #[test]

@@ -109,6 +109,7 @@ SRC_FILES += \
   $(PROJ_DIR)/main.c \
   $(PROJ_DIR)/usb_descriptors.c \
   $(PROJ_DIR)/ble_scan_handler.c \
+  $(PROJ_DIR)/ble_conn_handler.c \
   $(USBSCPI_ROOT)/src/usbscpi.c \
   $(wildcard $(USBSCPI_ROOT)/third_party/libscpi/src/*.c) \
   $(USBSCPI_ROOT)/glue/usbscpi_tinyusb.c \

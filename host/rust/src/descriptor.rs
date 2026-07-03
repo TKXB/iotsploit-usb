@@ -23,7 +23,8 @@
 //! - `WF <name>` — one workflow. Keys: `type` (`trigger_poll_fetch` |
 //!   `trigger_poll_interactive`), `trigger=<cmd>`, `done=<query>:<done_value>`,
 //!   `count=<query>`, `fetch=<query>#<index_param>`, `timeout_ms`, `poll_ms`.
-//!   Interactive-only: `state=<query>`, `success=<value>`, `failed=<value>`.
+//!   Interactive-only: `state=<query>`, `success=<value>`, `failed=<value>`,
+//!   `result=<query>` (queried once on success; its value is shown to the user).
 //! - `DEV` — optional device header. Keys: `name`, `idn`, `idn_match`,
 //!   `proto`, `mtu`, `max_block`.
 //!
@@ -114,6 +115,9 @@ pub struct WorkflowDesc {
     pub failed_values: Vec<String>,
     /// Interactive prompts fired when `state_query` reaches a prompt's state.
     pub prompts: Vec<PromptDesc>,
+    /// Optional query issued once the workflow reaches `success_value`. Its
+    /// response is surfaced to the user (e.g. BLE security info after pairing).
+    pub result_query: Option<String>,
     // Timing
     pub timeout_ms: u64,
     pub poll_ms: u64,
@@ -135,6 +139,7 @@ impl Default for WorkflowDesc {
             success_value: None,
             failed_values: Vec::new(),
             prompts: Vec::new(),
+            result_query: None,
             timeout_ms: 15_000,
             poll_ms: 250,
         }
@@ -465,6 +470,7 @@ fn parse_wf(name: &str, kv: &[(String, String)]) -> WorkflowDesc {
             }
             "state" => wf.state_query = Some(value.clone()),
             "success" => wf.success_value = Some(value.clone()),
+            "result" => wf.result_query = Some(value.clone()),
             "failed" => wf.failed_values.push(value.clone()),
             "prompt" => {
                 if let Some(p) = parse_prompt(value) {
@@ -766,6 +772,23 @@ WF ble-pair type=trigger_poll_interactive trigger=BLE:PAIR state=BLE:PAIR:STATe?
         assert_eq!(wf.prompts[2].kind, PromptKind::Display);
         assert_eq!(wf.prompts[2].send_cmd, "");
         assert_eq!(wf.prompts[2].value_query.as_deref(), Some("BLE:PAIR:PASSKey?"));
+    }
+
+    #[test]
+    fn parse_interactive_workflow_with_result() {
+        let txt = "\
+WF ble-auto type=trigger_poll_interactive trigger=BLE:AUTO state=BLE:AUTO:STATe? success=6 failed=7 result=BLE:SEC? timeout_ms=60000 poll_ms=200
+";
+        let p = parse_str(txt).unwrap();
+        let wf = &p.workflows[0];
+        assert_eq!(wf.result_query.as_deref(), Some("BLE:SEC?"));
+    }
+
+    #[test]
+    fn parse_workflow_without_result_is_none() {
+        let txt = "WF ble-pair type=trigger_poll_interactive trigger=BLE:PAIR state=BLE:PAIR:STATe? success=4 failed=5";
+        let p = parse_str(txt).unwrap();
+        assert!(p.workflows[0].result_query.is_none());
     }
 
     #[test]
