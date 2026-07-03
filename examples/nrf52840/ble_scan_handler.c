@@ -210,6 +210,30 @@ void ble_scan_start(void)
     }
 }
 
+void ble_scan_start_timed(uint16_t secs)
+{
+    /* Clamp so secs*100 (the SoftDevice's 10 ms timeout units) fits in the
+       uint16_t timeout field; 0 would scan forever, defeating the auto-stop. */
+    if (secs == 0)   secs = 5;
+    if (secs > 600)  secs = 600;
+
+    ble_gap_scan_params_t params = {
+        .active        = 0x01,
+        .interval      = SCAN_INTERVAL,
+        .window        = SCAN_WINDOW,
+        .timeout       = (uint16_t)(secs * 100),  /* units of 10 ms */
+        .filter_policy = BLE_GAP_SCAN_FP_ACCEPT_ALL,
+    };
+    if (nrf_ble_scan_params_set(&m_scan, &params) != NRF_SUCCESS) {
+        return;
+    }
+
+    ret_code_t err = nrf_ble_scan_start(&m_scan);
+    if (err == NRF_SUCCESS) {
+        s_scanning = true;
+    }
+}
+
 void ble_scan_stop(void)
 {
     nrf_ble_scan_stop();

@@ -26,8 +26,15 @@ typedef struct {
  */
 int ble_scan_init(void);
 
-/** Start BLE scanning. */
+/** Start BLE scanning (runs until stopped). */
 void ble_scan_start(void);
+
+/** Start BLE scanning for a fixed duration, then auto-stop.
+ * After the window elapses the SoftDevice ends the scan and
+ * ble_scan_is_scanning() returns false. Used by the ESP32-dialect
+ * `BLE:SCAN <secs>` alias so hosts can poll a "done" query.
+ * @param secs  Scan duration in seconds (clamped to a safe range). */
+void ble_scan_start_timed(uint16_t secs);
 
 /** Stop BLE scanning. */
 void ble_scan_stop(void);

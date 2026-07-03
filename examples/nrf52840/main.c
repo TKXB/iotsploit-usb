@@ -47,10 +47,9 @@ static scpi_result_t cmd_ble_scan_count(scpi_t *ctx) {
     return SCPI_ResultUInt32(ctx, ble_scan_count());
 }
 
-static scpi_result_t cmd_ble_scan_result(scpi_t *ctx) {
-    uint32_t index = 0;
-    if (SCPI_ParamUInt32(ctx, &index, TRUE) != TRUE) return SCPI_RES_ERR;
-
+/* Format scan result #index as a CSV row and return it, or push a range error.
+ * Shared by BLE:SCAN:RESult? and the ESP32-dialect BLE:SCAN? alias. */
+static scpi_result_t scan_row_reply(scpi_t *ctx, uint32_t index) {
     ble_scan_result_t r;
     if (!ble_scan_get_result((uint16_t)index, &r)) {
         SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
@@ -68,10 +67,55 @@ static scpi_result_t cmd_ble_scan_result(scpi_t *ctx) {
     return SCPI_ResultCharacters(ctx, buf, strlen(buf));
 }
 
+static scpi_result_t cmd_ble_scan_result(scpi_t *ctx) {
+    uint32_t index = 0;
+    if (SCPI_ParamUInt32(ctx, &index, TRUE) != TRUE) return SCPI_RES_ERR;
+    return scan_row_reply(ctx, index);
+}
+
 static scpi_result_t cmd_ble_scan_clear(scpi_t *ctx) {
     (void)ctx;
     ble_scan_clear();
     return SCPI_RES_OK;
+}
+
+/* ---------- ESP32-dialect scan aliases (for the unmodified iotsploit-ui) ---------- */
+/* The iotsploit-ui BLE panel drives scans as a timed operation:
+ *   BLE:SCAN <secs>  ->  poll BLE:SCAN:DONE?  ->  BLE:SCAN? <index>
+ * The nRF's native interface is start/stop with a BLE:SCAN:STATe? poll, so these
+ * three aliases bridge the dialect without any host/UI change. They are kept out
+ * of the descriptor on purpose: the descriptor advertises the native ble-scan
+ * workflow, and the UI does not read the descriptor. */
+
+static scpi_result_t cmd_ble_scan_timed(scpi_t *ctx) {
+    uint32_t secs = 5;                             /* default when omitted */
+    (void)SCPI_ParamUInt32(ctx, &secs, FALSE);
+    ble_scan_clear();                              /* each BLE:SCAN starts fresh */
+    ble_scan_start_timed((uint16_t)(secs > 600 ? 600 : secs));
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_ble_scan_done(scpi_t *ctx) {
+    /* 1 = scan finished, 0 = still scanning (inverse of BLE:SCAN:STATe?). */
+    return SCPI_ResultUInt32(ctx, ble_scan_is_scanning() ? 0 : 1);
+}
+
+static scpi_result_t cmd_ble_scan_query(scpi_t *ctx) {
+    uint32_t index = 0;
+    if (SCPI_ParamUInt32(ctx, &index, TRUE) != TRUE) return SCPI_RES_ERR;
+    return scan_row_reply(ctx, index);
+}
+
+/* nRF uses legacy pairing (no numeric comparison), so these never occur in a
+ * normal flow. They exist only so the UI's confirm/numcmp buttons return cleanly
+ * instead of raising an undefined-header error if pressed. */
+static scpi_result_t cmd_ble_confirm_stub(scpi_t *ctx) {
+    (void)ctx;
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_ble_numcmp_stub(scpi_t *ctx) {
+    return SCPI_ResultUInt32(ctx, 0);
 }
 
 /* ---------- BLE connect / pair SCPI command callbacks ---------- */
@@ -159,6 +203,10 @@ static const scpi_command_t ble_commands[] = {
     { "BLE:SCAN:COUNt?",  cmd_ble_scan_count,   0 },
     { "BLE:SCAN:RESult?", cmd_ble_scan_result,  0 },
     { "BLE:SCAN:CLEar",   cmd_ble_scan_clear,   0 },
+    /* ESP32-dialect scan aliases for the unmodified iotsploit-ui BLE panel. */
+    { "BLE:SCAN",         cmd_ble_scan_timed,   0 },
+    { "BLE:SCAN:DONE?",   cmd_ble_scan_done,    0 },
+    { "BLE:SCAN?",        cmd_ble_scan_query,   0 },
     { "BLE:CONNect",         cmd_ble_conn,        0 },
     { "BLE:CONNect:STATe?",  cmd_ble_conn_state,  0 },
     { "BLE:CONNect:STATus?", cmd_ble_conn_status, 0 },
@@ -171,6 +219,9 @@ static const scpi_command_t ble_commands[] = {
     { "BLE:PAIR:STATe?",     cmd_ble_pair_state,  0 },
     { "BLE:PAIR:PASSKey",    cmd_ble_passkey,     0 },
     { "BLE:PAIR:PASSKey?",   cmd_ble_passkey_get, 0 },
+    /* Compatibility stubs: nRF legacy pairing has no numeric comparison. */
+    { "BLE:PAIR:CONFirm",    cmd_ble_confirm_stub, 0 },
+    { "BLE:PAIR:NUMCmp?",    cmd_ble_numcmp_stub,  0 },
     { "BLE:SEC?",            cmd_ble_sec,         0 },
     SCPI_CMD_LIST_END
 };
