@@ -119,9 +119,11 @@ static int connect_to(const uint8_t addr[6], uint8_t addr_type, bool auto_pair)
 
     ble_scan_stop();  /* the SoftDevice cannot scan and connect concurrently */
 
-    s_conn_state = BLE_CONN_CONNECTING;
-    s_pair_state = BLE_PAIR_IDLE;
-    s_auto_pair  = auto_pair ? 1 : 0;
+    s_conn_state   = BLE_CONN_CONNECTING;
+    s_pair_state   = BLE_PAIR_IDLE;
+    s_auto_pair    = auto_pair ? 1 : 0;
+    s_sec_level    = 0;   /* clear any security cached from a prior link */
+    s_sec_key_size = 0;
     uint32_t err = sd_ble_gap_connect(&peer, &m_connect_scan_params,
                                       &m_conn_params, APP_BLE_CONN_CFG_TAG);
     if (err != NRF_SUCCESS) {
@@ -152,21 +154,38 @@ static void ble_evt_handler(ble_evt_t const *p_ble_evt, void *p_context)
         if (s_auto_pair) {
             s_auto_pair  = 0;
             s_pair_state = BLE_PAIR_PROGRESS;
-            if (sd_ble_gap_authenticate(s_conn_handle, &m_sec_params) != NRF_SUCCESS) {
-                s_pair_state = BLE_PAIR_FAILED;
+            uint32_t aerr = sd_ble_gap_authenticate(s_conn_handle, &m_sec_params);
+            if (aerr != NRF_SUCCESS) {
+                s_last_status = (int)aerr;   /* record why pairing could not start */
+                s_pair_state  = BLE_PAIR_FAILED;
             }
         }
         break;
 
     case BLE_GAP_EVT_DISCONNECTED:
         s_last_status = gap->params.disconnected.reason;
-        reset_state();
+        s_conn_handle = BLE_CONN_HANDLE_INVALID;
+        s_auto_pair   = 0;
+        /* If pairing already completed, keep the DONE outcome (BLE:SEC? reads the
+         * cached security info, not the live handle) so a workflow can still
+         * report success. Otherwise surface a clean FAILED terminal state rather
+         * than dropping to IDLE — a polling workflow cannot tell IDLE apart from
+         * "not started" and would hang until it times out. */
+        if (s_pair_state != BLE_PAIR_DONE) {
+            s_conn_state = BLE_CONN_FAILED;
+            s_pair_state = BLE_PAIR_FAILED;
+        }
         break;
 
     case BLE_GAP_EVT_TIMEOUT:
         if (gap->params.timeout.src == BLE_GAP_TIMEOUT_SRC_CONN) {
-            s_conn_state = BLE_CONN_FAILED;
-            s_auto_pair  = 0;
+            /* Connection establishment timed out (peer not connectable/in range).
+             * Record an HCI "connection failed to be established" so BLE:CONNect:STATus?
+             * distinguishes this from a pairing rejection. */
+            s_last_status = 0x3E;  /* BLE_HCI_CONN_FAILED_TO_BE_ESTABLISHED */
+            s_conn_state  = BLE_CONN_FAILED;
+            s_pair_state  = BLE_PAIR_FAILED;
+            s_auto_pair   = 0;
         }
         break;
 
@@ -273,15 +292,17 @@ int ble_auto_start(const char *filter)
 
     reset_state();
     ble_scan_clear();
-    ble_scan_start();
+    ble_scan_start_timed(10);   /* bounded so a "nothing found" run can end */
     s_auto_phase = BLE_AUTO_SCANNING;
     return 0;
 }
 
 int ble_auto_state(void)
 {
+    /* Explicit phases short-circuit; only the connect/pair phases are derived. */
     if (s_auto_phase == BLE_AUTO_IDLE)     return BLE_AUTO_IDLE;
     if (s_auto_phase == BLE_AUTO_SCANNING) return BLE_AUTO_SCANNING;
+    if (s_auto_phase == BLE_AUTO_FAILED)   return BLE_AUTO_FAILED;
 
     /* Past selection: mirror the combined connect+pair phase. */
     switch (ble_connpair_state()) {
@@ -322,6 +343,13 @@ void ble_conn_task(void)
         s_auto_phase = BLE_AUTO_CONNECTING;
         connect_to(r.addr, r.addr_type, true);
         return;
+    }
+
+    /* No connectable candidate yet. Once the bounded scan window has closed with
+     * nothing to pair, end as FAILED so the workflow reports a result instead of
+     * polling until its own timeout. */
+    if (!ble_scan_is_scanning()) {
+        s_auto_phase = BLE_AUTO_FAILED;
     }
 }
 

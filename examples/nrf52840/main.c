@@ -305,12 +305,15 @@ static const usbscpi_prompt_desc_t desc_auto_prompts[] = {
 
 static const usbscpi_workflow_desc_t desc_workflows[] = {
     {
+        /* Uses the timed BLE:SCAN (defaults to 5 s) so the scan auto-stops and
+         * BLE:SCAN:DONE? reaches 1; BLE:SCAN:START runs forever and would never
+         * satisfy a done poll. */
         .name = "ble-scan",
         .type = "trigger_poll_fetch",
         .summary = "Scan for BLE devices",
-        .trigger_cmd = "BLE:SCAN:START",
-        .done_query = "BLE:SCAN:STATe?",
-        .done_value = "0",
+        .trigger_cmd = "BLE:SCAN",
+        .done_query = "BLE:SCAN:DONE?",
+        .done_value = "1",
         .count_query = "BLE:SCAN:COUNt?",
         .fetch_query = "BLE:SCAN:RESult?",
         .state_query = NULL,
