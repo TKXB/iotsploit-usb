@@ -158,6 +158,9 @@ static void ble_evt_handler(ble_evt_t const *p_ble_evt, void *p_context)
             if (aerr != NRF_SUCCESS) {
                 s_last_status = (int)aerr;   /* record why pairing could not start */
                 s_pair_state  = BLE_PAIR_FAILED;
+                /* Free the single central slot so the next attempt can connect. */
+                (void)sd_ble_gap_disconnect(s_conn_handle,
+                          BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
             }
         }
         break;
@@ -225,6 +228,10 @@ static void ble_evt_handler(ble_evt_t const *p_ble_evt, void *p_context)
             s_pair_state = BLE_PAIR_DONE;
         } else {
             s_pair_state = BLE_PAIR_FAILED;
+            /* Drop the link so the single central slot is freed; otherwise the
+             * next connect fails immediately with the slot still occupied. */
+            (void)sd_ble_gap_disconnect(s_conn_handle,
+                      BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
         }
         break;
 
