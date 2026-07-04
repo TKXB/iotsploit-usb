@@ -83,6 +83,14 @@ typedef struct {
      * its response is surfaced to the user (e.g. "BLE:SEC?"). NULL if none.
      * Emitted as `result=<query>`. */
     const char *result_query;
+    /* Column schema for each fetch row, emitted verbatim as `fields=<spec>`.
+     * Grammar: `<name>:<type>[:<unit>],<name>:<type>[:<unit>],…`
+     * NULL when the workflow does not advertise columns; the host then falls
+     * back to a single `value:string` column (raw-line behaviour). */
+    const char *fields;
+    /* Column schema for the optional `result=` query, emitted verbatim as
+     * `result_fields=<spec>`. NULL when not advertised. */
+    const char *result_fields;
     uint32_t timeout_ms;
     uint32_t poll_ms;
 } usbscpi_workflow_desc_t;

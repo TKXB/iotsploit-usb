@@ -118,6 +118,12 @@ pub struct WorkflowDesc {
     /// Optional query issued once the workflow reaches `success_value`. Its
     /// response is surfaced to the user (e.g. BLE security info after pairing).
     pub result_query: Option<String>,
+    /// Column schema for each fetch row (`fields=`). Empty when the descriptor
+    /// does not advertise columns — the host falls back to a single
+    /// `value:string` column.
+    pub fields: Vec<ResultColumn>,
+    /// Column schema for the optional `result=` query (`result_fields=`).
+    pub result_fields: Vec<ResultColumn>,
     // Timing
     pub timeout_ms: u64,
     pub poll_ms: u64,
@@ -140,6 +146,8 @@ impl Default for WorkflowDesc {
             failed_values: Vec::new(),
             prompts: Vec::new(),
             result_query: None,
+            fields: Vec::new(),
+            result_fields: Vec::new(),
             timeout_ms: 15_000,
             poll_ms: 250,
         }
@@ -180,6 +188,61 @@ pub struct PromptDesc {
 pub enum WorkflowType {
     TriggerPollFetch,
     TriggerPollInteractive,
+}
+
+/// Closed set of column types a fetch row can carry. Mirrors the descriptor
+/// `fields=` grammar (`string`, `i32`, `u32`, `i64`, `u64`, `f64`, `bool`,
+/// `mac`, `hex`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldType {
+    Str,
+    I64,
+    U64,
+    F64,
+    Bool,
+    Mac,
+    Hex,
+}
+
+/// One column in a fetch/result schema, parsed from a `fields=` (or
+/// `result_fields=`) entry: `<name>:<type>[:<unit>]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultColumn {
+    pub name: String,
+    pub field_type: FieldType,
+    /// Optional display hint (e.g. `dbm`, `mhz`). Rendering only.
+    pub unit: Option<String>,
+}
+
+/// Parse a `fields=` / `result_fields=` value into a column list.
+///
+/// Grammar: `<name>:<type>[:<unit>],<name>:<type>[:<unit>],…`
+fn parse_fields(value: &str) -> Vec<ResultColumn> {
+    let mut cols = Vec::new();
+    for spec in value.split(',') {
+        let mut parts = spec.split(':');
+        let name = match parts.next().filter(|s| !s.is_empty()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let field_type = match parts.next() {
+            Some("string") => FieldType::Str,
+            Some("i32") | Some("i64") => FieldType::I64,
+            Some("u32") | Some("u64") => FieldType::U64,
+            Some("f64") | Some("f32") => FieldType::F64,
+            Some("bool") => FieldType::Bool,
+            Some("mac") => FieldType::Mac,
+            Some("hex") => FieldType::Hex,
+            _ => FieldType::Str, // unknown -> string (forward-compatible)
+        };
+        let unit = parts.next().filter(|s| !s.is_empty()).map(str::to_string);
+        cols.push(ResultColumn {
+            name,
+            field_type,
+            unit,
+        });
+    }
+    cols
 }
 
 impl Default for WorkflowType {
@@ -471,6 +534,8 @@ fn parse_wf(name: &str, kv: &[(String, String)]) -> WorkflowDesc {
             "state" => wf.state_query = Some(value.clone()),
             "success" => wf.success_value = Some(value.clone()),
             "result" => wf.result_query = Some(value.clone()),
+            "fields" => wf.fields = parse_fields(value),
+            "result_fields" => wf.result_fields = parse_fields(value),
             "failed" => wf.failed_values.push(value.clone()),
             "prompt" => {
                 if let Some(p) = parse_prompt(value) {
@@ -789,6 +854,52 @@ WF ble-auto type=trigger_poll_interactive trigger=BLE:AUTO state=BLE:AUTO:STATe?
         let txt = "WF ble-pair type=trigger_poll_interactive trigger=BLE:PAIR state=BLE:PAIR:STATe? success=4 failed=5";
         let p = parse_str(txt).unwrap();
         assert!(p.workflows[0].result_query.is_none());
+    }
+
+    #[test]
+    fn parse_workflow_fields_schema() {
+        let txt = "WF wifi-scan type=trigger_poll_fetch trigger=WLAN:SCAN \
+                   done=WLAN:SCAN:DONE?:1 count=WLAN:SCAN:COUNt? fetch=WLAN:SCAN?#index \
+                   fields=ssid:string,rssi:i32:dbm,channel:u32,authmode:string,bssid:mac";
+        let p = parse_str(txt).unwrap();
+        let wf = &p.workflows[0];
+        assert_eq!(wf.fields.len(), 5);
+        assert_eq!(wf.fields[0].name, "ssid");
+        assert_eq!(wf.fields[0].field_type, FieldType::Str);
+        assert!(wf.fields[0].unit.is_none());
+        assert_eq!(wf.fields[1].name, "rssi");
+        assert_eq!(wf.fields[1].field_type, FieldType::I64);
+        assert_eq!(wf.fields[1].unit.as_deref(), Some("dbm"));
+        assert_eq!(wf.fields[2].name, "channel");
+        assert_eq!(wf.fields[2].field_type, FieldType::U64);
+        assert_eq!(wf.fields[4].name, "bssid");
+        assert_eq!(wf.fields[4].field_type, FieldType::Mac);
+        // result_fields absent -> empty
+        assert!(wf.result_fields.is_empty());
+    }
+
+    #[test]
+    fn parse_workflow_result_fields_schema() {
+        let txt = "WF ble-auto type=trigger_poll_interactive trigger=BLE:AUTO \
+                   state=BLE:AUTO:STATe? success=6 result=BLE:SEC? \
+                   result_fields=mac:mac,level:string,encrypted:bool,key_size:u32";
+        let p = parse_str(txt).unwrap();
+        let wf = &p.workflows[0];
+        assert_eq!(wf.result_fields.len(), 4);
+        assert_eq!(wf.result_fields[0].name, "mac");
+        assert_eq!(wf.result_fields[0].field_type, FieldType::Mac);
+        assert_eq!(wf.result_fields[2].name, "encrypted");
+        assert_eq!(wf.result_fields[2].field_type, FieldType::Bool);
+        // fields absent -> empty
+        assert!(wf.fields.is_empty());
+    }
+
+    #[test]
+    fn parse_workflow_unknown_field_type_falls_back_to_string() {
+        let txt = "WF w type=trigger_poll_fetch trigger=T fields=col:bogus:hz";
+        let p = parse_str(txt).unwrap();
+        assert_eq!(p.workflows[0].fields[0].field_type, FieldType::Str);
+        assert_eq!(p.workflows[0].fields[0].unit.as_deref(), Some("hz"));
     }
 
     #[test]
