@@ -15,6 +15,8 @@
 #include "ble_scan.h"
 #include "ble_conn.h"
 
+static const char *TAG = "scpi";
+
 /* ---------- 静态缓冲(等价 pico2,避免动态分配) ---------- */
 static uint8_t s_storage[2048];
 static char    s_line[96];
@@ -83,6 +85,7 @@ static scpi_result_t cmd_adc_read(scpi_t *ctx) {
 /* ---------- WiFi 扫描命令(异步触发 → 轮询 → 逐行取) ---------- */
 static scpi_result_t cmd_wlan_scan(scpi_t *ctx) {
     (void)ctx;
+    ESP_LOGI(TAG, "WLAN:SCAN");
     return wifi_scan_start() == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
 }
 
@@ -112,6 +115,7 @@ static scpi_result_t cmd_wlan_get(scpi_t *ctx) {
 static scpi_result_t cmd_ble_scan(scpi_t *ctx) {
     uint32_t secs = 5;
     (void)SCPI_ParamUInt32(ctx, &secs, FALSE);
+    ESP_LOGI(TAG, "BLE:SCAN secs=%u", (unsigned)secs);
     return ble_scan_start(secs) == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
 }
 
@@ -141,6 +145,7 @@ static scpi_result_t cmd_ble_get(scpi_t *ctx) {
 static scpi_result_t cmd_ble_conn(scpi_t *ctx) {
     uint32_t idx = 0;
     if (SCPI_ParamUInt32(ctx, &idx, TRUE) != TRUE) return SCPI_RES_ERR;
+    ESP_LOGI(TAG, "BLE:CONNect idx=%u", (unsigned)idx);
     return ble_conn_start((size_t)idx) == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
 }
 
@@ -156,12 +161,14 @@ static scpi_result_t cmd_ble_conn_status(scpi_t *ctx) {
 
 static scpi_result_t cmd_ble_disconn(scpi_t *ctx) {
     (void)ctx;
+    ESP_LOGI(TAG, "BLE:DISConnect");
     return ble_conn_disconnect() == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
 }
 
 static scpi_result_t cmd_ble_connpair(scpi_t *ctx) {
     uint32_t idx = 0;
     if (SCPI_ParamUInt32(ctx, &idx, TRUE) != TRUE) return SCPI_RES_ERR;
+    ESP_LOGI(TAG, "BLE:CPAIR idx=%u", (unsigned)idx);
     return ble_connpair_start((size_t)idx) == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
 }
 
@@ -172,6 +179,7 @@ static scpi_result_t cmd_ble_connpair_state(scpi_t *ctx) {
 
 static scpi_result_t cmd_ble_pair(scpi_t *ctx) {
     (void)ctx;
+    ESP_LOGI(TAG, "BLE:PAIR");
     return ble_pair_start() == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
 }
 
@@ -183,6 +191,7 @@ static scpi_result_t cmd_ble_pair_state(scpi_t *ctx) {
 static scpi_result_t cmd_ble_pair_passkey(scpi_t *ctx) {
     uint32_t pk = 0;
     if (SCPI_ParamUInt32(ctx, &pk, TRUE) != TRUE) return SCPI_RES_ERR;
+    ESP_LOGI(TAG, "BLE:PAIR:PASSKey %06u", (unsigned)pk);
     return ble_pair_passkey(pk) == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
 }
 
@@ -209,6 +218,7 @@ static scpi_result_t cmd_ble_numcmp(scpi_t *ctx) {
 static scpi_result_t cmd_ble_confirm(scpi_t *ctx) {
     uint32_t accept = 1;
     (void)SCPI_ParamUInt32(ctx, &accept, FALSE);
+    ESP_LOGI(TAG, "BLE:PAIR:CONFirm accept=%u", (unsigned)accept);
     return ble_pair_confirm((int)accept) == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
 }
 
@@ -593,7 +603,7 @@ static int log_tee_vprintf(const char *fmt, va_list ap) {
 
     /* 再格式化一份进 stream buffer;stream buffer 不是 ISR 安全的,ISR 上下文跳过 */
     if (s_log_sb && !xPortInIsrContext()) {
-        char buf[160];
+        char buf[256];
         va_list ap_usb;
         va_copy(ap_usb, ap);
         int m = vsnprintf(buf, sizeof(buf), fmt, ap_usb);
@@ -627,13 +637,17 @@ static void usb_log_pump(void) {
     tud_vendor_flush();
 }
 
-/* ---------- 心跳任务:即便空闲也让日志流有输出,便于演示 ---------- */
-static void heartbeat_task(void *arg) {
+/* ---------- 状态信标:10 秒周期,报告 wifi/ble/连接状态 ----------
+ * 取代原来的 1 Hz 心跳;tag=\"beacon\" 可过滤,SCPI 路径不受影响。 */
+static void beacon_task(void *arg) {
     (void)arg;
-    unsigned n = 0;
     for (;;) {
-        ESP_LOGI("demo", "heartbeat %u", n++);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        ESP_LOGI("beacon", "status wifi_aps=%u ble_devs=%u conn=%d pair=%d",
+                 (unsigned)wifi_scan_count(),
+                 (unsigned)ble_scan_count(),
+                 ble_conn_state(),
+                 ble_pair_state());
+        vTaskDelay(pdMS_TO_TICKS(10000));
     }
 }
 
@@ -696,6 +710,6 @@ void app_main(void) {
     xTaskCreate(usb_task, "usb", 6144, dev, 5, NULL);
     /* USB 起来后再异步初始化无线,避免阻塞枚举 */
     xTaskCreate(scan_init_task, "scan_init", 12288, NULL, 4, NULL);
-    /* 演示用心跳,持续向设备日志流输出 */
-    xTaskCreate(heartbeat_task, "heartbeat", 2560, NULL, 3, NULL);
+    /* 状态信标:10 秒周期向设备日志流输出实时状态 */
+    xTaskCreate(beacon_task, "beacon", 2560, NULL, 3, NULL);
 }

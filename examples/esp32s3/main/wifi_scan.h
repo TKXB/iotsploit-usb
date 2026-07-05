@@ -12,6 +12,9 @@ extern "C" {
  * Safe to call once at startup, before USB/SCPI init. */
 void wifi_scan_init(void);
 
+/* 1 once Wi-Fi STA has finished coming up (init done), else 0. */
+bool wifi_scan_ready(void);
+
 /* Kick off a non-blocking scan of all channels. Returns 0 on success.
  * Results are captured asynchronously in the WIFI_EVENT_SCAN_DONE handler. */
 int wifi_scan_start(void);

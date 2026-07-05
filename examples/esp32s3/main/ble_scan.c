@@ -8,6 +8,9 @@
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "host/util/util.h"
+#include "esp_log.h"
+
+static const char *TAG = "ble";
 
 #define BLE_SCAN_MAX_DEV 20
 #define BLE_SCAN_NAME_LEN 32
@@ -59,12 +62,19 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
     case BLE_GAP_EVENT_DISC: {
         struct ble_hs_adv_fields fields;
         ble_hs_adv_parse_fields(&fields, event->disc.data, event->disc.length_data);
+        const uint8_t *v = event->disc.addr.val;  /* little-endian: MSB..LSB */
+        ESP_LOGD(TAG, "disc %02X:%02X:%02X:%02X:%02X:%02X rssi=%d name=\"%.*s\"",
+                 v[5], v[4], v[3], v[2], v[1], v[0],
+                 event->disc.rssi,
+                 fields.name_len ? (int)fields.name_len : 0,
+                 fields.name_len ? (const char *)fields.name : "");
         store_device(&event->disc.addr, event->disc.rssi,
                      event->disc.event_type, &fields);
         return 0;
     }
     case BLE_GAP_EVENT_DISC_COMPLETE:
         s_done = 1;
+        ESP_LOGI(TAG, "ble scan complete: %u devs", (unsigned)s_dev_count);
         return 0;
     default:
         return 0;
@@ -75,6 +85,7 @@ static void on_sync(void) {
     ble_hs_util_ensure_addr(0);
     ble_hs_id_infer_auto(0, &s_own_addr_type);
     s_ready = true;
+    ESP_LOGI(TAG, "nimble synced, ready");
 }
 
 static void host_task(void *param) {
@@ -85,6 +96,7 @@ static void host_task(void *param) {
 
 void ble_scan_init(void) {
     if (nimble_port_init() != ESP_OK) {
+        ESP_LOGE(TAG, "nimble_port_init failed");
         return;
     }
     ble_hs_cfg.sync_cb = on_sync;
@@ -93,6 +105,7 @@ void ble_scan_init(void) {
 
 int ble_scan_start(unsigned secs) {
     if (!s_ready) {
+        ESP_LOGE(TAG, "ble scan start: stack not synced");
         return -1;
     }
     s_done = 0;
@@ -100,7 +113,13 @@ int ble_scan_start(unsigned secs) {
     struct ble_gap_disc_params p = { 0 };
     p.passive = 1;                     /* listen only, no scan requests */
     int32_t duration = (secs == 0) ? BLE_HS_FOREVER : (int32_t)(secs * 1000);
-    return ble_gap_disc(s_own_addr_type, duration, &p, gap_event_cb, NULL) == 0 ? 0 : -1;
+    int rc = ble_gap_disc(s_own_addr_type, duration, &p, gap_event_cb, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble scan start failed: rc=%d", rc);
+        return -1;
+    }
+    ESP_LOGI(TAG, "ble scan start secs=%u", secs);
+    return 0;
 }
 
 int ble_scan_done(void) {
