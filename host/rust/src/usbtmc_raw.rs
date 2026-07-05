@@ -35,6 +35,9 @@ const EOM_BIT: u8 = 0x01;
 const USB_CLASS_APP_SPEC: u8 = 0xFE;
 const USB_SUBCLASS_USBTMC: u8 = 0x03;
 
+// USB interface class for the vendor-specific device-log interface (EP bulk-IN).
+const USB_CLASS_VENDOR: u8 = 0xFF;
+
 /// Raw USBTMC transport backed by `nusb`.
 pub struct UsbtmcRaw {
     // The claimed interface keeps the underlying device alive; dropping it
@@ -376,4 +379,129 @@ fn map_io_err(e: std::io::Error) -> Error {
 
 fn map_transfer_err(e: nusb::transfer::TransferError) -> Error {
     Error::Device(format!("USB transfer error: {e}"))
+}
+
+/// Reader for the device's vendor-specific **log** interface (bulk-IN only).
+///
+/// This is the host counterpart of the firmware's second USB interface (class
+/// `0xFF`): the SCPI command path stays on the USBTMC interface ([`UsbtmcRaw`]),
+/// while unsolicited device log output is streamed out of a separate bulk-IN
+/// endpoint. The two interfaces are independent, so a `UsbtmcLogReader` can be
+/// opened on the *same* device alongside a live [`UsbtmcRaw`] session without
+/// interfering with it (each claims a different interface).
+///
+/// Bytes are delivered raw (typically newline-delimited UTF-8, possibly with
+/// ANSI colour escapes from the device's logging framework); line splitting and
+/// level classification are left to the caller.
+pub struct UsbtmcLogReader {
+    // Claimed vendor interface; dropping it releases the claim.
+    interface: Interface,
+    ep_in: u8,
+    max_packet_in: usize,
+    timeout: Duration,
+}
+
+impl UsbtmcLogReader {
+    /// Open the log interface on the device at `(bus_number, device_address)`.
+    ///
+    /// Use the same topology address the USBTMC session was opened with so the
+    /// log stream tracks the same physical device.
+    pub fn open_by_bus_address(bus_number: u8, device_address: u8) -> Result<Self> {
+        let info = nusb::list_devices()
+            .map_err(map_io_err)?
+            .find(|d| d.bus_number() == bus_number && d.device_address() == device_address)
+            .ok_or_else(|| {
+                Error::Device(format!(
+                    "no USB device at bus {bus_number} address {device_address}"
+                ))
+            })?;
+        let device = info.open().map_err(map_io_err)?;
+        Self::from_device(device)
+    }
+
+    /// Locate the vendor log interface + its bulk-IN endpoint, claim it, and
+    /// build the reader.
+    fn from_device(device: Device) -> Result<Self> {
+        let config = device
+            .active_configuration()
+            .map_err(|e| Error::Device(format!("no active USB configuration: {e}")))?;
+
+        let mut iface_num = None;
+        let mut ep_in = None;
+        let mut max_in = 64usize;
+
+        for alt in config.interface_alt_settings() {
+            if alt.class() != USB_CLASS_VENDOR {
+                continue;
+            }
+            // Take the first vendor interface that exposes a bulk-IN endpoint.
+            let mut found_in = None;
+            for ep in alt.endpoints() {
+                if ep.transfer_type() == EndpointType::Bulk && ep.direction() == Direction::In {
+                    found_in = Some(ep.address());
+                    max_in = (ep.max_packet_size() as usize).max(64);
+                    break;
+                }
+            }
+            if let Some(addr) = found_in {
+                iface_num = Some(alt.interface_number());
+                ep_in = Some(addr);
+                break;
+            }
+        }
+
+        let iface_num = iface_num.ok_or_else(|| {
+            Error::Device("device has no vendor log interface (class 0xFF with bulk-IN)".into())
+        })?;
+        let ep_in = ep_in
+            .ok_or_else(|| Error::Device("vendor log interface has no bulk-IN endpoint".into()))?;
+
+        // The vendor interface has no kernel driver on Linux, but use the
+        // portable detach-and-claim anyway (a no-op detach where nothing is
+        // attached).
+        let interface = device
+            .detach_and_claim_interface(iface_num)
+            .map_err(|e| Error::Device(format!("failed to claim vendor log interface: {e}")))?;
+
+        // NB: do NOT clear_halt() this endpoint. Unlike the USBTMC bulk-IN
+        // (where the kernel usbtmc driver can leave a stale data toggle),
+        // the vendor log endpoint has no kernel driver, so there is no toggle
+        // to reset. Worse, sending CLEAR_FEATURE(ENDPOINT_HALT) to the device
+        // wedges TinyUSB's vendor transmit path: the in-flight IN transfer is
+        // torn down but never re-armed, so the tx FIFO fills and the endpoint
+        // stops delivering (verified on ESP32-S3). Claiming the interface with
+        // a freshly opened handle already starts from a clean toggle.
+
+        Ok(Self {
+            interface,
+            ep_in,
+            max_packet_in: max_in,
+            timeout: Duration::from_secs(1),
+        })
+    }
+
+    /// Set the per-read timeout. A read that times out yields an empty `Vec`
+    /// (no data in the window) rather than an error, so a polling loop can just
+    /// continue.
+    pub fn with_timeout(mut self, ms: u64) -> Self {
+        self.timeout = Duration::from_millis(ms);
+        self
+    }
+
+    /// Read one chunk of log bytes. Returns an empty `Vec` if no data arrived
+    /// before the timeout (the caller should keep polling).
+    pub fn read(&self) -> Result<Vec<u8>> {
+        let cap = self.max_packet_in.max(64);
+        match block_on_timeout(
+            self.interface.bulk_in(self.ep_in, RequestBuffer::new(cap)),
+            self.timeout,
+        ) {
+            Ok(comp) => {
+                comp.status.map_err(map_transfer_err)?;
+                Ok(comp.data)
+            }
+            Err(Error::Timeout) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
 }

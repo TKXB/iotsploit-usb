@@ -1,6 +1,10 @@
 #include <string.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/stream_buffer.h"
+#include "esp_log.h"
 #include "esp_private/usb_phy.h"     /* usb_new_phy */
 #include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
@@ -519,10 +523,15 @@ static tusb_desc_device_t const desc_device = {
 };
 uint8_t const *tud_descriptor_device_cb(void) { return (uint8_t const *)&desc_device; }
 
-enum { ITF_NUM_USBTMC = 0, ITF_NUM_TOTAL };
+enum { ITF_NUM_USBTMC = 0, ITF_NUM_VENDOR, ITF_NUM_TOTAL };
 #define USBTMC_EP_OUT 0x01
 #define USBTMC_EP_IN  0x81
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_INTERFACE_DESC_LEN + TUD_ENDPOINT_DESC_LEN * 2)
+/* Vendor 日志接口:IN 0x82 传日志;OUT 0x02 存在但不使用
+ * (TUD_VENDOR_DESCRIPTOR 强制两端点,主机永不写入)。 */
+#define LOG_EP_OUT    0x02
+#define LOG_EP_IN     0x82
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_INTERFACE_DESC_LEN + TUD_ENDPOINT_DESC_LEN * 2 \
+                          + TUD_VENDOR_DESC_LEN)
 
 static uint8_t const desc_configuration[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN,
@@ -530,6 +539,8 @@ static uint8_t const desc_configuration[] = {
     TUD_INTERFACE_DESCRIPTOR(ITF_NUM_USBTMC, 0, 2, 0xFE, 0x03, 0x01, 0),
     TUD_ENDPOINT_DESCRIPTOR(USBTMC_EP_OUT, TUSB_XFER_BULK, 64, 0),
     TUD_ENDPOINT_DESCRIPTOR(USBTMC_EP_IN,  TUSB_XFER_BULK, 64, 0),
+    /* 第二接口:vendor-specific,承载设备日志流 */
+    TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 4, LOG_EP_OUT, LOG_EP_IN, 64),
 };
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     (void)index; return desc_configuration;
@@ -544,6 +555,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
     case 1: str = "IoTSploit";       break;
     case 2: str = "ESP32-S3 USBTMC"; break;
     case 3: str = "0001";            break;
+    case 4: str = "IoTSploit Log";   break;
     default: return NULL;
     }
     if (str) while (*str && n < 31) _desc_str[1 + n++] = *str++;
@@ -563,12 +575,80 @@ static void usb_phy_start(void) {
     usb_new_phy(&c, &s_phy);
 }
 
-/* ---------- USB 泵任务 ---------- */
+/* ---------- 设备日志 -> Vendor bulk-IN(0x82) ----------
+ * ESP-IDF 的 ESP_LOGx 全部经由一个 vprintf 钩子。我们把日志字节喂进一个
+ * FreeRTOS stream buffer(非阻塞,满则丢),再由 usb_task 排空到 TinyUSB 的
+ * vendor FIFO。绝不在任意任务/ISR 上下文里直接调用 TinyUSB —— 只在 USB 任务里
+ * 调 tud_vendor_write(),从而不阻塞主循环也不破坏枚举。同时把日志转发给原始
+ * vprintf(UART),本地串口调试照常可用。 */
+static StreamBufferHandle_t s_log_sb;
+static vprintf_like_t       s_prev_vprintf;
+
+static int log_tee_vprintf(const char *fmt, va_list ap) {
+    /* 先转发到原始输出(UART),消费一份 va_list */
+    va_list ap_uart;
+    va_copy(ap_uart, ap);
+    int n = s_prev_vprintf ? s_prev_vprintf(fmt, ap_uart) : 0;
+    va_end(ap_uart);
+
+    /* 再格式化一份进 stream buffer;stream buffer 不是 ISR 安全的,ISR 上下文跳过 */
+    if (s_log_sb && !xPortInIsrContext()) {
+        char buf[160];
+        va_list ap_usb;
+        va_copy(ap_usb, ap);
+        int m = vsnprintf(buf, sizeof(buf), fmt, ap_usb);
+        va_end(ap_usb);
+        if (m > 0) {
+            size_t len = (m < (int)sizeof(buf)) ? (size_t)m : sizeof(buf) - 1;
+            (void)xStreamBufferSend(s_log_sb, buf, len, 0); /* 满则丢,不阻塞 */
+        }
+    }
+    return n;
+}
+
+/* 把 stream buffer 里的日志排空到 vendor FIFO。只在 USB 任务里调用。
+ * 只取当前 FIFO 能容纳的字节,避免写不下时丢字节;未挂载时丢弃积压。 */
+static void usb_log_pump(void) {
+    if (!s_log_sb) return;
+    if (!tud_vendor_mounted()) {
+        uint8_t junk[64];
+        while (xStreamBufferReceive(s_log_sb, junk, sizeof(junk), 0) > 0) { }
+        return;
+    }
+    for (;;) {
+        uint32_t space = tud_vendor_write_available();
+        if (space == 0) break;                 /* FIFO 满,下一轮再排 */
+        uint8_t buf[64];
+        uint32_t want = space < sizeof(buf) ? space : sizeof(buf);
+        size_t got = xStreamBufferReceive(s_log_sb, buf, want, 0);
+        if (got == 0) break;                   /* 无更多日志 */
+        tud_vendor_write(buf, got);
+    }
+    tud_vendor_flush();
+}
+
+/* ---------- 心跳任务:即便空闲也让日志流有输出,便于演示 ---------- */
+static void heartbeat_task(void *arg) {
+    (void)arg;
+    unsigned n = 0;
+    for (;;) {
+        ESP_LOGI("demo", "heartbeat %u", n++);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+/* ---------- USB 泵任务 ----------
+ * 用有界超时的 tud_task_ext(10ms) 取代会永久阻塞的 tud_task():
+ * OPT_OS_FREERTOS 下 tud_task() = tud_task_ext(UINT32_MAX),没有 USB 事件时
+ * 会一直阻塞,导致其后的 usb_log_pump() 只有在总线有流量时才跑 —— 空闲时日志
+ * 永远排不进 vendor FIFO,主机在 0x82 上读不到任何东西。给 10ms 上限后,即便
+ * 没有 USB 事件也会周期性醒来把积压日志刷进 IN 端点。 */
 static void usb_task(void *arg) {
     usbscpi_t *dev = (usbscpi_t *)arg;
     for (;;) {
-        tud_task();           /* 驱动 tinyusb,回调链里跑 glue → usbscpi_on_rx/tx */
-        usbscpi_task(dev);    /* 处理 core 的延迟工作(无则 no-op) */
+        tud_task_ext(10, false); /* 驱动 tinyusb;最多阻塞 10ms 便返回 */
+        usbscpi_task(dev);       /* 处理 core 的延迟工作(无则 no-op) */
+        usb_log_pump();          /* 排空设备日志到 vendor bulk-IN(0x82) */
     }
 }
 
@@ -585,6 +665,12 @@ static void scan_init_task(void *arg) {
 
 void app_main(void) {
     adc_setup();
+
+    /* 安装日志钩子:ESP_LOGx 同时走 UART 和 USB vendor bulk-IN(0x82)。
+     * 在建任务前安装,尽早捕获启动日志。 */
+    s_log_sb = xStreamBufferCreate(4096, 1);
+    s_prev_vprintf = esp_log_set_vprintf(log_tee_vprintf);
+
     usb_phy_start();
     tusb_init();
 
@@ -610,4 +696,6 @@ void app_main(void) {
     xTaskCreate(usb_task, "usb", 6144, dev, 5, NULL);
     /* USB 起来后再异步初始化无线,避免阻塞枚举 */
     xTaskCreate(scan_init_task, "scan_init", 12288, NULL, 4, NULL);
+    /* 演示用心跳,持续向设备日志流输出 */
+    xTaskCreate(heartbeat_task, "heartbeat", 2560, NULL, 3, NULL);
 }
