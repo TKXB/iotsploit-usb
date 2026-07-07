@@ -1,0 +1,20 @@
+CONFIG_IDF_TARGET="esp32s3"
+# FreeRTOS tick 1kHz, so tud_task polling is responsive
+CONFIG_FREERTOS_HZ=1000
+# Keep USB-OTG dedicated to USBTMC; route the console to the CP210x UART
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+# Default log level: 3 = INFO (ble.spp / scpi visible on UART)
+CONFIG_LOG_DEFAULT_LEVEL=3
+
+# ---- BLE (NimBLE host stack: SPP peripheral + pairing/security) ----
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+# SMP (pairing/encryption) + persistent bonding (LTK stored in NVS)
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+
+# ---- Firmware grows: single-app large partition table ----
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# ---- Main task stack: NimBLE init needs a larger stack ----
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

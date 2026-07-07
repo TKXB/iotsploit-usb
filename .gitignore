@@ -7,6 +7,12 @@ examples/esp32s3/sdkconfig
 examples/esp32s3/sdkconfig.old
 examples/esp32s3/dependencies.lock
 
+examples/esp32s3-spp-security/build/
+examples/esp32s3-spp-security/managed_components/
+examples/esp32s3-spp-security/sdkconfig
+examples/esp32s3-spp-security/sdkconfig.old
+examples/esp32s3-spp-security/dependencies.lock
+
 # Python cache
 __pycache__/
 
