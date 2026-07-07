@@ -1,5 +1,19 @@
 # Butterfly-over-USBTMC Integration Plan (2026-07-06)
 
+## Implementation status (2026-07-06)
+
+First version implemented in `examples/butterfly-nrf52840/` and building clean
+(`make` → `_build/nrf52840_xxaa.{hex,bin}`, no SoftDevice). It follows **Path A**
+(TinyUSB USBTMC + `glue/usbscpi_tinyusb.c`, reused as-is) and delivers the BLE
+advertising sniffer end-to-end: bare-metal nRF `RADIO` core (`radio_ble.c`),
+timed capture ring + text-row formatting (`ble_sniff_handler.c`), the `BLE:SNIFf`
+`trigger_poll_fetch` workflow, and a well-formed `SYSTem:HELP:DESCription?`
+descriptor — with **no host/UI edits**. butterfly's upstream source is not
+vendored, so `radio_ble.c` is a faithful reimplementation of the BLE
+advertising RX/TX path rather than a literal fork; the other protocols plug in
+behind the same pattern. Validated to build only — not flashed; the Phase 0
+radio-timing smoke test still needs hardware.
+
 ## Summary
 
 Integrate the [butterfly](https://github.com/whad-team/butterfly) multi-protocol
