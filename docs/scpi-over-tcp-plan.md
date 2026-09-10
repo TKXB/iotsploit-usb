@@ -117,6 +117,44 @@ The alternative, defining a transport-independent acknowledgement, is a protocol
 change touching every device and both hosts. Not worth it to preserve a call
 that only ever consumed a filler byte.
 
+## The third hard part: multi-record responses
+
+`SYSTem:HELP:HEADers?` writes one line per registered pattern straight to the
+write callback via `raw_write` (`src/usbscpi.c:143`), bypassing libscpi's result
+machinery. libscpi then appends its own terminator, because `first_output` is
+cleared for every *successful query* regardless of whether the callback produced
+output (`third_party/libscpi/src/parser.c:153`). The response therefore ends
+with `\n\n`.
+
+USBTMC hides this by delivering the whole thing as one framed message. A socket
+cannot tell those inner newlines from message boundaries, so a line-framing
+reader returns only `*IDN?` and stops.
+
+The blank line is a reliable terminator — it follows from the `is_query` rule
+above, not from luck — so `ScpiSession::query_multiline` reads until it sees it.
+One loop serves both transports: on USBTMC the first read already ends `\n\n`,
+on TCP the records arrive one per message. No core change, no wire change, and
+existing firmware works unmodified.
+
+That same `parser.c:153` rule is what makes "The second hard part" true: for a
+non-query, `first_output` is never cleared, so nothing is written at all.
+
+---
+
+## Reporting a rejected trigger
+
+A workflow trigger is a non-query, so a device that refuses it sends nothing and
+the host has no signal. Left alone, the workflow polls its `done_query` until
+the full timeout expires and reports `Error::Timeout`, hiding the reason.
+
+`run_trigger_poll_fetch` and `run_trigger_poll_interactive` therefore query the
+error queue once after the trigger and fail immediately if it is non-empty.
+Measured on hardware: a `WLAN:SCAN` refused over TCP went from a 15 s timeout to
+a 0.13 s `device rejected the trigger: -221,"Settings conflict"`.
+
+This also restores the diagnostic that `write_and_drain` never actually
+provided — it consumed a filler byte, not an acknowledgement.
+
 ---
 
 ## Dual transport on one device: two contexts, not one
@@ -519,9 +557,16 @@ the radio. Over Wi-Fi, **the command travels on the link it breaks**.
 | Restrict the scan to the current channel | Changes what the feature does; results become misleading |
 | Accept the drop; host auto-reconnects and resumes | Most user-friendly, most code: reconnect logic, workflow resumption, and a way to retrieve results gathered while disconnected |
 
-**Recommendation: refuse.** It is a few lines, it is honest about the hardware
-constraint, and the USB path already covers the use case. The auto-reconnect
-option is a real feature and should be its own plan if it is wanted.
+**Decided: refuse.** Implemented in `cmd_wlan_scan`
+(`examples/esp32s3/main/app_main.c`), gated on
+`usbscpi_socket_client_connected()`, returning `-221,"Settings conflict"`. The
+scan stays available over USB, which is where it is most useful anyway.
+
+Note the guard is global, not per-context: a `WLAN:SCAN` arriving over USB is
+also refused while a TCP client is connected. That is deliberate — the channel
+sweep would drop that client whichever transport asked for it.
+
+The auto-reconnect option is a real feature and should be its own plan.
 
 ---
 

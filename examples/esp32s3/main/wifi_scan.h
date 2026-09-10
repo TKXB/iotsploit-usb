@@ -25,6 +25,20 @@ int wifi_scan_done(void);
 /* Number of APs captured by the last completed scan. */
 size_t wifi_scan_count(void);
 
+/* ---- STA association (used by the SCPI-over-TCP transport) ---- */
+
+/* Associate with `ssid`/`password` and keep retrying on disconnect.
+ * Non-blocking: use wifi_sta_ip() to learn when an address has been assigned.
+ * Returns 0 if the request was accepted. */
+int wifi_sta_connect(const char *ssid, const char *password);
+
+/* 1 once the station holds an IPv4 lease, else 0. */
+int wifi_sta_has_ip(void);
+
+/* Copy the station's dotted-quad address into out. Returns 0 on success, -1 if
+ * there is no lease yet. */
+int wifi_sta_ip(char *out, size_t out_len);
+
 /* Format AP #index as a CSV row into out:
  *   "<ssid>",<rssi>,<channel>,<authmode>,<bssid>
  * Returns 0 on success, -1 if index is out of range. */

@@ -70,6 +70,28 @@ pub fn run_workflow<T: Transport>(
     Ok(())
 }
 
+/// Confirm a workflow trigger was accepted.
+///
+/// A trigger is a non-query command, so a device that rejects it sends nothing
+/// back and the only evidence is the error queue. Without this check the
+/// workflow polls its `done_query` until the whole timeout expires and reports
+/// a timeout, hiding the real reason — for example an ESP32-S3 refusing
+/// `WLAN:SCAN` over TCP with `-221,"Settings conflict"` because the channel
+/// sweep would drop the very connection carrying the command.
+fn check_trigger_accepted<T: Transport>(
+    session: &mut ScpiSession<T>,
+    trigger: &str,
+) -> Result<()> {
+    let errs = session.drain_errors()?;
+    match errs.first() {
+        None => Ok(()),
+        Some(e) => Err(Error::Scpi {
+            cmd: trigger.to_string(),
+            msg: format!("device rejected the trigger: {},\"{}\"", e.code, e.message),
+        }),
+    }
+}
+
 /// Execute the `trigger_poll_fetch` pattern.
 ///
 /// 1. `write(trigger_cmd + params)` (a non-query command sends no reply)
@@ -84,6 +106,7 @@ pub fn run_trigger_poll_fetch<T: Transport>(
     // 1. Trigger
     let trigger = wf.build_trigger(params);
     session.write(&trigger)?;
+    check_trigger_accepted(session, &trigger)?;
 
     // 2. Poll for done
     let done_query = wf
@@ -149,6 +172,7 @@ pub fn run_trigger_poll_interactive<T: Transport>(
     // 1. Trigger
     let trigger = wf.build_trigger(params);
     session.write(&trigger)?;
+    check_trigger_accepted(session, &trigger)?;
 
     // 2. Poll for state
     let state_query = wf
@@ -314,7 +338,7 @@ mod tests {
     fn trigger_poll_fetch_basic() {
         // Responses: drain(after trigger), done=1, count=2, result0, result1
         let mut s = session(&[
-            b"\n".to_vec(),               // drain after WLAN:SCAN
+            b"0,\"No error\"\n".to_vec(),   // SYSTem:ERRor? after the trigger
             b"1\n".to_vec(),              // WLAN:SCAN:DONE? -> 1
             b"2\n".to_vec(),              // WLAN:SCAN:COUNt? -> 2
             b"HomeNet,-50,6\n".to_vec(),  // WLAN:SCAN? 0
@@ -332,7 +356,7 @@ mod tests {
     fn trigger_poll_fetch_with_params() {
         const BLE_PROFILE: &str = "DEV name=test\nWF ble-scan type=trigger_poll_fetch trigger=BLE:SCAN done=BLE:SCAN:DONE?:1 count=BLE:SCAN:COUNt? fetch=BLE:SCAN?#index timeout_ms=5000 poll_ms=10";
         let mut s = session(&[
-            b"\n".to_vec(),          // drain after BLE:SCAN 8
+            b"0,\"No error\"\n".to_vec(),   // SYSTem:ERRor? after the trigger
             b"1\n".to_vec(),         // BLE:SCAN:DONE? -> 1
             b"1\n".to_vec(),         // BLE:SCAN:COUNt? -> 1
             b"AA:BB:CC,-67,Dev\n".to_vec(), // BLE:SCAN? 0
@@ -355,7 +379,7 @@ mod tests {
         // test finishes quickly without running out of fake responses.
         const TIMEOUT_PROFILE: &str = "DEV name=test\nWF wifi-scan type=trigger_poll_fetch trigger=WLAN:SCAN done=WLAN:SCAN:DONE?:1 count=WLAN:SCAN:COUNt? fetch=WLAN:SCAN?#index timeout_ms=50 poll_ms=10";
         let mut s = session(&[
-            b"\n".to_vec(),
+            b"0,\"No error\"\n".to_vec(),   // SYSTem:ERRor? after the trigger
             b"0\n".to_vec(),
             b"0\n".to_vec(),
             b"0\n".to_vec(),
@@ -375,7 +399,7 @@ mod tests {
     #[test]
     fn trigger_poll_fetch_empty_results() {
         let mut s = session(&[
-            b"\n".to_vec(),  // drain
+            b"0,\"No error\"\n".to_vec(),   // SYSTem:ERRor? after the trigger
             b"1\n".to_vec(), // done
             b"0\n".to_vec(), // count = 0
         ]);
@@ -390,7 +414,7 @@ mod tests {
     fn interactive_success() {
         const CONN_PROFILE: &str = "DEV name=test\nWF ble-connect type=trigger_poll_interactive trigger=BLE:CONNect state=BLE:CONNect:STATe? success=2 failed=3 timeout_ms=5000 poll_ms=10";
         let mut s = session(&[
-            b"\n".to_vec(),   // drain after BLE:CONNect 0
+            b"0,\"No error\"\n".to_vec(),   // SYSTem:ERRor? after the trigger
             b"1\n".to_vec(),  // connecting
             b"2\n".to_vec(),  // connected
         ]);
@@ -407,7 +431,7 @@ mod tests {
         // surfaces its response.
         const AUTO_PROFILE: &str = "DEV name=test\nWF ble-auto type=trigger_poll_interactive trigger=BLE:AUTO state=BLE:AUTO:STATe? success=6 failed=7 result=BLE:SEC? timeout_ms=5000 poll_ms=10";
         let mut s = session(&[
-            b"\n".to_vec(),   // drain after BLE:AUTO
+            b"0,\"No error\"\n".to_vec(),   // SYSTem:ERRor? after the trigger
             b"2\n".to_vec(),  // pairing
             b"6\n".to_vec(),  // done
             b"AA:BB:CC:DD:EE:FF,4,1,1,1,16\n".to_vec(), // BLE:SEC?
@@ -424,7 +448,7 @@ mod tests {
     fn interactive_failure_has_no_result() {
         const AUTO_PROFILE: &str = "DEV name=test\nWF ble-auto type=trigger_poll_interactive trigger=BLE:AUTO state=BLE:AUTO:STATe? success=6 failed=7 result=BLE:SEC? timeout_ms=5000 poll_ms=10";
         let mut s = session(&[
-            b"\n".to_vec(),   // drain
+            b"0,\"No error\"\n".to_vec(),   // SYSTem:ERRor? after the trigger
             b"2\n".to_vec(),  // pairing
             b"7\n".to_vec(),  // failed — result query must NOT be issued
         ]);
@@ -439,7 +463,7 @@ mod tests {
     fn interactive_failure() {
         const CONN_PROFILE: &str = "DEV name=test\nWF ble-connect type=trigger_poll_interactive trigger=BLE:CONNect state=BLE:CONNect:STATe? success=2 failed=3 timeout_ms=5000 poll_ms=10";
         let mut s = session(&[
-            b"\n".to_vec(),   // drain
+            b"0,\"No error\"\n".to_vec(),   // SYSTem:ERRor? after the trigger
             b"1\n".to_vec(),  // connecting
             b"3\n".to_vec(),  // failed
         ]);
@@ -455,7 +479,7 @@ mod tests {
         // nRF52840: done_value = "0" (idle/finished), not "1"
         const NRF_PROFILE: &str = "DEV name=nrf52840\nWF ble-scan type=trigger_poll_fetch trigger=BLE:SCAN:START done=BLE:SCAN:STATe?:0 count=BLE:SCAN:COUNt? fetch=BLE:SCAN:RESult?#index timeout_ms=5000 poll_ms=10";
         let mut s = session(&[
-            b"\n".to_vec(),               // drain after BLE:SCAN:START
+            b"0,\"No error\"\n".to_vec(),   // SYSTem:ERRor? after the trigger
             b"1\n".to_vec(),              // still scanning
             b"0\n".to_vec(),              // done (0 = idle)
             b"3\n".to_vec(),              // count = 3

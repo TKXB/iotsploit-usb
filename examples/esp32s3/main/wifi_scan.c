@@ -6,6 +6,7 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_mac.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
 
@@ -16,6 +17,12 @@ static const char *TAG = "wifi";
 static wifi_ap_record_t s_aps[WIFI_SCAN_MAX_AP];
 static volatile size_t  s_ap_count;
 static volatile int     s_done;     /* set in event ctx, read in USB ctx */
+
+/* STA association state. Written in the event-loop task, read from SCPI ctx. */
+static volatile int s_wifi_ready;   /* wifi_scan_init() has finished */
+static volatile int s_sta_has_ip;
+static char         s_sta_ip[16];
+static int          s_sta_want_connect;
 
 /* Runs in the default event-loop task once the driver finishes scanning. */
 static void scan_done_handler(void *arg, esp_event_base_t base,
@@ -29,6 +36,67 @@ static void scan_done_handler(void *arg, esp_event_base_t base,
     s_ap_count = num;
     s_done = 1;
     ESP_LOGI(TAG, "wifi scan done: %u APs", (unsigned)num);
+}
+
+/* Keep the association up: the driver does not retry on its own, and a
+ * WIFI:SCAN sweeps every channel and will knock the station off. */
+static void sta_event_handler(void *arg, esp_event_base_t base,
+                              int32_t id, void *data) {
+    (void)arg; (void)data;
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_sta_has_ip = 0;
+        if (s_sta_want_connect) {
+            esp_wifi_connect();
+        }
+    }
+}
+
+static void got_ip_handler(void *arg, esp_event_base_t base,
+                           int32_t id, void *data) {
+    (void)arg; (void)base; (void)id;
+    const ip_event_got_ip_t *e = (const ip_event_got_ip_t *)data;
+    snprintf(s_sta_ip, sizeof(s_sta_ip), IPSTR, IP2STR(&e->ip_info.ip));
+    s_sta_has_ip = 1;
+    ESP_LOGI(TAG, "sta got ip %s", s_sta_ip);
+}
+
+int wifi_sta_connect(const char *ssid, const char *password) {
+    if (!ssid || !ssid[0]) {
+        return -1;
+    }
+    wifi_config_t wc;
+    memset(&wc, 0, sizeof(wc));
+    strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
+    if (password) {
+        strncpy((char *)wc.sta.password, password, sizeof(wc.sta.password) - 1);
+    }
+
+    s_sta_want_connect = 1;
+    s_sta_has_ip = 0;
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &wc);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "sta set_config failed: 0x%x", (unsigned)err);
+        return -1;
+    }
+    ESP_LOGI(TAG, "sta connecting to \"%s\"", ssid);
+    err = esp_wifi_connect();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_CONN) {
+        ESP_LOGE(TAG, "sta connect failed: 0x%x", (unsigned)err);
+        return -1;
+    }
+    return 0;
+}
+
+int wifi_sta_has_ip(void) {
+    return s_sta_has_ip;
+}
+
+int wifi_sta_ip(char *out, size_t out_len) {
+    if (!out || !out_len || !s_sta_has_ip) {
+        return -1;
+    }
+    snprintf(out, out_len, "%s", s_sta_ip);
+    return 0;
 }
 
 void wifi_scan_init(void) {
@@ -52,9 +120,18 @@ void wifi_scan_init(void) {
     }
     esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
                                         &scan_done_handler, NULL, NULL);
+    esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED,
+                                        &sta_event_handler, NULL, NULL);
+    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                        &got_ip_handler, NULL, NULL);
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_start();
+    s_wifi_ready = 1;
     ESP_LOGI(TAG, "wifi STA started, ready");
+}
+
+bool wifi_scan_ready(void) {
+    return s_wifi_ready != 0;
 }
 
 int wifi_scan_start(void) {

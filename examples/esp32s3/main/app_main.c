@@ -11,11 +11,23 @@
 #include "tusb.h"
 #include "usbscpi/usbscpi.h"
 #include "usbscpi_tinyusb.h"
+#include "usbscpi_socket.h"
+#include "net_scpi.h"
 #include "wifi_scan.h"
 #include "ble_scan.h"
 #include "ble_conn.h"
 
 static const char *TAG = "scpi";
+
+/* Wi-Fi credentials for the SCPI-over-TCP transport. Stage 5 of
+ * docs/scpi-over-tcp-plan.md replaces these with NVS-backed provisioning over
+ * USBTMC; until then they are compile-time so the board can be tested. */
+#ifndef NET_SCPI_SSID
+#define NET_SCPI_SSID "My Hotspot"
+#endif
+#ifndef NET_SCPI_PASS
+#define NET_SCPI_PASS "great password"
+#endif
 
 /* ---------- 静态缓冲(等价 pico2,避免动态分配) ---------- */
 static uint8_t s_storage[2048];
@@ -84,7 +96,16 @@ static scpi_result_t cmd_adc_read(scpi_t *ctx) {
 
 /* ---------- WiFi 扫描命令(异步触发 → 轮询 → 逐行取) ---------- */
 static scpi_result_t cmd_wlan_scan(scpi_t *ctx) {
-    (void)ctx;
+    /* esp_wifi_scan_start() sweeps every channel, taking the radio off the
+     * channel the station is associated on. Over USB that is free, because the
+     * link is independent of the radio; over TCP the scan would drop the very
+     * connection carrying this command. Refuse rather than strand the caller —
+     * the scan is still available over USB. */
+    if (usbscpi_socket_client_connected()) {
+        ESP_LOGW(TAG, "WLAN:SCAN refused: would drop the TCP session");
+        SCPI_ErrorPush(ctx, SCPI_ERROR_SETTINGS_CONFLICT);
+        return SCPI_RES_ERR;
+    }
     ESP_LOGI(TAG, "WLAN:SCAN");
     return wifi_scan_start() == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
 }
@@ -706,6 +727,10 @@ void app_main(void) {
     usbscpi_t *dev = usbscpi_init(s_storage, sizeof(s_storage), &cfg);
     usbscpi_tinyusb_bind(dev);          /* glue 接管 IN/OUT 路径 */
     usbscpi_register(dev, demo_commands);
+
+    /* Second context for SCPI over TCP: same commands and descriptor, its own
+     * buffers and its own usb_tx. See net_scpi.h for why it cannot be shared. */
+    net_scpi_start(&cfg, demo_commands, NET_SCPI_SSID, NET_SCPI_PASS);
 
     xTaskCreate(usb_task, "usb", 6144, dev, 5, NULL);
     /* USB 起来后再异步初始化无线,避免阻塞枚举 */
