@@ -2,7 +2,7 @@
 name = "iotsploit-host"
 version = "0.1.0"
 edition = "2021"
-description = "Generic SCPI-over-USBTMC host for iotsploit-usb devices"
+description = "Generic SCPI host for iotsploit-usb devices (USBTMC and TCP)"
 license = "MIT"
 
 [lib]
@@ -16,6 +16,8 @@ path = "src/bin/iotsploit-host.rs"
 [features]
 default = ["kernel"]
 kernel = []                         # Linux /dev/usbtmcN backend
+# Raw SCPI over TCP (port 5025). std-only, no extra dependencies.
+tcp = []
 # Cross-platform (Windows/Linux/macOS) raw USBTMC backend. `nusb` is pure Rust
 # (no libusb C dependency); `futures-lite` bridges its async transfers to the
 # blocking Transport trait, and `async-io` provides the transfer timeout timer.

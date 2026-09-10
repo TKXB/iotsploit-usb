@@ -47,24 +47,21 @@ impl<T: Transport> ScpiSession<T> {
 
     /// Send a non-query SCPI command. A single `\n` terminator is appended.
     ///
-    /// This does **not** read a response: like the Python host, the caller
-    /// decides when to query. (The device still emits a `\n` terminator for
-    /// non-query commands; a subsequent `query`/`query_raw` will receive that
-    /// pending terminator first, so prefer issuing queries after writes only
-    /// when needed, or call [`Self::write_and_drain`].)
+    /// This does **not** read a response, because a non-query command does not
+    /// produce one: libscpi writes its terminator only when the command
+    /// actually generated output (`writeNewLine` is guarded by
+    /// `!context->first_output`), so nothing at all leaves the device.
+    ///
+    /// Over USBTMC it *looks* as though a terminator arrives, but that byte is
+    /// fabricated by the TinyUSB glue in response to the host's IN request so
+    /// the class does not wedge in `STATE_TX_REQUESTED`. It is manufactured by
+    /// the read, not queued by the command, and a raw socket has no equivalent.
+    /// Do not add a read here: over TCP it would block until the timeout.
     pub fn write(&mut self, cmd: &str) -> Result<()> {
         let mut msg = Vec::with_capacity(cmd.len() + 1);
         msg.extend_from_slice(cmd.as_bytes());
         msg.push(b'\n');
         self.transport.write_msg(&msg)
-    }
-
-    /// Send a non-query command and consume its (typically empty) terminator
-    /// response so the transport stays in sync.
-    pub fn write_and_drain(&mut self, cmd: &str) -> Result<()> {
-        self.write(cmd)?;
-        let _ = self.transport.read_msg(self.read_size)?;
-        Ok(())
     }
 
     /// Send a query and return the raw response bytes (no trimming).
@@ -85,6 +82,45 @@ impl<T: Transport> ScpiSession<T> {
         String::from_utf8(raw[..end].to_vec()).map_err(|e| Error::Scpi {
             cmd: cmd.to_string(),
             msg: format!("response is not valid UTF-8: {e}"),
+        })
+    }
+
+    /// Send a query whose response is several newline-separated records
+    /// terminated by a blank line, and return the whole thing.
+    ///
+    /// `SYSTem:HELP:HEADers?` is the only such command: it writes one line per
+    /// registered pattern straight to the write callback, bypassing libscpi's
+    /// result machinery, and libscpi then appends its own terminator because
+    /// `first_output` is cleared for every successful query
+    /// (`third_party/libscpi/src/parser.c:153`). The response therefore ends
+    /// with `\n\n`.
+    ///
+    /// USBTMC hides the multi-record shape by delivering the lot as one framed
+    /// message, but a socket cannot tell those inner newlines from message
+    /// boundaries, so the blank line is what ends the read. Both transports are
+    /// served by the same loop.
+    pub fn query_multiline(&mut self, cmd: &str) -> Result<String> {
+        self.write(cmd)?;
+        let mut out: Vec<u8> = Vec::new();
+        // Bound the loop so a device that never sends the blank line fails as a
+        // protocol error rather than spinning.
+        for _ in 0..4096 {
+            let chunk = self.transport.read_msg(self.read_size)?;
+            // Terminator seen: either the blank line on its own (one record per
+            // message, as on TCP) or trailing `\n\n` (all records in one
+            // message, as on USBTMC).
+            let done = chunk.is_empty() || chunk == b"\n" || chunk.ends_with(b"\n\n");
+            out.extend_from_slice(&chunk);
+            if done {
+                return String::from_utf8(out).map_err(|e| Error::Scpi {
+                    cmd: cmd.to_string(),
+                    msg: format!("response is not valid UTF-8: {e}"),
+                });
+            }
+        }
+        Err(Error::Scpi {
+            cmd: cmd.to_string(),
+            msg: "multi-line response did not terminate with a blank line".into(),
         })
     }
 

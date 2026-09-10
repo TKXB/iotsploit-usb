@@ -72,7 +72,7 @@ pub fn run_workflow<T: Transport>(
 
 /// Execute the `trigger_poll_fetch` pattern.
 ///
-/// 1. `write_and_drain(trigger_cmd + params)`
+/// 1. `write(trigger_cmd + params)` (a non-query command sends no reply)
 /// 2. Poll `done_query` until it returns `done_value` (or timeout)
 /// 3. Query `count_query` → N
 /// 4. For i in 0..N: `query(fetch_query + i)` → collect
@@ -83,7 +83,7 @@ pub fn run_trigger_poll_fetch<T: Transport>(
 ) -> Result<FetchResult> {
     // 1. Trigger
     let trigger = wf.build_trigger(params);
-    session.write_and_drain(&trigger)?;
+    session.write(&trigger)?;
 
     // 2. Poll for done
     let done_query = wf
@@ -137,7 +137,7 @@ pub fn run_trigger_poll_fetch<T: Transport>(
 
 /// Execute the `trigger_poll_interactive` pattern.
 ///
-/// 1. `write_and_drain(trigger_cmd + params)`
+/// 1. `write(trigger_cmd + params)` (a non-query command sends no reply)
 /// 2. Poll `state_query` until it returns `success_value` or a `failed_values`
 ///    entry (or timeout). When the state matches a `prompt` (edge-triggered on
 ///    entry into the state), collect the user's response and send it.
@@ -148,7 +148,7 @@ pub fn run_trigger_poll_interactive<T: Transport>(
 ) -> Result<InteractiveResult> {
     // 1. Trigger
     let trigger = wf.build_trigger(params);
-    session.write_and_drain(&trigger)?;
+    session.write(&trigger)?;
 
     // 2. Poll for state
     let state_query = wf
@@ -252,7 +252,7 @@ fn handle_prompt<T: Transport>(
             }
             let answer = read_line("accept? [y/N]: ")?;
             let accept = matches!(answer.as_str(), "y" | "Y" | "yes" | "YES");
-            session.write_and_drain(&format!("{} {}", prompt.send_cmd, if accept { 1 } else { 0 }))?;
+            session.write(&format!("{} {}", prompt.send_cmd, if accept { 1 } else { 0 }))?;
             Ok(if accept {
                 PromptOutcome::Continue
             } else {
@@ -264,7 +264,7 @@ fn handle_prompt<T: Transport>(
                 println!("pairing: {v}");
             }
             let value = read_line("enter value: ")?;
-            session.write_and_drain(&format!("{} {}", prompt.send_cmd, value))?;
+            session.write(&format!("{} {}", prompt.send_cmd, value))?;
             Ok(PromptOutcome::Continue)
         }
     }

@@ -16,6 +16,7 @@ project(iotsploit_usb C)
 option(USBSCPI_BUILD_TESTS "Build iotsploit-usb host tests" ON)
 option(USBSCPI_BUILD_HELPERS "Build iotsploit-usb optional helper library" ON)
 option(USBSCPI_BUILD_TINYUSB_GLUE "Build iotsploit-usb optional TinyUSB glue" OFF)
+option(USBSCPI_BUILD_SOCKET_GLUE "Build iotsploit-usb optional BSD-socket glue" OFF)
 
 # Vendored libscpi: its own static lib so third-party warnings don't trip our
 # -Werror; SCPI_USER_CONFIG activates third_party/libscpi/inc/scpi/scpi_user_config.h.
@@ -59,6 +60,21 @@ if(USBSCPI_BUILD_TINYUSB_GLUE)
     add_library(usbscpi_tinyusb_glue STATIC glue/usbscpi_tinyusb.c)
     target_link_libraries(usbscpi_tinyusb_glue PUBLIC usbscpi)
     target_compile_features(usbscpi_tinyusb_glue PUBLIC c_std_99)
+endif()
+
+if(USBSCPI_BUILD_SOCKET_GLUE)
+    add_library(usbscpi_socket_glue STATIC glue/usbscpi_socket.c)
+    target_link_libraries(usbscpi_socket_glue PUBLIC usbscpi)
+    target_include_directories(usbscpi_socket_glue PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/glue>
+    )
+    target_compile_features(usbscpi_socket_glue PUBLIC c_std_99)
+
+    # Linux/Pi 5 SCPI-over-TCP daemon: also the hardware-free test rig.
+    add_executable(usbscpi_linux examples/linux/main.c)
+    target_link_libraries(usbscpi_linux PRIVATE usbscpi_socket_glue)
+    set_target_properties(usbscpi_linux PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples/linux)
 endif()
 
 if(USBSCPI_BUILD_TESTS)

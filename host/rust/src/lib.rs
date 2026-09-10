@@ -1,4 +1,4 @@
-//! `iotsploit-host` library: a generic SCPI-over-USBTMC host core for
+//! `iotsploit-host` library: a generic SCPI host core for
 //! `iotsploit-usb` devices.
 //!
 //! The crate is intentionally dependency-free so the first milestone builds
@@ -10,6 +10,8 @@ pub mod caps;
 pub mod descriptor;
 pub mod headers;
 pub mod session;
+#[cfg(feature = "tcp")]
+pub mod tcp;
 pub mod transport;
 pub mod usbtmc_kernel;
 pub mod workflow;

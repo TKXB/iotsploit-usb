@@ -1,7 +1,8 @@
 //! Fetch command headers from `SYSTem:HELP:HEADers?`.
 //!
 //! Current firmware returns a line-separated list of registered command
-//! patterns (each on its own line, with a trailing terminator). The full list
+//! patterns (each on its own line) terminated by a blank line, which is what
+//! [`ScpiSession::query_multiline`] reads to. The full list
 //! fits in the device `mtu` for all current `iotsploit-usb` devices, so an
 //! un-paged query is tried first. For hypothetical larger command sets we fall
 //! back to paged retrieval (`SYST:HELP:HEAD? <offset>,<count>`).
@@ -20,7 +21,7 @@ pub fn fetch_headers<T: Transport>(
     // 1. Un-paged: works when the whole list fits in mtu (true for all current
     //    devices). An empty result implies the request failed (e.g. too-much-
     //    data on a large command set), so fall through to paging.
-    let resp = session.query("SYST:HELP:HEAD?")?;
+    let resp = session.query_multiline("SYST:HELP:HEAD?")?;
     let headers = split_headers(&resp);
     if !headers.is_empty() {
         return Ok(headers);
@@ -42,7 +43,7 @@ fn fetch_paged<T: Transport>(session: &mut ScpiSession<T>, page_size: usize) -> 
         // libscpi, which then leaves `count` at its default and the device
         // replies with the full (over-mtu) list -> empty paged result.
         let cmd = format!("SYST:HELP:HEAD? {offset},{page_size}");
-        let resp = session.query(&cmd)?;
+        let resp = session.query_multiline(&cmd)?;
         let page = split_headers(&resp);
         let n = page.len();
         all.extend(page);

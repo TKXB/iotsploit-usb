@@ -1,7 +1,8 @@
 //! `iotsploit-host` CLI binary.
 //!
-//! A command-line tool for talking to `iotsploit-usb` devices over SCPI/USBTMC.
-//! Supports multiple transport backends (kernel `/dev/usbtmcN`, raw `nusb`),
+//! A command-line tool for talking to `iotsploit-usb` devices over SCPI.
+//! Supports multiple transport backends (kernel `/dev/usbtmcN`, raw `nusb`,
+//! raw SCPI over TCP),
 //! line-record profile metadata, workflow execution, and device descriptors.
 
 use std::io::{self, Write};
@@ -16,18 +17,27 @@ use iotsploit_host::{
 use iotsploit_host::usbtmc_kernel::UsbtmcKernel;
 #[cfg(feature = "raw-usb")]
 use iotsploit_host::usbtmc_raw::UsbtmcRaw;
+#[cfg(feature = "tcp")]
+use iotsploit_host::tcp::TcpTransport;
+#[cfg(feature = "tcp")]
+use std::time::Duration;
 
 const HELP: &str = "\
-iotsploit-host - generic SCPI-over-USBTMC host for iotsploit-usb
+iotsploit-host - generic SCPI host for iotsploit-usb (USBTMC and TCP)
 
 USAGE:
     iotsploit-host [options] <command> [args]
 
 GLOBAL OPTIONS:
-    --backend auto|kernel|raw   Transport backend (default: auto)
-    -d, --device <path>         /dev/usbtmcN node (kernel backend)
+    --backend auto|kernel|raw|tcp
+                                Transport backend (default: auto)
+    -d, --device <uri>          Device to open. A scheme selects the backend:
+                                  /dev/usbtmc0          kernel USBTMC node
+                                  tcp://<host>[:<port>] raw SCPI over TCP (5025)
+                                  usb://<vid>:<pid>     raw USB (hex, e.g. 303a:4001)
     --vid <hex> --pid <hex>     USB VID/PID for raw backend (e.g. 1209 0001)
     --serial <string>           USB serial number (raw backend)
+    --timeout <ms>              Connect/read timeout for tcp (default: 5000)
     -h, --help                  Show this help
     -V, --version               Show version
 
@@ -56,6 +66,8 @@ EXAMPLES:
     iotsploit-host workflow wifi-scan
     iotsploit-host workflow ble-scan 8
     iotsploit-host --backend raw --vid 1209 --pid 0001 idn
+    iotsploit-host --device tcp://192.168.4.1:5025 idn
+    iotsploit-host --device tcp://10.42.0.57 workflow wifi-scan
     iotsploit-host describe
     iotsploit-host query '*IDN?'
     iotsploit-host write 'GPIO:SET 2,1'
@@ -70,12 +82,15 @@ enum BackendKind {
     Auto,
     Kernel,
     Raw,
+    Tcp,
 }
 
 #[allow(dead_code)]
 struct Cli {
     backend: BackendKind,
-    device: Option<PathBuf>,
+    /// Raw `--device` value; a scheme (`tcp://`, `usb://`) selects the backend.
+    device: Option<String>,
+    timeout_ms: u64,
     vid: Option<u16>,
     pid: Option<u16>,
     serial: Option<String>,
@@ -85,7 +100,8 @@ struct Cli {
 
 fn parse_args(argv: Vec<String>) -> std::result::Result<Cli, String> {
     let mut backend = BackendKind::Auto;
-    let mut device: Option<PathBuf> = None;
+    let mut device: Option<String> = None;
+    let mut timeout_ms: u64 = 5000;
     let mut vid: Option<u16> = None;
     let mut pid: Option<u16> = None;
     let mut serial: Option<String> = None;
@@ -110,13 +126,18 @@ fn parse_args(argv: Vec<String>) -> std::result::Result<Cli, String> {
                     "auto" => BackendKind::Auto,
                     "kernel" => BackendKind::Kernel,
                     "raw" => BackendKind::Raw,
-                    other => return Err(format!("unknown backend '{other}' (use auto|kernel|raw)")),
+                    "tcp" => BackendKind::Tcp,
+                    other => {
+                        return Err(format!(
+                            "unknown backend '{other}' (use auto|kernel|raw|tcp)"
+                        ))
+                    }
                 };
             }
             "-d" | "--device" => {
                 i += 1;
                 let v = argv.get(i).ok_or("missing value for --device")?;
-                device = Some(PathBuf::from(v));
+                device = Some(v.clone());
             }
             "--vid" => {
                 i += 1;
@@ -135,8 +156,13 @@ fn parse_args(argv: Vec<String>) -> std::result::Result<Cli, String> {
                 let v = argv.get(i).ok_or("missing value for --serial")?;
                 serial = Some(v.clone());
             }
+            "--timeout" => {
+                i += 1;
+                let v = argv.get(i).ok_or("missing value for --timeout")?;
+                timeout_ms = v.parse().map_err(|_| format!("invalid --timeout: {v}"))?;
+            }
             _ if a.starts_with("--device=") => {
-                device = Some(PathBuf::from(&a["--device=".len()..]));
+                device = Some(a["--device=".len()..].to_string());
             }
             _ => positionals.push(a.clone()),
         }
@@ -150,6 +176,7 @@ fn parse_args(argv: Vec<String>) -> std::result::Result<Cli, String> {
     Ok(Cli {
         backend,
         device,
+        timeout_ms,
         vid,
         pid,
         serial,
@@ -166,6 +193,8 @@ enum Backend {
     Kernel(UsbtmcKernel),
     #[cfg(feature = "raw-usb")]
     Raw(UsbtmcRaw),
+    #[cfg(feature = "tcp")]
+    Tcp(TcpTransport),
 }
 
 impl Transport for Backend {
@@ -175,6 +204,8 @@ impl Transport for Backend {
             Backend::Kernel(t) => t.write_msg(bytes),
             #[cfg(feature = "raw-usb")]
             Backend::Raw(t) => t.write_msg(bytes),
+            #[cfg(feature = "tcp")]
+            Backend::Tcp(t) => t.write_msg(bytes),
             #[allow(unreachable_patterns)]
             _ => Err(Error::Device("no transport backend compiled in".into())),
         }
@@ -185,6 +216,8 @@ impl Transport for Backend {
             Backend::Kernel(t) => t.read_msg(max_len),
             #[cfg(feature = "raw-usb")]
             Backend::Raw(t) => t.read_msg(max_len),
+            #[cfg(feature = "tcp")]
+            Backend::Tcp(t) => t.read_msg(max_len),
             #[allow(unreachable_patterns)]
             _ => Err(Error::Device("no transport backend compiled in".into())),
         }
@@ -192,9 +225,26 @@ impl Transport for Backend {
 }
 
 fn open_backend(cli: &Cli) -> iotsploit_host::Result<Backend> {
+    // A scheme on --device names the transport unambiguously, so it wins over
+    // --backend and over auto-detection.
+    if let Some(dev) = cli.device.as_deref() {
+        if dev.starts_with("tcp://") {
+            return open_tcp(cli, &dev["tcp://".len()..]);
+        }
+        if dev.starts_with("usb://") {
+            return open_raw_uri(cli, &dev["usb://".len()..]);
+        }
+    }
+
     match cli.backend {
         BackendKind::Kernel => open_kernel(cli),
         BackendKind::Raw => open_raw(cli),
+        BackendKind::Tcp => match cli.device.as_deref() {
+            Some(d) => open_tcp(cli, d.trim_start_matches("tcp://")),
+            None => Err(Error::Device(
+                "--backend tcp needs --device tcp://<host>[:<port>]".into(),
+            )),
+        },
         BackendKind::Auto => {
             // On Linux, try kernel first; fall back to raw.
             // Collect the actual error so the user sees *why* it failed
@@ -226,7 +276,7 @@ fn open_backend(cli: &Cli) -> iotsploit_host::Result<Backend> {
 #[cfg(feature = "kernel")]
 fn open_kernel(cli: &Cli) -> iotsploit_host::Result<Backend> {
     let transport = match &cli.device {
-        Some(p) => UsbtmcKernel::open(p)?,
+        Some(p) => UsbtmcKernel::open(&PathBuf::from(p))?,
         None => UsbtmcKernel::auto_detect()?,
     };
     Ok(Backend::Kernel(transport))
@@ -252,6 +302,35 @@ fn open_raw(cli: &Cli) -> iotsploit_host::Result<Backend> {
 #[cfg(not(feature = "raw-usb"))]
 fn open_raw(_cli: &Cli) -> iotsploit_host::Result<Backend> {
     Err(Error::Device("raw USB backend not compiled in (enable `raw-usb` feature)".into()))
+}
+
+/// `usb://<vid>:<pid>` with both fields in hex.
+#[cfg(feature = "raw-usb")]
+fn open_raw_uri(_cli: &Cli, spec: &str) -> iotsploit_host::Result<Backend> {
+    let (v, p) = spec.split_once(':').ok_or_else(|| {
+        Error::Device(format!("expected usb://<vid>:<pid>, got usb://{spec}"))
+    })?;
+    let vid = u16::from_str_radix(v.trim_start_matches("0x"), 16)
+        .map_err(|_| Error::Device(format!("invalid VID: {v}")))?;
+    let pid = u16::from_str_radix(p.trim_start_matches("0x"), 16)
+        .map_err(|_| Error::Device(format!("invalid PID: {p}")))?;
+    Ok(Backend::Raw(UsbtmcRaw::open_vid_pid(vid, pid)?))
+}
+
+#[cfg(not(feature = "raw-usb"))]
+fn open_raw_uri(_cli: &Cli, _spec: &str) -> iotsploit_host::Result<Backend> {
+    Err(Error::Device("raw USB backend not compiled in (enable `raw-usb` feature)".into()))
+}
+
+#[cfg(feature = "tcp")]
+fn open_tcp(cli: &Cli, addr: &str) -> iotsploit_host::Result<Backend> {
+    let t = TcpTransport::connect(addr, Duration::from_millis(cli.timeout_ms))?;
+    Ok(Backend::Tcp(t))
+}
+
+#[cfg(not(feature = "tcp"))]
+fn open_tcp(_cli: &Cli, _addr: &str) -> iotsploit_host::Result<Backend> {
+    Err(Error::Device("tcp backend not compiled in (enable `tcp` feature)".into()))
 }
 
 fn open_session(cli: &Cli) -> iotsploit_host::Result<ScpiSession<Backend>> {
@@ -346,7 +425,7 @@ fn run(cli: Cli) -> Result<(), Error> {
                 .first()
                 .ok_or_else(|| Error::Device("write requires a command argument".into()))?;
             let mut s = open_session(&cli)?;
-            s.write_and_drain(cmd)?;
+            s.write(cmd)?;
             Ok(())
         }
         "block-read" => {
@@ -493,7 +572,7 @@ fn repl(cli: &Cli) -> Result<(), Error> {
         let result = if cmd.ends_with('?') {
             s.query(cmd).map(|t| Some(t))
         } else {
-            s.write_and_drain(cmd).map(|_| None)
+            s.write(cmd).map(|_| None)
         };
         match result {
             Ok(Some(text)) => println!("{text}"),
