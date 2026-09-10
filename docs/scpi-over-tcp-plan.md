@@ -28,9 +28,13 @@ transport nearly free:
   TinyUSB's `TU_VERIFY(state == STATE_TX_REQUESTED)` guard. The network glue is
   *smaller* than the USB one.
 
-So this is a glue-tier plus host-backend change. `src/usbscpi.c` and
-`include/usbscpi/usbscpi.h` are not modified by any stage below, and the
-`usbscpi_*` prefix stays — it names the component, not the bus.
+So this is largely a glue-tier plus host-backend change, and the `usbscpi_*`
+prefix stays — it names the component, not the bus.
+
+One exception emerged during implementation: `feed_line` in `src/usbscpi.c`
+needed a one-line behavioural fix, because a failing command discarded the rest
+of the receive buffer. See "The fourth hard part" below.
+`include/usbscpi/usbscpi.h` is unchanged.
 
 ## Wire protocol: raw SCPI on TCP 5025
 
@@ -154,6 +158,47 @@ a 0.13 s `device rejected the trigger: -221,"Settings conflict"`.
 
 This also restores the diagnostic that `write_and_drain` never actually
 provided — it consumed a filler byte, not an acknowledgement.
+
+## The fourth hard part: a failing command dropped the rest of the batch
+
+Found on hardware, and the one change that touches the core.
+
+`feed_line` (`src/usbscpi.c`) mapped `SCPI_Input() == FALSE` to
+`USBSCPI_ERR_PROTOCOL`, and `usbscpi_on_rx` stops its loop as soon as
+`status != USBSCPI_OK` (`src/usbscpi.c:500`). But `SCPI_Input` returns FALSE for
+any *command* failure — a bad parameter, an unknown header, a handler returning
+`SCPI_RES_ERR`. So a failed command silently discarded every byte still in the
+receive buffer.
+
+Over USBTMC this almost never showed: one message is usually one command. Over
+TCP it is routine, because a host pipelines. The exact failure:
+
+```
+send  "WLAN:SCAN\nSYSTem:ERRor?\n"   (one segment, TCP_NODELAY)
+recv  <nothing>
+```
+
+`WLAN:SCAN` is refused, so `SYSTem:ERRor?` behind it in the same segment was
+thrown away — and the host never saw the error it had just asked for. "Reporting
+a rejected trigger" above made this fire on *every* refused trigger, because it
+queries the error queue immediately after the trigger write.
+
+A failed command is a normal SCPI outcome: the failure is already on the error
+queue for the host to read, and the input stream is still synchronised at a line
+boundary. `feed_line` now returns `USBSCPI_OK` regardless. Genuine stream desync
+— malformed block framing, line overflow — is detected separately by the caller
+and still aborts.
+
+Two existing tests asserted the old behaviour (`test_error_queue_and_free_query`
+and `test_descriptor_unsupported` both checked `on_rx(...) != USBSCPI_OK`); they
+encoded the bug and were corrected. `test_batch_survives_failing_command` covers
+the batching case directly.
+
+**This breaks the "core is untouched" property claimed above.** It is a real
+pre-existing bug that TCP merely exposes, so the core is the right place to fix
+it — but the property no longer holds, and `src/usbscpi.c` now carries one
+behavioural change that also affects USB (for the better: a batched
+`CMD\nSYSTem:ERRor?\n` over USBTMC had the same hole).
 
 ---
 
@@ -581,7 +626,8 @@ The auto-reconnect option is a real feature and should be its own plan.
 | 5 | — | `examples/esp32s3/main/wifi_scan.c`, `app_main.c` |
 | 6 | — | `glue/usbscpi_socket.{c,h}` |
 
-`src/usbscpi.c` and `include/usbscpi/usbscpi.h` appear in neither column.
+`include/usbscpi/usbscpi.h` appears in neither column. `src/usbscpi.c` carries
+one change: the `feed_line` fix described above.
 
 Stages 1–3 are roughly a day and stand on their own: they produce a
 hardware-free SCPI device on `localhost:5025` and a host that talks to it, which

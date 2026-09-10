@@ -370,9 +370,26 @@ static void unlock_ctx(usbscpi_t *ctx) {
 /* ------------------------------------------------------------------ */
 
 static int feed_line(usbscpi_t *ctx) {
-    /* line_buf already holds 'line_len' bytes including a trailing '\n' */
-    return SCPI_Input(&ctx->scpi, ctx->cfg.line_buf, (int)ctx->line_len) == TRUE
-               ? USBSCPI_OK : USBSCPI_ERR_PROTOCOL;
+    /* line_buf already holds 'line_len' bytes including a trailing '\n'.
+     *
+     * SCPI_Input() returns FALSE when the *command* failed: a bad parameter, an
+     * unknown header, or a handler returning SCPI_RES_ERR. That is a normal
+     * SCPI outcome, not a stream fault — the failure has already been pushed
+     * onto the error queue for the host to read with SYSTem:ERRor?, and the
+     * input stream is still synchronised at a line boundary.
+     *
+     * Reporting it as an error made usbscpi_on_rx() stop its loop and discard
+     * the rest of the receive buffer, silently dropping every command batched
+     * behind a failing one. That is rare over USBTMC, where one message is
+     * usually one command, but routine over TCP: a host that pipelines
+     * `CMD\nSYSTem:ERRor?\n` into one segment would never see the error it
+     * just asked for.
+     *
+     * Genuine stream desync — malformed block framing, line overflow — is
+     * detected by the caller and still aborts.
+     */
+    (void)SCPI_Input(&ctx->scpi, ctx->cfg.line_buf, (int)ctx->line_len);
+    return USBSCPI_OK;
 }
 
 static int line_is_data_write_prefix(const char *line, size_t len) {

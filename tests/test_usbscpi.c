@@ -195,7 +195,10 @@ static void test_error_queue_and_free_query(void) {
     char line[96];
     usbscpi_t *dev = make_device(&f, storage, sizeof(storage), line, sizeof(line));
 
-    assert(usbscpi_on_rx(dev, "BAD:CMD?\n", 9, true) != USBSCPI_OK);
+    /* A failed command is a normal SCPI outcome, reported through the error
+     * queue rather than by faulting the input stream, so on_rx returns OK and
+     * keeps parsing. See feed_line() in src/usbscpi.c. */
+    assert(usbscpi_on_rx(dev, "BAD:CMD?\n", 9, true) == USBSCPI_OK);
     assert(usbscpi_on_rx(dev, "SYST:ERR?\n", 10, true) == USBSCPI_OK);
     assert(strstr(f.tx, "-113") != NULL);
 
@@ -203,6 +206,31 @@ static void test_error_queue_and_free_query(void) {
     f.tx[0] = '\0';
     assert(usbscpi_on_rx(dev, "DATA:FREE?\n", 11, true) == USBSCPI_OK);
     assert(strcmp(f.tx, "16\n") == 0);
+}
+
+/* A command batched behind a failing one must still run.
+ *
+ * on_rx() stops its loop when status != USBSCPI_OK, so treating a failed
+ * command as a stream fault silently discarded the rest of the receive buffer.
+ * Rare over USBTMC, where one message is usually one command; routine over TCP,
+ * where a host pipelines `CMD\nSYSTem:ERRor?\n` into a single segment and would
+ * never see the error it just asked for. */
+static void test_batch_survives_failing_command(void) {
+    fixture_t f;
+    uint8_t storage[2048];
+    char line[96];
+    usbscpi_t *dev = make_device(&f, storage, sizeof(storage), line, sizeof(line));
+
+    const char *batch = "BAD:CMD?\nDATA:FREE?\n";
+    assert(usbscpi_on_rx(dev, batch, strlen(batch), false) == USBSCPI_OK);
+    /* The second command ran despite the first one failing. */
+    assert(strcmp(f.tx, "16\n") == 0);
+
+    /* And the first command's error is still queued for the host to read. */
+    f.tx_len = 0;
+    f.tx[0] = '\0';
+    assert(usbscpi_on_rx(dev, "SYST:ERR?\n", 10, true) == USBSCPI_OK);
+    assert(strstr(f.tx, "-113") != NULL);
 }
 
 static size_t test_data_avail_val = 0;
@@ -484,8 +512,14 @@ static void test_descriptor_unsupported(void) {
 
     f.tx_len = 0;
     f.tx[0] = '\0';
-    /* Should push SCPI error (undefined header) and return non-OK */
-    assert(usbscpi_on_rx(dev, "SYST:HELP:DESC?\n", 17, true) != USBSCPI_OK);
+    /* Emits no descriptor and queues an error. on_rx itself returns OK: a
+     * failed command is reported through the error queue, not by faulting the
+     * stream, so anything batched behind it still runs. */
+    assert(usbscpi_on_rx(dev, "SYST:HELP:DESC?\n", 17, true) == USBSCPI_OK);
+    assert(f.tx_len == 0);
+
+    assert(usbscpi_on_rx(dev, "SYST:ERR?\n", 10, true) == USBSCPI_OK);
+    assert(strstr(f.tx, "0,\"No error\"") == NULL);
 }
 
 static void test_ring_buffer(void) {
@@ -506,6 +540,7 @@ int main(void) {
     test_param_parsing_and_arbitrary_block();
     test_binary_block_split_and_special_bytes();
     test_error_queue_and_free_query();
+    test_batch_survives_failing_command();
     test_new_default_commands();
     test_descriptor_query();
     test_descriptor_unsupported();
