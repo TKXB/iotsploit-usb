@@ -18,6 +18,17 @@ option(USBSCPI_BUILD_HELPERS "Build iotsploit-usb optional helper library" ON)
 option(USBSCPI_BUILD_TINYUSB_GLUE "Build iotsploit-usb optional TinyUSB glue" OFF)
 option(USBSCPI_BUILD_SOCKET_GLUE "Build iotsploit-usb optional BSD-socket glue" OFF)
 
+# MSVC has no /std:c99, so CMake's c_std_99 silently adds nothing there and the
+# daemon's designated initializers fail to compile. /std:c11 needs VS2019 16.8+.
+if(MSVC)
+    set(USBSCPI_C_STD c_std_11)
+    set(USBSCPI_WARNINGS /W4)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+else()
+    set(USBSCPI_C_STD c_std_99)
+    set(USBSCPI_WARNINGS -Wall -Wextra -Werror)
+endif()
+
 # Vendored libscpi: its own static lib so third-party warnings don't trip our
 # -Werror; SCPI_USER_CONFIG activates third_party/libscpi/inc/scpi/scpi_user_config.h.
 file(GLOB LIBSCPI_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libscpi/src/*.c)
@@ -29,7 +40,7 @@ target_include_directories(libscpi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libscpi/src
 )
 target_compile_definitions(libscpi PUBLIC SCPI_USER_CONFIG=1)
-target_compile_features(libscpi PUBLIC c_std_99)
+target_compile_features(libscpi PUBLIC ${USBSCPI_C_STD})
 
 add_library(usbscpi STATIC
     src/usbscpi.c
@@ -39,13 +50,9 @@ target_include_directories(usbscpi PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_compile_features(usbscpi PUBLIC c_std_99)
+target_compile_features(usbscpi PUBLIC ${USBSCPI_C_STD})
 
-if(MSVC)
-    target_compile_options(usbscpi PRIVATE /W4)
-else()
-    target_compile_options(usbscpi PRIVATE -Wall -Wextra -Werror)
-endif()
+target_compile_options(usbscpi PRIVATE ${USBSCPI_WARNINGS})
 
 if(USBSCPI_BUILD_HELPERS)
     add_library(usbscpi_helpers STATIC helpers/ring_buffer.c)
@@ -53,13 +60,13 @@ if(USBSCPI_BUILD_HELPERS)
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     )
-    target_compile_features(usbscpi_helpers PUBLIC c_std_99)
+    target_compile_features(usbscpi_helpers PUBLIC ${USBSCPI_C_STD})
 endif()
 
 if(USBSCPI_BUILD_TINYUSB_GLUE)
     add_library(usbscpi_tinyusb_glue STATIC glue/usbscpi_tinyusb.c)
     target_link_libraries(usbscpi_tinyusb_glue PUBLIC usbscpi)
-    target_compile_features(usbscpi_tinyusb_glue PUBLIC c_std_99)
+    target_compile_features(usbscpi_tinyusb_glue PUBLIC ${USBSCPI_C_STD})
 endif()
 
 if(USBSCPI_BUILD_SOCKET_GLUE)
@@ -68,13 +75,19 @@ if(USBSCPI_BUILD_SOCKET_GLUE)
     target_include_directories(usbscpi_socket_glue PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/glue>
     )
-    target_compile_features(usbscpi_socket_glue PUBLIC c_std_99)
+    target_compile_features(usbscpi_socket_glue PUBLIC ${USBSCPI_C_STD})
+    target_compile_options(usbscpi_socket_glue PRIVATE ${USBSCPI_WARNINGS})
+    if(WIN32)
+        target_link_libraries(usbscpi_socket_glue PUBLIC ws2_32)
+    endif()
 
-    # Linux/Pi 5 SCPI-over-TCP daemon: also the hardware-free test rig.
-    add_executable(usbscpi_linux examples/linux/main.c)
-    target_link_libraries(usbscpi_linux PRIVATE usbscpi_socket_glue)
-    set_target_properties(usbscpi_linux PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples/linux)
+    # Desktop SCPI-over-TCP daemon (Linux, Windows, Pi 5): also the
+    # hardware-free test rig for the Rust host.
+    add_executable(usbscpi_daemon examples/daemon/main.c)
+    target_link_libraries(usbscpi_daemon PRIVATE usbscpi_socket_glue)
+    target_compile_options(usbscpi_daemon PRIVATE ${USBSCPI_WARNINGS})
+    set_target_properties(usbscpi_daemon PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples/daemon)
 endif()
 
 if(USBSCPI_BUILD_TESTS)

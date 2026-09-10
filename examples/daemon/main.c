@@ -1,19 +1,22 @@
 /*
- * iotsploit-usb over TCP on a plain Linux host.
+ * iotsploit-usb over TCP on a desktop host: Linux or Windows.
  *
  * This is both a runnable target in its own right — a Raspberry Pi 5 reached
  * over Ethernet is exactly this daemon — and the hardware-free test rig for the
  * Rust host: the whole SCPI device runs on localhost:5025, so descriptor
  * discovery, workflows and block transfers can be exercised without a board.
  *
+ * Nothing here is OS-specific beyond the SIGPIPE guard below; the socket glue
+ * owns the platform differences.
+ *
  * Build:
  *   cmake -S . -B build -DUSBSCPI_BUILD_SOCKET_GLUE=ON
  *   cmake --build build
- *   ./build/examples/linux/usbscpi_linux [bind_addr] [port]
+ *   ./build/examples/daemon/usbscpi_daemon [bind_addr] [port]
  */
 
-#include <signal.h>
 #include <stdio.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -134,17 +137,20 @@ static const scpi_command_t demo_commands[] = {
 
 /* ---------- descriptor (SYSTem:HELP:DESCription?) ---------- */
 
+/* Designated initializers: the trailing options_*_query fields are optional
+ * (see usbscpi_param_desc_t) and deliberately left NULL here. */
 static const usbscpi_param_desc_t desc_gpio_set_params[] = {
-    { "pin", "u32", true }, { "level", "bool", true },
+    { .name = "pin",   .type = "u32",  .required = true },
+    { .name = "level", .type = "bool", .required = true },
 };
 static const usbscpi_param_desc_t desc_gpio_get_params[] = {
-    { "pin", "u32", true },
+    { .name = "pin", .type = "u32", .required = true },
 };
 static const usbscpi_param_desc_t desc_scan_get_params[] = {
-    { "index", "u32", true },
+    { .name = "index", .type = "u32", .required = true },
 };
 static const usbscpi_param_desc_t desc_data_read_params[] = {
-    { "length", "u32", true },
+    { .name = "length", .type = "u32", .required = true },
 };
 
 static const usbscpi_command_desc_t desc_commands[] = {
@@ -193,16 +199,18 @@ int main(int argc, char **argv) {
     const char *bind_addr = (argc > 1) ? argv[1] : "127.0.0.1";
     uint16_t    port      = (argc > 2) ? (uint16_t)atoi(argv[2]) : 5025;
 
+#ifdef SIGPIPE
     /* send() already passes MSG_NOSIGNAL, but a stray SIGPIPE from any other
-     * write would still kill the daemon. */
+     * write would still kill the daemon. Windows has no SIGPIPE at all. */
     signal(SIGPIPE, SIG_IGN);
+#endif
 
     usbscpi_config_t cfg = {
         .usb_tx        = usbscpi_socket_tx,
         .line_buf      = s_line,
         .line_buf_len  = sizeof(s_line),
         .max_block_len = 4096,
-        .idn           = "IoTSploit,linux-demo,0001,0.1.0",
+        .idn           = "IoTSploit,tcp-demo,0001,0.1.0",
         .io_buf        = s_io,
         .io_buf_len    = sizeof(s_io),
         .proto         = 1,

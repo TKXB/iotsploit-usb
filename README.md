@@ -24,8 +24,10 @@ src/usbscpi.c                   core receive path and standard commands
 third_party/libscpi/            vendored libscpi v2.3
 helpers/ring_buffer.c           optional ring helper
 glue/usbscpi_tinyusb.c          optional TinyUSB USBTMC adapter
+glue/usbscpi_socket.c           optional BSD-socket adapter (glibc / lwIP / Winsock)
 examples/pico2/                 Raspberry Pi Pico (RP2040) TinyUSB demo
 examples/esp32s3/               ESP32-S3 (ESP-IDF + TinyUSB) demo, hardware-verified
+examples/daemon/                SCPI-over-TCP daemon for Linux and Windows
 host/rust/                     generic Rust CLI host (cross-platform)
 tests/test_usbscpi.c            host unit tests
 ```
@@ -127,6 +129,68 @@ Pico SDK:
 include(path/to/iotsploit-usb/cmake/iotsploit-usb-pico.cmake)
 target_link_libraries(your_firmware PRIVATE usbscpi)
 ```
+
+## SCPI over TCP: the desktop daemon
+
+`examples/daemon/` is the device side running as an ordinary program instead of
+firmware. It serves the same command surface, descriptor discovery, workflows
+and binary block contract over raw SCPI on TCP 5025. Use it as a real target — a
+Raspberry Pi 5 on Ethernet is exactly this daemon — or as the hardware-free test
+rig for the Rust host.
+
+The daemon is TCP only. USB device mode needs a USB peripheral controller, so it
+stays on the firmware targets.
+
+Linux (and any POSIX host):
+
+```sh
+cmake -S . -B build -DUSBSCPI_BUILD_SOCKET_GLUE=ON
+cmake --build build
+./build/examples/daemon/usbscpi_daemon 127.0.0.1 5025
+```
+
+Windows, with MSVC or MinGW-w64:
+
+```sh
+cmake -S . -B build -DUSBSCPI_BUILD_SOCKET_GLUE=ON
+cmake --build build --config Release
+build\examples\daemon\usbscpi_daemon.exe 127.0.0.1 5025
+```
+
+`bind_addr` has no default and is a deliberate choice: `0.0.0.0` exposes the
+whole SCPI command surface to anything that can reach the interface.
+
+Cross-compiling the Windows binary from Linux:
+
+```sh
+cmake -S . -B build-win -DUSBSCPI_BUILD_SOCKET_GLUE=ON -DUSBSCPI_BUILD_TESTS=OFF \
+      -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+      -DCMAKE_EXE_LINKER_FLAGS=-static
+cmake --build build-win
+```
+
+## Socket Glue
+
+`glue/usbscpi_socket.c` is the platform owner for sockets and builds against
+three stacks: glibc, lwIP (ESP-IDF) and Winsock. A single `#if` block at the top
+of the file carries every difference — handle type, close, EINTR, and Winsock's
+`WSAStartup`, which `usbscpi_socket_serve()` performs lazily so the public API is
+identical on all three.
+
+Two Windows behaviours are worth knowing:
+
+- `SO_REUSEADDR` on Windows is not the POSIX option: it lets an unrelated
+  process bind the same live port and steal connections. The glue asks for
+  `SO_EXCLUSIVEADDRUSE` there instead.
+- There is no `SIGPIPE`, so the daemon's `signal()` guard compiles out.
+
+Unlike the TinyUSB glue, responses are sent inline from `usbscpi_on_rx()`; there
+is no deferred IN path and no MAV bit, because a socket has no equivalent of
+USBTMC's `REQUEST_DEV_DEP_MSG_IN` handshake.
+
+**One context per transport.** `usbscpi_config_t` carries exactly one `usb_tx`,
+so a device serving both USB and TCP needs two `usbscpi_t` instances, each with
+its own storage, `line_buf` and `io_buf`.
 
 ## ESP32-S3 Example Build and Flash
 
