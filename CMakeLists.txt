@@ -129,12 +129,14 @@ if(USBSCPI_BUILD_SOCKET_GLUE)
 
     # Synthetic producer for the data plane. No CAN, no hardware: if the glue
     # ever needs protocol knowledge, this stops being able to drive it.
-    if(NOT WIN32 AND USBSCPI_BUILD_TESTS)
+    if(USBSCPI_BUILD_TESTS)
         find_package(Threads QUIET)
-        if(Threads_FOUND)
+        if(Threads_FOUND OR WIN32)
             add_executable(stream_testgen tests/stream_testgen.c)
-            target_link_libraries(stream_testgen
-                PRIVATE usbscpi_stream_glue Threads::Threads)
+            target_link_libraries(stream_testgen PRIVATE usbscpi_stream_glue)
+            if(NOT WIN32)
+                target_link_libraries(stream_testgen PRIVATE Threads::Threads)
+            endif()
             target_compile_options(stream_testgen PRIVATE ${USBSCPI_WARNINGS})
 
             find_package(Python3 COMPONENTS Interpreter QUIET)

@@ -13,11 +13,41 @@
  */
 
 #include <inttypes.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* Threads and sleeping, the only two things this harness needs from the OS.
+ * Kept here rather than in the component: usbscpi_stream_serve() blocks by
+ * design so the *application* owns its threads, which is exactly why the
+ * component needs no threading abstraction of its own. */
+#if defined(_WIN32)
+#include <windows.h>
+#define THREAD_FN(name)  static DWORD WINAPI name(LPVOID arg)
+#define THREAD_RETURN    return 0
+static int thread_spawn(LPTHREAD_START_ROUTINE fn) {
+    HANDLE h = CreateThread(NULL, 0, fn, NULL, 0, NULL);
+    if (!h) return -1;
+    CloseHandle(h);
+    return 0;
+}
+/* Sleep() has ~1 ms granularity, so sub-millisecond pacing becomes 1 ms. The
+ * tests that care about rate use the unthrottled path, which never sleeps. */
+static void sleep_us(unsigned us) { Sleep(us < 1000 ? 1 : (DWORD)(us / 1000)); }
+#else
+#include <pthread.h>
+#define THREAD_FN(name)  static void *name(void *arg)
+#define THREAD_RETURN    return NULL
+static int thread_spawn(void *(*fn)(void *)) {
+    pthread_t t;
+    return pthread_create(&t, NULL, fn, NULL) == 0 ? 0 : -1;
+}
+static void sleep_us(unsigned us) {
+    struct timespec ts = { (time_t)(us / 1000000u), (long)(us % 1000000u) * 1000L };
+    nanosleep(&ts, NULL);
+}
+#endif
 
 #include "usbscpi/atomic.h"
 #include "usbscpi/ring_buffer.h"
@@ -47,16 +77,15 @@ static uint8_t        s_store[RING_SIZE];
 static size_t         s_dropped;     /* producer-side: ring was full */
 static size_t         s_rate;
 
-static void *producer(void *arg) {
+THREAD_FN(producer) {
     (void)arg;
     uint32_t seq = 0;
     if (s_rate == 0) {
         for (;;) {                       /* idle mode: never produce */
-            struct timespec ts = { 1, 0 };
-            nanosleep(&ts, NULL);
+            sleep_us(1000000u);
         }
     }
-    long period_ns = (long)(1000000000L / (long)s_rate);
+    unsigned period_us = (unsigned)(1000000u / (unsigned)s_rate);
     for (;;) {
         rec_t r = { seq, MAGIC, seq, 0, 0 };
         /* Capacity check first: usbscpi_ring_write() truncates, and a
@@ -67,16 +96,15 @@ static void *producer(void *arg) {
             usbscpi_ring_write(&s_ring, (const uint8_t *)&r, sizeof r);
         }
         seq++;
-        if (period_ns > 200) {
-            struct timespec ts = { 0, period_ns };
-            nanosleep(&ts, NULL);
+        if (period_us > 0) {
+            sleep_us(period_us);
         }
     }
-    return NULL;
+    THREAD_RETURN;
 }
 
 /* Reports disconnects so a test can assert realignment happened. */
-static void *reporter(void *arg) {
+THREAD_FN(reporter) {
     (void)arg;
     int was = 0;
     for (;;) {
@@ -87,10 +115,9 @@ static void *reporter(void *arg) {
             fflush(stdout);
         }
         was = now;
-        struct timespec ts = { 0, 2000000 }; /* 2 ms */
-        nanosleep(&ts, NULL);
+        sleep_us(2000u);
     }
-    return NULL;
+    THREAD_RETURN;
 }
 
 int main(int argc, char **argv) {
@@ -107,9 +134,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    pthread_t tp, tr;
-    if (pthread_create(&tp, NULL, producer, NULL) != 0 ||
-        pthread_create(&tr, NULL, reporter, NULL) != 0) {
+    if (thread_spawn(producer) != 0 || thread_spawn(reporter) != 0) {
         fprintf(stderr, "thread create failed\n");
         return 1;
     }

@@ -7,6 +7,7 @@ idf_component_register(
          "${REPO_ROOT}/helpers/ring_buffer.c"
          "${REPO_ROOT}/glue/usbscpi_tinyusb.c"
          "${REPO_ROOT}/glue/usbscpi_socket.c"
+         "${REPO_ROOT}/glue/usbscpi_stream.c"
          ${LIBSCPI_SRCS}
     INCLUDE_DIRS "${REPO_ROOT}/include"
                  "${REPO_ROOT}/glue"

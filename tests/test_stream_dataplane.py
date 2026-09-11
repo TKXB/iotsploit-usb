@@ -21,6 +21,9 @@ def check(name, cond, detail=""):
     else:
         fails.append(name); print(f"  FAIL  {name}  {detail}")
 
+def skip(name, why):
+    print(f"  SKIP  {name}  ({why})")
+
 class Gen:
     """The synthetic producer, plus a reader for its disconnect reports."""
     def __init__(self, rate):
@@ -56,8 +59,13 @@ class Gen:
         if rcvbuf: s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
         s.settimeout(5); s.connect(("127.0.0.1", self.port)); return s
     def cpu_seconds(self):
-        with open(f"/proc/{self.p.pid}/stat") as f: parts = f.read().split()
-        return (int(parts[13]) + int(parts[14])) / os.sysconf("SC_CLK_TCK")
+        """None where /proc is unavailable (Windows): the busy-spin assertion is
+        then skipped rather than silently dropped."""
+        try:
+            with open(f"/proc/{self.p.pid}/stat") as f: parts = f.read().split()
+            return (int(parts[13]) + int(parts[14])) / os.sysconf("SC_CLK_TCK")
+        except (OSError, AttributeError, ValueError):
+            return None
     def stop(self):
         self.p.kill(); self.p.wait()
 
@@ -125,8 +133,12 @@ g = Gen(rate=0)                       # produces nothing at all
 s = g.connect()
 t0, c0 = time.time(), g.cpu_seconds()
 time.sleep(2.0)
-busy = (g.cpu_seconds() - c0) / (time.time() - t0)
-check("idle stream does not busy-spin", busy < 0.15, f"{busy*100:.1f}% of a core")
+c1 = g.cpu_seconds()
+if c0 is None or c1 is None:
+    skip("idle stream does not busy-spin", "no /proc on this platform")
+else:
+    busy = (c1 - c0) / (time.time() - t0)
+    check("idle stream does not busy-spin", busy < 0.15, f"{busy*100:.1f}% of a core")
 
 s.close()
 noticed = False
