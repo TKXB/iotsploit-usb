@@ -111,6 +111,19 @@ if(USBSCPI_BUILD_TESTS)
     # Host test for the TinyUSB glue, built against a minimal TinyUSB stub
     # (tests/stub/tusb.h). Regression coverage for the USBTMC IN-response
     # sequencing / -110 fix; no real TinyUSB required.
+    # SPSC ring across a real thread boundary. Guards the acquire/release
+    # pairing in helpers/ring_buffer.c, which had never run cross-thread.
+    # POSIX threads only; the ring's users on Windows are single-threaded today.
+    if(NOT WIN32)
+        find_package(Threads QUIET)
+        if(Threads_FOUND)
+            add_executable(test_ring_concurrent tests/test_ring_concurrent.c)
+            target_link_libraries(test_ring_concurrent
+                PRIVATE usbscpi_helpers Threads::Threads)
+            add_test(NAME test_ring_concurrent COMMAND test_ring_concurrent)
+        endif()
+    endif()
+
     add_executable(test_glue_tinyusb
         tests/test_glue_tinyusb.c
         glue/usbscpi_tinyusb.c
