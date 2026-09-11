@@ -61,13 +61,33 @@ typedef struct {
     uint8_t  data[BLE_STREAM_ADV_MAX];
 } ble_rec_t;
 
+/* One ring per transport, and the producer writes to exactly one of them.
+ *
+ * The ring is single-producer/single-consumer by contract. Sharing one between
+ * the TCP drain task and the USB pump would give it two consumers, and
+ * usbscpi_ring_read() writes `tail` even when it reads nothing — so the race
+ * exists even while idle. Routing at the producer keeps the contract intact.
+ *
+ * The USB ring is smaller: usb_task drains it every 10 ms at worst, where a
+ * TCP consumer may stall for a whole round trip. */
+#define BLE_STREAM_USB_RING_BYTES 8192u
+
 static usbscpi_ring_t s_stream_ring;
 static uint8_t        s_stream_store[BLE_STREAM_RING_BYTES];
+static usbscpi_ring_t s_usb_ring;
+static uint8_t        s_usb_store[BLE_STREAM_USB_RING_BYTES];
+static size_t         s_usb_mode;   /* records go out over USB, not TCP */
 static size_t         s_stream_on;
 static uint64_t       s_stream_count;
 static uint64_t       s_stream_dropped;
 
-usbscpi_ring_t *ble_stream_ring(void)   { return &s_stream_ring; }
+usbscpi_ring_t *ble_stream_ring(void)     { return &s_stream_ring; }
+usbscpi_ring_t *ble_stream_usb_ring(void) { return &s_usb_ring; }
+
+int  ble_stream_usb_mode(void) { return usbscpi_load_acquire(&s_usb_mode) != 0; }
+void ble_stream_usb_mode_set(int on) {
+    usbscpi_store_release(&s_usb_mode, on ? 1u : 0u);
+}
 size_t   ble_stream_stride(void)        { return sizeof(ble_rec_t); }
 int      ble_stream_enabled(void)       { return usbscpi_load_acquire(&s_stream_on) != 0; }
 void     ble_stream_enable(int on)      { usbscpi_store_release(&s_stream_on, on ? 1u : 0u); }
@@ -110,11 +130,14 @@ static void stream_push(const ble_addr_t *addr, int8_t rssi, uint8_t adv_type,
     /* Capacity check first: usbscpi_ring_write() truncates to fit, and a
      * truncated record desynchronises the consumer for every record after it.
      * Drop whole records or none. */
-    if (usbscpi_ring_free(&s_stream_ring) < sizeof r) {
+    /* One ring per transport: routing here is what keeps each ring
+     * single-consumer, which is the contract usbscpi_ring_t is built on. */
+    usbscpi_ring_t *sink = ble_stream_usb_mode() ? &s_usb_ring : &s_stream_ring;
+    if (usbscpi_ring_free(sink) < sizeof r) {
         s_stream_dropped++;
         return;
     }
-    usbscpi_ring_write(&s_stream_ring, (const uint8_t *)&r, sizeof r);
+    usbscpi_ring_write(sink, (const uint8_t *)&r, sizeof r);
     s_stream_count++;
 }
 
@@ -239,7 +262,8 @@ int ble_stream_scan_start(void) {
 }
 
 void ble_scan_init(void) {
-    if (usbscpi_ring_init(&s_stream_ring, s_stream_store, sizeof s_stream_store) != 0) {
+    if (usbscpi_ring_init(&s_stream_ring, s_stream_store, sizeof s_stream_store) != 0 ||
+        usbscpi_ring_init(&s_usb_ring, s_usb_store, sizeof s_usb_store) != 0) {
         ESP_LOGE(TAG, "ble stream ring init failed");
     }
     if (nimble_port_init() != ESP_OK) {

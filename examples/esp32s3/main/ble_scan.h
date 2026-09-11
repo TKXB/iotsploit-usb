@@ -44,8 +44,19 @@ int ble_scan_addr(size_t index, uint8_t out_val[6], uint8_t *out_type);
  * so the ring keeps its single-producer/single-consumer contract with no lock.
  */
 
-/* Ring the GAP callback fills. Hand to usbscpi_stream_serve(). */
+/* Ring the GAP callback fills for the TCP data plane. Hand to
+ * usbscpi_stream_serve(). */
 usbscpi_ring_t *ble_stream_ring(void);
+
+/* Ring the GAP callback fills when records go out over the USB vendor pipe
+ * instead. Separate because the ring is single-consumer: one drain per ring. */
+usbscpi_ring_t *ble_stream_usb_ring(void);
+
+/* Select which transport records are produced for. Set by
+ * SYSTem:STReam:FRAMing, since USB records only make sense once the vendor
+ * pipe is framed. */
+int  ble_stream_usb_mode(void);
+void ble_stream_usb_mode_set(int on);
 
 /* Record size, for usbscpi_stream_serve()'s stride argument. */
 size_t ble_stream_stride(void);

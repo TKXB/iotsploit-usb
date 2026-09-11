@@ -16,6 +16,7 @@
 #include "wifi_scan.h"
 #include "ble_scan.h"
 #include "ble_conn.h"
+#include "usb_frame.h"
 #include "usbscpi_stream.h"
 
 static const char *TAG = "scpi";
@@ -290,6 +291,10 @@ static const usbscpi_param_desc_t desc_ble_pair_confirm_params[] = {
     { "accept", "bool", false },
 };
 
+static const usbscpi_param_desc_t desc_framing_params[] = {
+    { .name = "on", .type = "bool", .required = true },
+};
+
 static const usbscpi_command_desc_t desc_commands[] = {
     /* The data plane is driven entirely by these — the host UI has no separate
      * start/stop control, on purpose. They must be here and not only in the
@@ -313,6 +318,10 @@ static const usbscpi_command_desc_t desc_commands[] = {
       NULL, 0, "u32" },
     { "SYSTem:STReam:FORMat?", "query",   "Record version, stride, schema",
       NULL, 0, "string" },
+    { "SYSTem:STReam:FRAMing", "command", "Frame the USB vendor pipe (1=on)",
+      desc_framing_params, 1, "none" },
+    { "SYSTem:STReam:FRAMing?","query",   "USB framing state",
+      NULL, 0, "u32" },
     { "GPIO:SET",              "command", "Set GPIO output level",
       desc_gpio_set_params,  2, "none" },
     { "GPIO:GET?",             "query",   "Read GPIO input level",
@@ -485,6 +494,25 @@ static const usbscpi_descriptor_t s_descriptor = {
  * "how did this RSSI move". These stream every advertisement report instead;
  * both surfaces coexist. */
 
+/* Framing is off at boot and only this turns it on. An existing host reads the
+ * vendor pipe as raw text with no negotiation, so a device that framed
+ * unconditionally would garble it; only a host that understands the envelope
+ * sends this. Enabling it also routes records to the USB ring instead of the
+ * TCP one — one ring, one consumer. */
+static scpi_result_t cmd_stream_framing(scpi_t *ctx) {
+    uint32_t on = 0;
+    if (!SCPI_ParamUInt32(ctx, &on, TRUE)) {
+        return SCPI_RES_ERR;
+    }
+    ble_stream_usb_mode_set(on ? 1 : 0);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_stream_framing_q(scpi_t *ctx) {
+    SCPI_ResultUInt32(ctx, (uint32_t)ble_stream_usb_mode());
+    return SCPI_RES_OK;
+}
+
 static scpi_result_t cmd_stream_port(scpi_t *ctx) {
     SCPI_ResultUInt32(ctx, 5026);
     return SCPI_RES_OK;
@@ -538,6 +566,8 @@ static scpi_result_t cmd_stream_state(scpi_t *ctx) {
 
 static const scpi_command_t demo_commands[] = {
     { "SYSTem:STReam:PORT?",    cmd_stream_port,    0 },
+    { "SYSTem:STReam:FRAMing",  cmd_stream_framing, 0 },
+    { "SYSTem:STReam:FRAMing?", cmd_stream_framing_q, 0 },
     { "SYSTem:STReam:STARt",    cmd_stream_start,   0 },
     { "SYSTem:STReam:STOP",     cmd_stream_stop,    0 },
     { "SYSTem:STReam:FORMat?",  cmd_stream_format,  0 },
@@ -728,21 +758,70 @@ static int log_tee_vprintf(const char *fmt, va_list ap) {
 
 /* 把 stream buffer 里的日志排空到 vendor FIFO。只在 USB 任务里调用。
  * 只取当前 FIFO 能容纳的字节,避免写不下时丢字节;未挂载时丢弃积压。 */
-static void usb_log_pump(void) {
+/* Write one framed message. Only called after checking the FIFO can take the
+ * whole thing: a half-written envelope would desynchronise the reader for
+ * everything after it. */
+static void usb_frame_write(uint8_t type, const uint8_t *payload, uint16_t len) {
+    uint8_t hdr[USB_FRAME_HDR_LEN] = {
+        type, 0u, (uint8_t)(len & 0xFFu), (uint8_t)(len >> 8)
+    };
+    tud_vendor_write(hdr, sizeof hdr);
+    if (len) {
+        tud_vendor_write(payload, len);
+    }
+}
+
+/* Drain records ahead of log text, because logs are diagnostics and records
+ * are the measurement — losing the measurement to a chatty ESP_LOGx would be
+ * backwards. Returns the FIFO space left for logs. */
+static uint32_t usb_pump_records(void) {
+    usbscpi_ring_t *ring = ble_stream_usb_ring();
+    const size_t stride = ble_stream_stride();
+    uint8_t rec[128];
+    if (stride > sizeof rec) {
+        return tud_vendor_write_available();  /* cannot happen; fail safe */
+    }
+    for (;;) {
+        uint32_t space = tud_vendor_write_available();
+        if (space < USB_FRAME_HDR_LEN + stride) return space;
+        if (usbscpi_ring_count(ring) < stride) return space;
+        if (usbscpi_ring_read(ring, rec, stride) != stride) return space;
+        usb_frame_write(USB_FRAME_TYPE_REC, rec, (uint16_t)stride);
+    }
+}
+
+static void usb_vendor_pump(void) {
     if (!s_log_sb) return;
     if (!tud_vendor_mounted()) {
         uint8_t junk[64];
         while (xStreamBufferReceive(s_log_sb, junk, sizeof(junk), 0) > 0) { }
         return;
     }
+
+    const int framed = ble_stream_usb_mode();
+    uint32_t space = framed ? usb_pump_records() : tud_vendor_write_available();
+
+    /* Log text. Unframed this is the original raw path, byte for byte, which
+     * is what an old host still expects. */
+    uint32_t budget = framed ? USB_FRAME_LOG_CHUNK : UINT32_MAX;
     for (;;) {
-        uint32_t space = tud_vendor_write_available();
-        if (space == 0) break;                 /* FIFO 满,下一轮再排 */
+        if (space == 0 || budget == 0) break;
         uint8_t buf[64];
-        uint32_t want = space < sizeof(buf) ? space : sizeof(buf);
+        uint32_t room = framed
+            ? (space > USB_FRAME_HDR_LEN ? space - USB_FRAME_HDR_LEN : 0u)
+            : space;
+        if (room == 0) break;
+        uint32_t want = room < sizeof(buf) ? room : (uint32_t)sizeof(buf);
+        if (want > budget) want = budget;
         size_t got = xStreamBufferReceive(s_log_sb, buf, want, 0);
-        if (got == 0) break;                   /* 无更多日志 */
-        tud_vendor_write(buf, got);
+        if (got == 0) break;                   /* no more log text queued */
+        if (framed) {
+            usb_frame_write(USB_FRAME_TYPE_LOG, buf, (uint16_t)got);
+        } else {
+            tud_vendor_write(buf, got);
+        }
+        budget -= (uint32_t)got;
+        space = tud_vendor_write_available();
     }
     tud_vendor_flush();
 }
@@ -772,7 +851,7 @@ static void usb_task(void *arg) {
     for (;;) {
         tud_task_ext(10, false); /* 驱动 tinyusb;最多阻塞 10ms 便返回 */
         usbscpi_task(dev);       /* 处理 core 的延迟工作(无则 no-op) */
-        usb_log_pump();          /* 排空设备日志到 vendor bulk-IN(0x82) */
+        usb_vendor_pump();       /* records + log text -> vendor bulk-IN (0x82) */
     }
 }
 
