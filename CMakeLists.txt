@@ -88,6 +88,18 @@ if(USBSCPI_BUILD_SOCKET_GLUE)
     target_compile_options(usbscpi_daemon PRIVATE ${USBSCPI_WARNINGS})
     set_target_properties(usbscpi_daemon PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples/daemon)
+
+    # Protocol smoke suite: real sockets, real response framing, real
+    # reconnects — transport behaviour the C unit tests cannot reach. It
+    # spawns the daemon itself on a free port. Skipped without Python.
+    # CMAKE_CROSSCOMPILING guards the case where the daemon cannot run here.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(USBSCPI_BUILD_TESTS AND Python3_FOUND AND NOT CMAKE_CROSSCOMPILING)
+        add_test(NAME test_scpi_tcp_smoke
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/scpi_tcp_smoke.py
+                    --daemon $<TARGET_FILE:usbscpi_daemon>)
+    endif()
 endif()
 
 if(USBSCPI_BUILD_TESTS)

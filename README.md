@@ -160,6 +160,15 @@ build\examples\daemon\usbscpi_daemon.exe 127.0.0.1 5025
 `bind_addr` has no default and is a deliberate choice: `0.0.0.0` exposes the
 whole SCPI command surface to anything that can reach the interface.
 
+`tests/scpi_tcp_smoke.py` exercises the transport end to end — response framing,
+definite-length blocks, workflows, reconnects. With the socket glue enabled it
+runs as part of `ctest`, spawning its own daemon on a free port. Point it at a
+running daemon instead to validate another machine's build:
+
+```sh
+python3 tests/scpi_tcp_smoke.py <host> 5025
+```
+
 Cross-compiling the Windows binary from Linux:
 
 ```sh
