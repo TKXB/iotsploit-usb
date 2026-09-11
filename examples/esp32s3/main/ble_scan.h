@@ -64,8 +64,13 @@ int      ble_stream_enabled(void);
 uint64_t ble_stream_count(void);
 uint64_t ble_stream_dropped(void);
 
-/* Begin a continuous (unlimited-duration) passive scan for streaming. */
+/* Begin a continuous (unlimited-duration) active scan for streaming. Active,
+ * because most devices put their name only in the scan response. */
 int ble_stream_scan_start(void);
+
+/* Stop recording AND end the discovery. Both: leaving GAP discovering blocks
+ * every timed scan the workflow tries to start. */
+void ble_stream_scan_stop(void);
 
 #ifdef __cplusplus
 }

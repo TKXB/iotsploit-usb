@@ -204,8 +204,19 @@ static void host_task(void *param) {
     nimble_port_freertos_deinit();
 }
 
-/* Continuous passive scan: duration 0 means "until stopped", which is what a
- * stream wants. The workflow's timed scan stays as it is. */
+/* End the forever-discovery the stream started. Clearing the enable flag alone
+ * would stop recording but leave GAP discovering, which then blocks every
+ * timed scan the workflow tries to start — for the rest of the boot. */
+void ble_stream_scan_stop(void) {
+    ble_stream_enable(0);
+    int rc = ble_gap_disc_cancel();
+    if (rc != 0 && rc != BLE_HS_EALREADY) {
+        ESP_LOGW(TAG, "ble_gap_disc_cancel rc=%d", rc);
+    }
+}
+
+/* Continuous scan: duration 0 means "until stopped", which is what a stream
+ * wants. The workflow's timed scan stays as it is. */
 int ble_stream_scan_start(void) {
     if (!s_ready) {
         ESP_LOGE(TAG, "ble stream start: stack not synced");
@@ -246,6 +257,13 @@ int ble_scan_start(unsigned secs) {
     }
     s_done = 0;
     s_dev_count = 0;
+    /* There is one GAP discovery, so a running stream would make this fail with
+     * BLE_HS_EALREADY. Take over instead: a caller asking for a timed scan
+     * wants a timed scan, and the stream is restartable. */
+    if (ble_stream_enabled()) {
+        ESP_LOGI(TAG, "timed scan takes over from the RSSI stream");
+    }
+    ble_stream_scan_stop();
     struct ble_gap_disc_params p = { 0 };
     p.passive = 1;                     /* listen only, no scan requests */
     int32_t duration = (secs == 0) ? BLE_HS_FOREVER : (int32_t)(secs * 1000);

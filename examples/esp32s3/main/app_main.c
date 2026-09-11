@@ -509,7 +509,7 @@ static scpi_result_t cmd_stream_start(scpi_t *ctx) {
 
 static scpi_result_t cmd_stream_stop(scpi_t *ctx) {
     (void)ctx;
-    ble_stream_enable(0);
+    ble_stream_scan_stop();
     return SCPI_RES_OK;
 }
 
