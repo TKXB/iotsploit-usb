@@ -7,6 +7,8 @@
 
 pub mod block;
 pub mod caps;
+#[cfg(feature = "tcp")]
+pub mod dataplane;
 pub mod descriptor;
 pub mod headers;
 pub mod session;

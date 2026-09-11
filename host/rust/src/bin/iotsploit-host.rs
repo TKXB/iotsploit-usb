@@ -51,6 +51,7 @@ COMMANDS:
     write  <cmd>                 Send a SCPI command (no response printed)
     block-read <cmd> [--out F]   Query an arbitrary-block response; write to file
     errors                       Drain the SYSTem:ERRor? queue
+    stream [count]               Read records from the device's data plane
     workflow <name> [params...]  Run a workflow defined by the device descriptor
     profile                      Show the device's full command/workflow descriptor
     repl                         Interactive SCPI prompt (Ctrl-D to exit)
@@ -63,6 +64,7 @@ EXAMPLES:
     iotsploit-host idn
     iotsploit-host caps
     iotsploit-host headers
+    iotsploit-host stream 100
     iotsploit-host workflow wifi-scan
     iotsploit-host workflow ble-scan 8
     iotsploit-host --backend raw --vid 1209 --pid 0001 idn
@@ -342,6 +344,50 @@ fn open_session(cli: &Cli) -> iotsploit_host::Result<ScpiSession<Backend>> {
 
 /// Fetch the device's descriptor (`SYSTem:HELP:DESCription?`) as a [`Profile`].
 ///
+/// Byte offset of a named field in a `name:type[:unit],...` schema.
+///
+/// Only fixed-width scalar types are walked; anything else (a trailing
+/// `bytesN` blob, say) ends the walk, which is fine because the counters this
+/// is used for come first by convention.
+#[cfg(feature = "tcp")]
+#[cfg(feature = "tcp")]
+fn stream_host_of(device: Option<&str>) -> String {
+    let d = device.unwrap_or("");
+    let rest = d.strip_prefix("tcp://").unwrap_or(d);
+    let host = rest.split(':').next().unwrap_or("");
+    if host.is_empty() { "127.0.0.1".to_string() } else { host.to_string() }
+}
+
+fn field_offset(fields: &str, want: &str) -> Option<usize> {
+    let mut off = 0usize;
+    for field in fields.split(',') {
+        let mut it = field.split(':');
+        let name = it.next()?.trim();
+        let ty = it.next()?.trim();
+        let size = match ty {
+            "u8" | "i8" => 1,
+            "u16" | "i16" => 2,
+            "u32" | "i32" | "f32" => 4,
+            "u64" | "i64" | "f64" => 8,
+            _ => return None,
+        };
+        if name == want {
+            return Some(off);
+        }
+        off += size;
+    }
+    None
+}
+
+#[cfg(feature = "tcp")]
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 /// The device is the single source of truth for its command/workflow metadata,
 /// so there are no local profile files. Firmware that does not yet implement the
 /// descriptor query yields a clear, actionable error.
@@ -371,6 +417,65 @@ fn run(cli: Cli) -> Result<(), Error> {
             let mut s = open_session(&cli)?;
             let idn = s.idn()?;
             println!("{idn}");
+            Ok(())
+        }
+        #[cfg(feature = "tcp")]
+        "stream" => {
+            use iotsploit_host::dataplane::{self, DataPlane, GapTracker};
+            let limit: usize = cli.args.first().and_then(|a| a.parse().ok()).unwrap_or(0);
+
+            // The control plane is the single source of truth for where the
+            // data plane is and what it emits; nothing here is hardcoded.
+            let mut s = open_session(&cli)?;
+            let (port, fmt) = match dataplane::discover(&mut s)? {
+                Some(v) => v,
+                None => {
+                    eprintln!("device has no data plane (SYSTem:STReam:PORT? returned 0)");
+                    return Ok(());
+                }
+            };
+            eprintln!("stream: port {port}, v{} stride {}", fmt.version, fmt.stride);
+            eprintln!("fields: {}", fmt.fields);
+
+            let host = stream_host_of(cli.device.as_deref());
+            let mut dp = DataPlane::connect((host.as_str(), port), fmt.stride,
+                                            Duration::from_millis(cli.timeout_ms))?;
+            s.write("SYSTem:STReam:STARt")?;
+
+            // `dropped` is a u64 at a schema-declared offset. Locate it rather
+            // than assuming, so a different source still reports gaps.
+            let offset = field_offset(&fmt.fields, "dropped");
+            let mut gaps = offset.map(GapTracker::new);
+            let mut n = 0usize;
+            // Piping a record stream into `head` is normal usage, and Rust's
+            // println! panics on EPIPE. Write explicitly and treat a closed
+            // downstream as a reason to stop, not an error.
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            loop {
+                match dp.next_record()? {
+                    Some(rec) => {
+                        if let Some(g) = gaps.as_mut() {
+                            let lost = g.observe(&rec);
+                            if lost > 0 {
+                                eprintln!("-- {lost} record(s) lost before #{n} --");
+                            }
+                        }
+                        use std::io::Write as _;
+                        if writeln!(out, "{}", hex(&rec)).is_err() {
+                            break;
+                        }
+                        n += 1;
+                        if limit != 0 && n >= limit {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            let _ = s.write("SYSTem:STReam:STOP");
+            eprintln!("{n} records, {} lost",
+                      gaps.as_ref().map(|g| g.total_lost()).unwrap_or(0));
             Ok(())
         }
         "caps" => {
