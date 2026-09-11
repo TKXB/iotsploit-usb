@@ -35,6 +35,10 @@ void usbscpi_tinyusb_bind(usbscpi_t *ctx) {
     g_usbscpi = ctx;
 }
 
+size_t usbscpi_tinyusb_tx_capacity(void) {
+    return sizeof(s_tx_buf);
+}
+
 void usbscpi_tinyusb_set_srq(void) {
     s_status |= USBSCPI_STB_SRQ;
 }

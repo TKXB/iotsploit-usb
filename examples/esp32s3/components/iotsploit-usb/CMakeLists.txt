@@ -18,3 +18,9 @@ idf_component_register(
 # libscpi config: activate scpi_user_config.h for every TU that sees scpi/config.h
 # (PUBLIC so dependents like 'main' get a matching scpi_t layout / no-malloc build).
 target_compile_definitions(${COMPONENT_LIB} PUBLIC SCPI_USER_CONFIG=1)
+
+# The TinyUSB glue buffers a whole device->host message, and the descriptor is
+# now 4408 bytes — over the 4096 default, which made every USB descriptor fetch
+# fail silently while TCP (which sends inline, unbuffered) kept working. The
+# ESP32-S3 has the RAM; small MCUs keep the smaller default.
+target_compile_definitions(${COMPONENT_LIB} PUBLIC USBSCPI_TINYUSB_TX_BUF_SIZE=8192u)

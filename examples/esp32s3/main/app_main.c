@@ -802,7 +802,9 @@ void app_main(void) {
         .usb_tx        = usb_tx,
         .line_buf      = s_line,
         .line_buf_len  = sizeof(s_line),
-        .max_block_len = 8192,
+        /* From the glue, not a literal: a block the glue cannot buffer is
+         * rejected in the IN path and the query just never answers. */
+        .max_block_len = usbscpi_tinyusb_tx_capacity(),
         .idn           = "IoTSploit,ESP32S3,0001,0.1.0",
         .data_avail    = adc_avail,
         .data_read     = adc_read_cb,

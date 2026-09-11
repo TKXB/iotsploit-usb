@@ -43,6 +43,15 @@ int usbscpi_tinyusb_tx(void *user, const uint8_t *data, size_t len, bool eom);
  * same buffered IN path. Same contract as usbscpi_tinyusb_tx. */
 int usbscpi_tinyusb_queue_response(const uint8_t *data, size_t len);
 
+/* Bytes this glue can buffer for one device->host message.
+ *
+ * Set usbscpi_config_t.max_block_len from this rather than hardcoding a
+ * matching number. The core will happily build a block larger than the glue
+ * can hold, and queue_response() then rejects it — the host sees a query that
+ * simply never answers, with nothing logged anywhere. Deriving the limit from
+ * the buffer makes the two agree by construction. */
+size_t usbscpi_tinyusb_tx_capacity(void);
+
 /* Raise the USB488 SRQ status bit (call from tud_usbtmc_msg_trigger_cb etc.). */
 void usbscpi_tinyusb_set_srq(void);
 
