@@ -22,7 +22,12 @@ static const char *TAG = "netscpi";
  * necessity, not by preference — see net_scpi.h. */
 static uint8_t s_net_storage[2048];
 static char    s_net_line[256];
-static uint8_t s_net_io[4096];
+/* 8 KiB, not 4: SYSTem:HELP:DESCription? is emitted whole into this buffer and
+ * fails outright when it does not fit — emit_descriptor() returns 0 and the
+ * handler pushes TOO_MUCH_DATA, so a descriptor one byte too large costs the
+ * host every command AND every workflow, not just the overflowing entry. The
+ * descriptor was at 3753 bytes of 4096 before the stream commands were added. */
+static uint8_t s_net_io[8192];
 
 static usbscpi_config_t     s_net_cfg;
 static usbscpi_t           *s_net_dev;
@@ -100,7 +105,7 @@ int net_scpi_start(const usbscpi_config_t *tmpl,
     /* A socket is not limited to a USB endpoint's 64/512 bytes. This caps
      * SYSTem:HELP:HEADers? and block reads, so the USB context's 256 would
      * needlessly truncate them here. */
-    s_net_cfg.mtu          = 4096;
+    s_net_cfg.mtu          = 8192;
 
     s_net_dev = usbscpi_init(s_net_storage, sizeof(s_net_storage), &s_net_cfg);
     if (!s_net_dev) {

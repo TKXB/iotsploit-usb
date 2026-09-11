@@ -33,7 +33,9 @@ static const char *TAG = "scpi";
 /* ---------- 静态缓冲(等价 pico2,避免动态分配) ---------- */
 static uint8_t s_storage[2048];
 static char    s_line[96];
-static uint8_t s_io[4096];
+/* See the note in net_scpi.c: the descriptor is all-or-nothing, so this is
+ * sized for it rather than for the largest data read. */
+static uint8_t s_io[8192];
 
 /* ---------- ADC oneshot 句柄 ---------- */
 static adc_oneshot_unit_handle_t s_adc1;
@@ -289,6 +291,28 @@ static const usbscpi_param_desc_t desc_ble_pair_confirm_params[] = {
 };
 
 static const usbscpi_command_desc_t desc_commands[] = {
+    /* The data plane is driven entirely by these — the host UI has no separate
+     * start/stop control, on purpose. They must be here and not only in the
+     * SCPI command table: a host with a descriptor shows the descriptor's
+     * commands and never falls back to SYSTem:HELP:HEADers?, so a command
+     * missing here is invisible even though it works when typed. Summaries are
+     * kept terse because the whole descriptor is emitted as one block. */
+    { "SYSTem:STReam:STARt",   "command", "Start the BLE RSSI capture",
+      NULL, 0, "none" },
+    { "SYSTem:STReam:STOP",    "command", "Stop the capture",
+      NULL, 0, "none" },
+    { "SYSTem:STReam:STATe?",  "query",   "enabled,attached",
+      NULL, 0, "string" },
+    { "SYSTem:STReam:COUNt?",  "query",   "Reports captured",
+      NULL, 0, "u32" },
+    { "SYSTem:STReam:DROPped?","query",   "Reports lost to overflow",
+      NULL, 0, "u32" },
+    { "SYSTem:STReam:TORN?",   "query",   "Records cut by a reconnect",
+      NULL, 0, "u32" },
+    { "SYSTem:STReam:PORT?",   "query",   "Data-plane TCP port",
+      NULL, 0, "u32" },
+    { "SYSTem:STReam:FORMat?", "query",   "Record version, stride, schema",
+      NULL, 0, "string" },
     { "GPIO:SET",              "command", "Set GPIO output level",
       desc_gpio_set_params,  2, "none" },
     { "GPIO:GET?",             "query",   "Read GPIO input level",
@@ -778,7 +802,7 @@ void app_main(void) {
         .usb_tx        = usb_tx,
         .line_buf      = s_line,
         .line_buf_len  = sizeof(s_line),
-        .max_block_len = 4096,
+        .max_block_len = 8192,
         .idn           = "IoTSploit,ESP32S3,0001,0.1.0",
         .data_avail    = adc_avail,
         .data_read     = adc_read_cb,
