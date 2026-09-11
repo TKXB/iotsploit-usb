@@ -7,11 +7,16 @@
 #include "esp_log.h"
 
 #include "usbscpi_socket.h"
+#include "usbscpi_stream.h"
+#include "ble_scan.h"
 #include "wifi_scan.h"
 
 static const char *TAG = "netscpi";
 
 #define NET_SCPI_PORT 5025
+/* Data plane: records only, device to host, discovered via
+ * SYSTem:STReam:PORT? rather than hardcoded on the host side. */
+#define NET_STREAM_PORT 5026
 
 /* Storage for the TCP context. Separate from the USB context's buffers by
  * necessity, not by preference — see net_scpi.h. */
@@ -25,6 +30,17 @@ static const scpi_command_t *s_net_commands;
 
 static char s_ssid[33];
 static char s_pass[65];
+
+static void net_stream_task(void *arg) {
+    (void)arg;
+    ESP_LOGI(TAG, "BLE RSSI data plane listening on 0.0.0.0:%d stride=%u",
+             NET_STREAM_PORT, (unsigned)ble_stream_stride());
+    if (usbscpi_stream_serve(ble_stream_ring(), "0.0.0.0", NET_STREAM_PORT,
+                             ble_stream_stride()) != 0) {
+        ESP_LOGE(TAG, "stream listen on port %d failed", NET_STREAM_PORT);
+    }
+    vTaskDelete(NULL);
+}
 
 static void net_scpi_task(void *arg) {
     (void)arg;
@@ -47,6 +63,11 @@ static void net_scpi_task(void *arg) {
     }
 
     ESP_LOGI(TAG, "SCPI/TCP listening on %s:%d", ip, NET_SCPI_PORT);
+
+    /* usbscpi_stream_serve() blocks, exactly like the SCPI listener, so it
+     * gets its own task. That is the whole reason the component carries no
+     * threading abstraction: the application owns its threads. */
+    xTaskCreate(net_stream_task, "scpi_stream", 4096, NULL, 5, NULL);
 
     /* Binds every interface: on a station that is the one Wi-Fi netif. The
      * argument is explicit rather than defaulted so the exposure is visible. */

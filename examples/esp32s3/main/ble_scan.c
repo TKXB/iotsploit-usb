@@ -9,8 +9,96 @@
 #include "host/ble_hs.h"
 #include "host/util/util.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+
+#include "usbscpi/atomic.h"
 
 static const char *TAG = "ble";
+
+/* ---- RSSI data plane ----------------------------------------------------
+ *
+ * 16 KiB holds ~273 records. Wi-Fi and BLE already own most of the SRAM, so
+ * this is the tradeoff to revisit first if reports are being dropped: at a few
+ * thousand reports/second in a busy environment it is well under a second of
+ * slack.
+ *
+ * WHAT THE DROP COUNTER CANNOT SEE: reports discarded by the controller or by
+ * NimBLE before gap_event_cb() runs. SocketCAN has SO_RXQ_OVFL for exactly
+ * this; NimBLE exposes no equivalent that I could find. So ring overflow is
+ * counted honestly and controller-level loss is invisible — weaker than the
+ * CAN path, and the schema says so rather than implying otherwise. */
+#define BLE_STREAM_RING_BYTES 16384u
+#define BLE_STREAM_ADV_MAX    31u
+
+/* 59 bytes of content, which the uint64_t members pad to a 64-byte stride.
+ *
+ * Note that 64 IS a power of two, unlike the 20- and 88-byte strides used
+ * elsewhere. Socket buffer space comes in round binary sizes, so a partial
+ * send here tends to land on a record boundary and the transport's
+ * realignment path will rarely fire on this device. That is not a correctness
+ * problem — realign() handles either case and is covered by tests at strides
+ * that do exercise it — but it does mean this build is not the one to trust
+ * for exercising it. The ring is also an exact multiple of the stride
+ * (16384 / 64 = 256), so records never wrap mid-record either. */
+typedef struct {
+    uint64_t ts_us;
+    uint64_t dropped;      /* running total at capture, in-band */
+    uint8_t  addr[6];
+    uint8_t  addr_type;
+    int8_t   rssi;
+    uint8_t  adv_type;
+    uint8_t  data_len;
+    uint16_t rsv;
+    uint8_t  data[BLE_STREAM_ADV_MAX];
+} ble_rec_t;
+
+static usbscpi_ring_t s_stream_ring;
+static uint8_t        s_stream_store[BLE_STREAM_RING_BYTES];
+static size_t         s_stream_on;
+static uint64_t       s_stream_count;
+static uint64_t       s_stream_dropped;
+
+usbscpi_ring_t *ble_stream_ring(void)   { return &s_stream_ring; }
+size_t   ble_stream_stride(void)        { return sizeof(ble_rec_t); }
+int      ble_stream_enabled(void)       { return usbscpi_load_acquire(&s_stream_on) != 0; }
+void     ble_stream_enable(int on)      { usbscpi_store_release(&s_stream_on, on ? 1u : 0u); }
+uint64_t ble_stream_count(void)         { return s_stream_count; }
+uint64_t ble_stream_dropped(void)       { return s_stream_dropped; }
+
+const char *ble_stream_fields(void) {
+    return "ts_us:u64:us,dropped:u64,addr:mac,addr_type:u8,rssi:i8:dbm,"
+           "adv_type:u8,data_len:u8,rsv:u16,data:bytes31";
+}
+
+/* Called from gap_event_cb on the NimBLE host task: the single producer. */
+static void stream_push(const ble_addr_t *addr, int8_t rssi, uint8_t adv_type,
+                        const uint8_t *adv, uint8_t adv_len) {
+    if (!ble_stream_enabled()) {
+        return;  /* not a drop: the counter measures loss from a running
+                  * capture, not time spent idle */
+    }
+    ble_rec_t r;
+    memset(&r, 0, sizeof r);
+    r.ts_us     = (uint64_t)esp_timer_get_time();
+    r.dropped   = s_stream_dropped;
+    memcpy(r.addr, addr->val, 6);
+    r.addr_type = addr->type;
+    r.rssi      = rssi;
+    r.adv_type  = adv_type;
+    r.data_len  = adv_len > BLE_STREAM_ADV_MAX ? BLE_STREAM_ADV_MAX : adv_len;
+    if (adv && r.data_len) {
+        memcpy(r.data, adv, r.data_len);
+    }
+    /* Capacity check first: usbscpi_ring_write() truncates to fit, and a
+     * truncated record desynchronises the consumer for every record after it.
+     * Drop whole records or none. */
+    if (usbscpi_ring_free(&s_stream_ring) < sizeof r) {
+        s_stream_dropped++;
+        return;
+    }
+    usbscpi_ring_write(&s_stream_ring, (const uint8_t *)&r, sizeof r);
+    s_stream_count++;
+}
 
 #define BLE_SCAN_MAX_DEV 20
 #define BLE_SCAN_NAME_LEN 32
@@ -70,6 +158,10 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
                  fields.name_len ? (const char *)fields.name : "");
         store_device(&event->disc.addr, event->disc.rssi,
                      event->disc.event_type, &fields);
+        /* Every report, not just the first per device: the dedup above is what
+         * makes the workflow unable to answer RSSI-over-time. */
+        stream_push(&event->disc.addr, event->disc.rssi, event->disc.event_type,
+                    event->disc.data, event->disc.length_data);
         return 0;
     }
     case BLE_GAP_EVENT_DISC_COMPLETE:
@@ -94,7 +186,28 @@ static void host_task(void *param) {
     nimble_port_freertos_deinit();
 }
 
+/* Continuous passive scan: duration 0 means "until stopped", which is what a
+ * stream wants. The workflow's timed scan stays as it is. */
+int ble_stream_scan_start(void) {
+    if (!s_ready) {
+        ESP_LOGE(TAG, "ble stream start: stack not synced");
+        return -1;
+    }
+    struct ble_gap_disc_params p = { 0 };
+    p.passive = 1;
+    p.filter_duplicates = 0;   /* duplicates ARE the signal here */
+    int rc = ble_gap_disc(s_own_addr_type, BLE_HS_FOREVER, &p, gap_event_cb, NULL);
+    if (rc != 0 && rc != BLE_HS_EALREADY) {
+        ESP_LOGE(TAG, "ble_gap_disc (stream) rc=%d", rc);
+        return -1;
+    }
+    return 0;
+}
+
 void ble_scan_init(void) {
+    if (usbscpi_ring_init(&s_stream_ring, s_stream_store, sizeof s_stream_store) != 0) {
+        ESP_LOGE(TAG, "ble stream ring init failed");
+    }
     if (nimble_port_init() != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init failed");
         return;

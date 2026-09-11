@@ -16,6 +16,7 @@
 #include "wifi_scan.h"
 #include "ble_scan.h"
 #include "ble_conn.h"
+#include "usbscpi_stream.h"
 
 static const char *TAG = "scpi";
 
@@ -455,7 +456,71 @@ static const usbscpi_descriptor_t s_descriptor = {
     .workflow_count = sizeof(desc_workflows) / sizeof(desc_workflows[0]),
 };
 
+/* ---- BLE RSSI data plane control ----------------------------------------
+ * The ble-scan workflow keeps one sample per device and so cannot answer
+ * "how did this RSSI move". These stream every advertisement report instead;
+ * both surfaces coexist. */
+
+static scpi_result_t cmd_stream_port(scpi_t *ctx) {
+    SCPI_ResultUInt32(ctx, 5026);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_stream_format(scpi_t *ctx) {
+    char buf[256];
+    snprintf(buf, sizeof buf, "ver=1,stride=%u,fields=%s",
+             (unsigned)ble_stream_stride(), ble_stream_fields());
+    SCPI_ResultCharacters(ctx, buf, strlen(buf));
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_stream_start(scpi_t *ctx) {
+    if (ble_stream_scan_start() != 0) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    ble_stream_enable(1);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_stream_stop(scpi_t *ctx) {
+    (void)ctx;
+    ble_stream_enable(0);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_stream_count(scpi_t *ctx) {
+    SCPI_ResultUInt64(ctx, ble_stream_count());
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_stream_dropped(scpi_t *ctx) {
+    SCPI_ResultUInt64(ctx, ble_stream_dropped());
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_stream_torn(scpi_t *ctx) {
+    SCPI_ResultUInt32(ctx, (uint32_t)usbscpi_stream_torn());
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_stream_state(scpi_t *ctx) {
+    char buf[64];
+    snprintf(buf, sizeof buf, "%d,%d",
+             ble_stream_enabled(), usbscpi_stream_attached());
+    SCPI_ResultCharacters(ctx, buf, strlen(buf));
+    return SCPI_RES_OK;
+}
+
 static const scpi_command_t demo_commands[] = {
+    { "SYSTem:STReam:PORT?",    cmd_stream_port,    0 },
+    { "SYSTem:STReam:STARt",    cmd_stream_start,   0 },
+    { "SYSTem:STReam:STOP",     cmd_stream_stop,    0 },
+    { "SYSTem:STReam:FORMat?",  cmd_stream_format,  0 },
+    { "SYSTem:STReam:COUNt?",   cmd_stream_count,   0 },
+    { "SYSTem:STReam:DROPped?", cmd_stream_dropped, 0 },
+    { "SYSTem:STReam:TORN?",    cmd_stream_torn,    0 },
+    { "SYSTem:STReam:STATe?",   cmd_stream_state,   0 },
     { "GPIO:SET",  cmd_gpio_set, 0 },
     { "GPIO:GET?", cmd_gpio_get, 0 },
     { "ADC:READ?", cmd_adc_read, 0 },
