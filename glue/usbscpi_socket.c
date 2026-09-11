@@ -1,73 +1,10 @@
-/* Must precede every include, including our own headers: inet_pton() and
- * ws2tcpip.h are Vista+, and the MinGW CRT headers latch _WIN32_WINNT to an
- * older default the first time any of them is pulled in. Raise it, but never
- * lower a value the consumer's build system already chose. */
-#if defined(_WIN32)
-#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
-#undef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600
-#endif
-#endif
+/* usbscpi_sock_compat.h must come first: it raises _WIN32_WINNT, which is
+ * only effective ahead of every other include. */
+#include "usbscpi_sock_compat.h"
 
 #include "usbscpi_socket.h"
 
 #include <string.h>
-
-/*
- * Platform block. The core is platform-free; this glue is where the socket API
- * differences live, and there are three of them: glibc, lwIP (ESP-IDF) and
- * Winsock. Everything below the block is written against the POSIX spelling.
- */
-#if defined(_WIN32)
-
-#include <limits.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-
-typedef SOCKET usbscpi_sock_t;
-#define USBSCPI_SOCK_INVALID INVALID_SOCKET
-#define usbscpi_closesocket  closesocket
-
-/* Winsock blocking calls do not return WSAEINTR outside of the long-removed
- * WSACancelBlockingCall, so the POSIX retry-on-EINTR branches are dead here. */
-static int sock_interrupted(void) { return 0; }
-
-static int sock_startup(void) {
-    WSADATA wsa;
-    return WSAStartup(MAKEWORD(2, 2), &wsa) == 0 ? 0 : -1;
-}
-static void sock_cleanup(void) { WSACleanup(); }
-
-#else /* POSIX / lwIP */
-
-#include <errno.h>
-#ifdef ESP_PLATFORM
-#include <lwip/netdb.h>
-#include <lwip/sockets.h>
-#else
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
-
-typedef int usbscpi_sock_t;
-#define USBSCPI_SOCK_INVALID (-1)
-#define usbscpi_closesocket  close
-
-static int  sock_interrupted(void) { return errno == EINTR; }
-static int  sock_startup(void)     { return 0; }
-static void sock_cleanup(void)     { }
-
-#endif
-
-/* send() must not raise SIGPIPE when the peer vanished mid-response; on a
- * daemon that would be fatal. lwIP defines MSG_NOSIGNAL too, but guard anyway.
- * Winsock has no SIGPIPE and no such flag. */
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
 
 #define USBSCPI_SOCKET_RX_BUF 512
 
@@ -103,7 +40,7 @@ int usbscpi_socket_tx(void *user, const uint8_t *data, size_t len, bool eom) {
             sent += (size_t)n;
             continue;
         }
-        if (n < 0 && sock_interrupted()) {
+        if (n < 0 && usbscpi_sock_interrupted()) {
             continue;
         }
         return -1;
@@ -130,7 +67,7 @@ static void serve_client(usbscpi_t *ctx, usbscpi_sock_t fd) {
             (void)usbscpi_on_rx(ctx, buf, (size_t)n, false);
             continue;
         }
-        if (n < 0 && sock_interrupted()) {
+        if (n < 0 && usbscpi_sock_interrupted()) {
             continue;
         }
         break; /* 0 = orderly close, <0 = error */
@@ -147,13 +84,13 @@ int usbscpi_socket_serve(usbscpi_t *ctx, const char *bind_addr, uint16_t port) {
     if (!ctx || !bind_addr) {
         return -1;
     }
-    if (sock_startup() != 0) {
+    if (usbscpi_sock_startup() != 0) {
         return -1;
     }
 
     usbscpi_sock_t lfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (lfd == USBSCPI_SOCK_INVALID) {
-        sock_cleanup();
+        usbscpi_sock_cleanup();
         return -1;
     }
 
@@ -187,7 +124,7 @@ int usbscpi_socket_serve(usbscpi_t *ctx, const char *bind_addr, uint16_t port) {
     for (;;) {
         usbscpi_sock_t fd = accept(lfd, NULL, NULL);
         if (fd == USBSCPI_SOCK_INVALID) {
-            if (sock_interrupted()) {
+            if (usbscpi_sock_interrupted()) {
                 continue;
             }
             break;
@@ -197,6 +134,6 @@ int usbscpi_socket_serve(usbscpi_t *ctx, const char *bind_addr, uint16_t port) {
 
 done:
     usbscpi_closesocket(lfd);
-    sock_cleanup();
+    usbscpi_sock_cleanup();
     return -1;
 }
