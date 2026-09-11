@@ -81,6 +81,18 @@ if(USBSCPI_BUILD_SOCKET_GLUE)
         target_link_libraries(usbscpi_socket_glue PUBLIC ws2_32)
     endif()
 
+    # Data plane: payload-agnostic record stream, device -> host.
+    add_library(usbscpi_stream_glue STATIC glue/usbscpi_stream.c)
+    target_link_libraries(usbscpi_stream_glue PUBLIC usbscpi_helpers)
+    target_include_directories(usbscpi_stream_glue PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/glue>
+    )
+    target_compile_features(usbscpi_stream_glue PUBLIC ${USBSCPI_C_STD})
+    target_compile_options(usbscpi_stream_glue PRIVATE ${USBSCPI_WARNINGS})
+    if(WIN32)
+        target_link_libraries(usbscpi_stream_glue PUBLIC ws2_32)
+    endif()
+
     # Desktop SCPI-over-TCP daemon (Linux, Windows, Pi 5): also the
     # hardware-free test rig for the Rust host.
     add_executable(usbscpi_daemon examples/daemon/main.c)
@@ -88,6 +100,28 @@ if(USBSCPI_BUILD_SOCKET_GLUE)
     target_compile_options(usbscpi_daemon PRIVATE ${USBSCPI_WARNINGS})
     set_target_properties(usbscpi_daemon PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples/daemon)
+
+    # Synthetic producer for the data plane. No CAN, no hardware: if the glue
+    # ever needs protocol knowledge, this stops being able to drive it.
+    if(NOT WIN32 AND USBSCPI_BUILD_TESTS)
+        find_package(Threads QUIET)
+        if(Threads_FOUND)
+            add_executable(stream_testgen tests/stream_testgen.c)
+            target_link_libraries(stream_testgen
+                PRIVATE usbscpi_stream_glue Threads::Threads)
+            target_compile_options(stream_testgen PRIVATE ${USBSCPI_WARNINGS})
+
+            find_package(Python3 COMPONENTS Interpreter QUIET)
+            if(Python3_FOUND AND NOT CMAKE_CROSSCOMPILING)
+                add_test(NAME test_stream_dataplane
+                    COMMAND ${Python3_EXECUTABLE}
+                            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_stream_dataplane.py
+                            $<TARGET_FILE:stream_testgen>)
+                # Backpressure and idle-CPU assertions need wall-clock room.
+                set_tests_properties(test_stream_dataplane PROPERTIES TIMEOUT 120)
+            endif()
+        endif()
+    endif()
 
     # Protocol smoke suite: real sockets, real response framing, real
     # reconnects — transport behaviour the C unit tests cannot reach. It
