@@ -391,6 +391,46 @@ Separately: a vendor interface has no Windows class driver and needs MS OS 2.0
 descriptors for WinUSB association, or Zadig. Pre-existing
 (`docs/add-log-endpoint.md:93`), and Option A would not have improved it.
 
+## Outcome
+
+All six stages implemented on `feat/data-plane`. Three things the plan got
+wrong, each found by a build or a test rather than by review:
+
+- **Lifting the platform shims put `<winsock2.h>` ahead of libscpi.** Windows
+  carries COM's legacy `#define interface struct`, and libscpi uses `interface`
+  as a struct member and a parameter name, so every Windows consumer failed to
+  compile. The header undefines it.
+- **Rule 6's own prescription was too strong.** Requiring C11 atomics would
+  have broken the MSVC path; GCC/Clang `__atomic_*` builtins work in C99, so
+  `c_std_99` stayed and nothing needed raising.
+- **A throttled producer cannot reach the backpressure paths at all.** The
+  device's own send buffer is megabytes, so `send()` never blocks and neither
+  overflow nor realignment is exercised. Every test that means to reach them
+  has to out-run that buffer, and how far depends on kernel auto-tuning.
+
+The last one recurred in three different disguises across Stages 3, 5 and 6. It
+is the single most important thing to know before touching this code.
+
+### Verified
+
+| Check | Result |
+| --- | --- |
+| Linux `ctest` | 6/6, stable across 8 consecutive runs |
+| ThreadSanitizer on the ring | clean; races reported with atomics stripped |
+| `cargo test` | 90 passed |
+| MinGW-w64 cross-build | clean |
+| ESP-IDF v5.2.2 | clean |
+| Windows 11 guest | 23/23 |
+| SocketCAN on `vcan0` | 21/21 end to end |
+
+Each new test is validated by negative control — realignment stubbed out,
+atomics stripped, the MTU clamp disabled — so it is known to fail when the
+thing it guards regresses.
+
+**Not covered:** real CAN hardware. `vcan0` exercises everything except bus
+timing and error frames. MSVC is still unbuilt; the guest has no Visual Studio.
+The USB binding (Annex B) is not implemented.
+
 ## Risks
 
 | Risk | Handling |
