@@ -101,6 +101,32 @@ if(USBSCPI_BUILD_SOCKET_GLUE)
     set_target_properties(usbscpi_daemon PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples/daemon)
 
+    # First protocol-specific consumer of the data plane. Linux only: SocketCAN
+    # has no equivalent elsewhere. Everything CAN-shaped lives here, never in
+    # the glue.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        find_package(Threads QUIET)
+        if(Threads_FOUND)
+            add_executable(usbscpi_can examples/can/main.c)
+            target_link_libraries(usbscpi_can
+                PRIVATE usbscpi_socket_glue usbscpi_stream_glue Threads::Threads)
+            target_compile_options(usbscpi_can PRIVATE ${USBSCPI_WARNINGS})
+            set_target_properties(usbscpi_can PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples/can)
+
+            # Needs a vcan interface and can-utils; the script skips cleanly
+            # when the rig has neither, rather than failing.
+            find_package(Python3 COMPONENTS Interpreter QUIET)
+            if(USBSCPI_BUILD_TESTS AND Python3_FOUND AND NOT CMAKE_CROSSCOMPILING)
+                add_test(NAME test_can_capture
+                    COMMAND ${Python3_EXECUTABLE}
+                            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_can_capture.py
+                            $<TARGET_FILE:usbscpi_can>)
+                set_tests_properties(test_can_capture PROPERTIES TIMEOUT 180)
+            endif()
+        endif()
+    endif()
+
     # Synthetic producer for the data plane. No CAN, no hardware: if the glue
     # ever needs protocol knowledge, this stops being able to drive it.
     if(NOT WIN32 AND USBSCPI_BUILD_TESTS)
