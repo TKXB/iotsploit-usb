@@ -420,7 +420,9 @@ is the single most important thing to know before touching this code.
 | `cargo test` | 90 passed |
 | MinGW-w64 cross-build | clean |
 | ESP-IDF v5.2.2 | clean |
-| Windows 11 guest | 23/23 |
+| Windows 11 guest — SCPI daemon | 23/23 |
+| Windows 11 guest — **data plane** | 8/8, 1 skipped (busy-spin check needs /proc) |
+| ESP32-S3 hardware | flashed, serving SCPI over Wi-Fi |
 | SocketCAN on `vcan0` | 21/21 end to end |
 
 Each new test is validated by negative control — realignment stubbed out,
@@ -429,7 +431,16 @@ thing it guards regresses.
 
 **Not covered:** real CAN hardware. `vcan0` exercises everything except bus
 timing and error frames. MSVC is still unbuilt; the guest has no Visual Studio.
-The USB binding (Annex B) is not implemented.
+The USB binding (Annex B) is not implemented — the stream glue now *compiles*
+for Xtensa/lwIP, but nothing on the device drives it yet.
+
+A note on how those Windows and ESP32 rows were earned, because the first
+attempt at this table was wrong: "cross-build clean" and "ESP-IDF clean" do not
+mean the new code was covered. `stream_testgen` was guarded `if(NOT WIN32)`, so
+the Windows runtime testing only ever exercised the unchanged SCPI daemon; and
+`glue/usbscpi_stream.c` was absent from the ESP-IDF source list entirely. A
+compile is not a run, and a green build of the wrong file list is not
+verification of anything.
 
 ## Risks
 
