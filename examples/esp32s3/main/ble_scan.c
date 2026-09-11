@@ -30,7 +30,7 @@ static const char *TAG = "ble";
 #define BLE_STREAM_RING_BYTES 16384u
 #define BLE_STREAM_ADV_MAX    31u
 
-/* 59 bytes of content, which the uint64_t members pad to a 64-byte stride.
+/* 89 bytes of content, which the uint64_t members pad to a 96-byte stride.
  *
  * Note that 64 IS a power of two, unlike the 20- and 88-byte strides used
  * elsewhere. Socket buffer space comes in round binary sizes, so a partial
@@ -40,15 +40,24 @@ static const char *TAG = "ble";
  * that do exercise it — but it does mean this build is not the one to trust
  * for exercising it. The ring is also an exact multiple of the stride
  * (16384 / 64 = 256), so records never wrap mid-record either. */
+#define BLE_STREAM_NAME_MAX 32u
+
 typedef struct {
     uint64_t ts_us;
     uint64_t dropped;      /* running total at capture, in-band */
+    /* Display order (MSB first), not NimBLE's little-endian addr.val, so
+     * `mac` in the schema means what a reader expects without every consumer
+     * having to know to reverse it. */
     uint8_t  addr[6];
     uint8_t  addr_type;
     int8_t   rssi;
     uint8_t  adv_type;
     uint8_t  data_len;
-    uint16_t rsv;
+    /* Parsed here rather than left buried in the payload: the name is what
+     * makes a row readable, and the device has already parsed the AD fields
+     * for the workflow anyway. The raw payload still ships alongside, so
+     * nothing is lost by including it. */
+    char     name[BLE_STREAM_NAME_MAX];
     uint8_t  data[BLE_STREAM_ADV_MAX];
 } ble_rec_t;
 
@@ -67,12 +76,13 @@ uint64_t ble_stream_dropped(void)       { return s_stream_dropped; }
 
 const char *ble_stream_fields(void) {
     return "ts_us:u64:us,dropped:u64,addr:mac,addr_type:u8,rssi:i8:dbm,"
-           "adv_type:u8,data_len:u8,rsv:u16,data:bytes31";
+           "adv_type:u8,data_len:u8,name:str32,data:bytes31";
 }
 
 /* Called from gap_event_cb on the NimBLE host task: the single producer. */
 static void stream_push(const ble_addr_t *addr, int8_t rssi, uint8_t adv_type,
-                        const uint8_t *adv, uint8_t adv_len) {
+                        const uint8_t *adv, uint8_t adv_len,
+                        const struct ble_hs_adv_fields *fields) {
     if (!ble_stream_enabled()) {
         return;  /* not a drop: the counter measures loss from a running
                   * capture, not time spent idle */
@@ -81,8 +91,16 @@ static void stream_push(const ble_addr_t *addr, int8_t rssi, uint8_t adv_type,
     memset(&r, 0, sizeof r);
     r.ts_us     = (uint64_t)esp_timer_get_time();
     r.dropped   = s_stream_dropped;
-    memcpy(r.addr, addr->val, 6);
+    for (int i = 0; i < 6; i++) {
+        r.addr[i] = addr->val[5 - i];   /* to display order */
+    }
     r.addr_type = addr->type;
+    if (fields && fields->name && fields->name_len) {
+        size_t n = fields->name_len;
+        if (n > BLE_STREAM_NAME_MAX - 1) n = BLE_STREAM_NAME_MAX - 1;
+        memcpy(r.name, fields->name, n);
+        r.name[n] = '\0';
+    }
     r.rssi      = rssi;
     r.adv_type  = adv_type;
     r.data_len  = adv_len > BLE_STREAM_ADV_MAX ? BLE_STREAM_ADV_MAX : adv_len;
@@ -161,7 +179,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         /* Every report, not just the first per device: the dedup above is what
          * makes the workflow unable to answer RSSI-over-time. */
         stream_push(&event->disc.addr, event->disc.rssi, event->disc.event_type,
-                    event->disc.data, event->disc.length_data);
+                    event->disc.data, event->disc.length_data, &fields);
         return 0;
     }
     case BLE_GAP_EVENT_DISC_COMPLETE:
@@ -194,7 +212,12 @@ int ble_stream_scan_start(void) {
         return -1;
     }
     struct ble_gap_disc_params p = { 0 };
-    p.passive = 1;
+    /* Active, unlike the workflow's passive scan: most devices put their name
+     * only in the SCAN RESPONSE, which a passive scan never asks for, so a
+     * passive stream reports every name as empty. Active scanning transmits
+     * SCAN_REQ, which costs power and makes this scanner observable — an
+     * acceptable trade when the name is half the point of the row. */
+    p.passive = 0;
     p.filter_duplicates = 0;   /* duplicates ARE the signal here */
     int rc = ble_gap_disc(s_own_addr_type, BLE_HS_FOREVER, &p, gap_event_cb, NULL);
     if (rc != 0 && rc != BLE_HS_EALREADY) {
