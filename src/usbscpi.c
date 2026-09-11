@@ -168,6 +168,32 @@ static scpi_result_t cmd_data_count(scpi_t *scpi) {
     return SCPI_RES_OK;
 }
 
+/* Largest payload whose encoded definite-length block still fits `mtu`.
+ * Encoding is '#' + one digit-count char + the length digits + payload +
+ * '\n', so the overhead is ndigits + 3. Shrinking
+ * the payload can shorten the digit count and so free a byte or two back, but
+ * one refinement pass is enough — being a byte conservative costs nothing, and
+ * the loop must terminate. mtu == 0 means no limit configured. */
+static size_t block_fit(size_t want, size_t mtu) {
+    if (mtu == 0) {
+        return want;
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        size_t temp = want;
+        size_t ndigits = 0;
+        do { ndigits++; temp /= 10; } while (temp > 0);
+        size_t overhead = ndigits + 3;
+        if (overhead >= mtu) {
+            return 0;
+        }
+        if (want + overhead <= mtu) {
+            return want;
+        }
+        want = mtu - overhead;
+    }
+    return want;
+}
+
 static scpi_result_t cmd_data_read(scpi_t *scpi) {
     usbscpi_t *ctx = scpi_owner(scpi);
     if (!ctx) return SCPI_RES_ERR;
@@ -185,21 +211,15 @@ static scpi_result_t cmd_data_read(scpi_t *scpi) {
     size_t to_read = count;
     if (to_read > ctx->cfg.io_buf_len) to_read = ctx->cfg.io_buf_len;
     if (to_read > avail) to_read = avail;
+    /* Clamp BEFORE consuming. data_read() removes bytes from the source, so
+     * checking the MTU afterwards and failing would throw away readings the
+     * caller can never ask for again. A caller draining a buffer wants a short
+     * block, not an error and a hole. */
+    to_read = block_fit(to_read, ctx->cfg.mtu);
 
     size_t actual = 0;
     if (to_read > 0 && ctx->cfg.data_read && ctx->cfg.io_buf) {
         actual = ctx->cfg.data_read(ctx->cfg.user, ctx->cfg.io_buf, to_read);
-    }
-
-    if (ctx->cfg.mtu) {
-        size_t temp = actual;
-        int ndigits = 0;
-        do { ndigits++; temp /= 10; } while (temp > 0);
-        size_t total = 1 + (size_t)ndigits + actual + 1; /* # + digits + payload + \n */
-        if (total > ctx->cfg.mtu) {
-            SCPI_ErrorPush(scpi, SCPI_ERROR_TOO_MUCH_DATA);
-            return SCPI_RES_ERR;
-        }
     }
 
     SCPI_ResultArbitraryBlock(scpi, ctx->cfg.io_buf, actual);

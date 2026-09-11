@@ -247,6 +247,78 @@ static size_t test_data_read(void *user, uint8_t *buf, size_t len) {
     return len;
 }
 
+/* The stub above synthesizes bytes and can be read forever, so it cannot show
+ * whether an over-large request destroys data. This one actually consumes. */
+static size_t drain_src_remaining;
+
+static size_t drain_src_avail(void *user) {
+    (void)user;
+    return drain_src_remaining;
+}
+
+static size_t drain_src_read(void *user, uint8_t *buf, size_t len) {
+    (void)user;
+    if (len > drain_src_remaining) len = drain_src_remaining;
+    for (size_t i = 0; i < len; i++) {
+        buf[i] = (uint8_t)(i & 0xFF);
+    }
+    drain_src_remaining -= len;  /* gone: the caller cannot ask for it again */
+    return len;
+}
+
+/* DATA:READ? used to call data_read() and only then check the MTU, returning
+ * an error with the readings already consumed and unrecoverable. It must clamp
+ * first and return a short block instead. */
+static void test_data_read_clamps_before_consuming(void) {
+    fixture_t f;
+    uint8_t storage[2048];
+    char line[96];
+    uint8_t io_buf[256];
+    usbscpi_config_t cfg = {
+        .usb_tx = tx_cb,
+        .line_buf = line,
+        .line_buf_len = sizeof(line),
+        .max_block_len = 4096,
+        .idn = "Test,USBSCPI,SN1,0.1.0",
+        .data_avail = drain_src_avail,
+        .data_read = drain_src_read,
+        .io_buf = io_buf,
+        .io_buf_len = sizeof(io_buf),
+        .proto = 1,
+        .mtu = 64,           /* far smaller than the request below */
+        .user = &f,
+    };
+    memset(&f, 0, sizeof(f));
+    usbscpi_t *dev = usbscpi_init(storage, sizeof(storage), &cfg);
+    assert(dev);
+
+    drain_src_remaining = 200;
+    f.tx_len = 0;
+    f.tx[0] = '\0';
+    assert(usbscpi_on_rx(dev, "DATA:READ? 200\n", 15, true) == USBSCPI_OK);
+
+    /* A block, not an error. */
+    assert(f.tx_len > 0);
+    assert(f.tx[0] == '#');
+    size_t ndigits = (size_t)(f.tx[1] - '0');
+    size_t payload = 0;
+    for (size_t i = 0; i < ndigits; i++) {
+        payload = payload * 10 + (size_t)(f.tx[2 + i] - '0');
+    }
+    assert(payload > 0);
+    /* The whole encoded response honours the MTU. */
+    assert(2 + ndigits + payload + 1 == f.tx_len);
+    assert(f.tx_len <= cfg.mtu);
+    /* And exactly what was returned was consumed — nothing was thrown away. */
+    assert(drain_src_remaining == 200 - payload);
+
+    /* No error was queued. */
+    f.tx_len = 0;
+    f.tx[0] = '\0';
+    assert(usbscpi_on_rx(dev, "SYST:ERR:COUN?\n", 16, true) == USBSCPI_OK);
+    assert(strcmp(f.tx, "0\n") == 0);
+}
+
 static void test_new_default_commands(void) {
     fixture_t f;
     uint8_t storage[2048];
@@ -542,6 +614,7 @@ int main(void) {
     test_error_queue_and_free_query();
     test_batch_survives_failing_command();
     test_new_default_commands();
+    test_data_read_clamps_before_consuming();
     test_descriptor_query();
     test_descriptor_unsupported();
     test_ring_buffer();
