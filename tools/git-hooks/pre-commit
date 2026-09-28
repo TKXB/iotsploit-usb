@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Enable explicitly: git config core.hooksPath tools/git-hooks
+set -euo pipefail
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+exec "$REPO_ROOT/tools/testing/test-c-full.sh"
