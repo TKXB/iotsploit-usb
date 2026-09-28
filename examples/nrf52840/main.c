@@ -419,6 +419,9 @@ static const usbscpi_workflow_desc_t desc_workflows[] = {
         .done_value = "1",
         .count_query = "BLE:SCAN:COUNt?",
         .fetch_query = "BLE:SCAN:RESult?",
+        /* Columns of each scan row (see scan_row_reply); without them hosts show
+         * the raw CSV line. Names match the ESP32-S3 ble-scan. */
+        .fields = "addr:mac,rssi:i32:dbm,name:string,conn:string",
         .state_query = NULL,
         .success_value = NULL,
         .failed_values = NULL,
