@@ -76,11 +76,13 @@ static scpi_result_t cmd_ble_sniff_stop(scpi_t *ctx) {
 
 /* 1 = window finished, 0 = still capturing. */
 static scpi_result_t cmd_ble_sniff_done(scpi_t *ctx) {
-    return SCPI_ResultUInt32(ctx, ble_sniff_is_active() ? 0 : 1);
+    SCPI_ResultUInt32(ctx, ble_sniff_is_active() ? 0 : 1);
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_sniff_count(scpi_t *ctx) {
-    return SCPI_ResultUInt32(ctx, ble_sniff_count());
+    SCPI_ResultUInt32(ctx, ble_sniff_count());
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_sniff_packet(scpi_t *ctx) {
@@ -93,11 +95,13 @@ static scpi_result_t cmd_ble_sniff_packet(scpi_t *ctx) {
         SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
         return SCPI_RES_ERR;
     }
-    return SCPI_ResultCharacters(ctx, row, n);
+    SCPI_ResultCharacters(ctx, row, n);
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_sniff_dropped(scpi_t *ctx) {
-    return SCPI_ResultUInt32(ctx, ble_sniff_dropped());
+    SCPI_ResultUInt32(ctx, ble_sniff_dropped());
+    return SCPI_RES_OK;
 }
 
 /* BLE:CHANnel <n> — select the advertising channel while idle. */
@@ -113,7 +117,8 @@ static scpi_result_t cmd_ble_channel_set(scpi_t *ctx) {
 }
 
 static scpi_result_t cmd_ble_channel_get(scpi_t *ctx) {
-    return SCPI_ResultUInt32(ctx, ble_sniff_get_channel());
+    SCPI_ResultUInt32(ctx, ble_sniff_get_channel());
+    return SCPI_RES_OK;
 }
 
 /* BLE:INJect <hex> — transmit a raw advertising PDU (hex text, no binary block). */

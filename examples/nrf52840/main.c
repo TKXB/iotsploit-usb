@@ -40,11 +40,13 @@ static scpi_result_t cmd_ble_scan_stop(scpi_t *ctx) {
 }
 
 static scpi_result_t cmd_ble_scan_state(scpi_t *ctx) {
-    return SCPI_ResultUInt32(ctx, ble_scan_is_scanning() ? 1 : 0);
+    SCPI_ResultUInt32(ctx, ble_scan_is_scanning() ? 1 : 0);
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_scan_count(scpi_t *ctx) {
-    return SCPI_ResultUInt32(ctx, ble_scan_count());
+    SCPI_ResultUInt32(ctx, ble_scan_count());
+    return SCPI_RES_OK;
 }
 
 /* Format scan result #index as a CSV row and return it, or push a range error.
@@ -64,7 +66,8 @@ static scpi_result_t scan_row_reply(scpi_t *ctx, uint32_t index) {
              r.addr[5], r.addr[4], r.addr[3], r.addr[2], r.addr[1], r.addr[0],
              r.rssi, r.name[0] ? r.name : "(unknown)",
              r.adv_type == 0 ? 'C' : 'N');
-    return SCPI_ResultCharacters(ctx, buf, strlen(buf));
+    SCPI_ResultCharacters(ctx, buf, strlen(buf));
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_scan_result(scpi_t *ctx) {
@@ -97,7 +100,8 @@ static scpi_result_t cmd_ble_scan_timed(scpi_t *ctx) {
 
 static scpi_result_t cmd_ble_scan_done(scpi_t *ctx) {
     /* 1 = scan finished, 0 = still scanning (inverse of BLE:SCAN:STATe?). */
-    return SCPI_ResultUInt32(ctx, ble_scan_is_scanning() ? 0 : 1);
+    SCPI_ResultUInt32(ctx, ble_scan_is_scanning() ? 0 : 1);
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_scan_query(scpi_t *ctx) {
@@ -115,7 +119,8 @@ static scpi_result_t cmd_ble_confirm_stub(scpi_t *ctx) {
 }
 
 static scpi_result_t cmd_ble_numcmp_stub(scpi_t *ctx) {
-    return SCPI_ResultUInt32(ctx, 0);
+    SCPI_ResultUInt32(ctx, 0);
+    return SCPI_RES_OK;
 }
 
 /* ---------- BLE connect / pair SCPI command callbacks ---------- */
@@ -127,11 +132,13 @@ static scpi_result_t cmd_ble_conn(scpi_t *ctx) {
 }
 
 static scpi_result_t cmd_ble_conn_state(scpi_t *ctx) {
-    return SCPI_ResultInt32(ctx, ble_conn_state());
+    SCPI_ResultInt32(ctx, ble_conn_state());
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_conn_status(scpi_t *ctx) {
-    return SCPI_ResultInt32(ctx, ble_conn_last_status());
+    SCPI_ResultInt32(ctx, ble_conn_last_status());
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_cpair(scpi_t *ctx) {
@@ -141,7 +148,8 @@ static scpi_result_t cmd_ble_cpair(scpi_t *ctx) {
 }
 
 static scpi_result_t cmd_ble_cpair_state(scpi_t *ctx) {
-    return SCPI_ResultInt32(ctx, ble_connpair_state());
+    SCPI_ResultInt32(ctx, ble_connpair_state());
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_auto(scpi_t *ctx) {
@@ -153,7 +161,8 @@ static scpi_result_t cmd_ble_auto(scpi_t *ctx) {
 }
 
 static scpi_result_t cmd_ble_auto_state(scpi_t *ctx) {
-    return SCPI_ResultInt32(ctx, ble_auto_state());
+    SCPI_ResultInt32(ctx, ble_auto_state());
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_disconnect(scpi_t *ctx) {
@@ -167,7 +176,8 @@ static scpi_result_t cmd_ble_pair(scpi_t *ctx) {
 }
 
 static scpi_result_t cmd_ble_pair_state(scpi_t *ctx) {
-    return SCPI_ResultInt32(ctx, ble_pair_state());
+    SCPI_ResultInt32(ctx, ble_pair_state());
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_passkey(scpi_t *ctx) {
@@ -184,7 +194,8 @@ static scpi_result_t cmd_ble_passkey_get(scpi_t *ctx) {
     }
     char buf[8];
     snprintf(buf, sizeof(buf), "%06lu", (unsigned long)key);
-    return SCPI_ResultCharacters(ctx, buf, strlen(buf));
+    SCPI_ResultCharacters(ctx, buf, strlen(buf));
+    return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_ble_sec(scpi_t *ctx) {
@@ -193,7 +204,8 @@ static scpi_result_t cmd_ble_sec(scpi_t *ctx) {
         SCPI_ErrorPush(ctx, SCPI_ERROR_EXECUTION_ERROR);
         return SCPI_RES_ERR;
     }
-    return SCPI_ResultCharacters(ctx, buf, strlen(buf));
+    SCPI_ResultCharacters(ctx, buf, strlen(buf));
+    return SCPI_RES_OK;
 }
 
 static const scpi_command_t ble_commands[] = {

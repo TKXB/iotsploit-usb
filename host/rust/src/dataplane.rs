@@ -20,7 +20,7 @@ use std::io::{ErrorKind, Read};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use crate::{session::ScpiSession, transport::Transport, Error, Result};
+use crate::{headers::fetch_headers, session::ScpiSession, transport::Transport, Error, Result};
 
 /// Record layout advertised by the device.
 ///
@@ -72,8 +72,21 @@ impl StreamFormat {
 /// Ask the device where its data plane is and what it emits.
 ///
 /// Returns `None` when the device advertises port 0, which is how a build
-/// without a data plane says so.
+/// without a data plane says so, or when it does not implement
+/// `SYSTem:STReam:PORT?` at all.
+///
+/// The header is checked before it is asked. A device without it (butterfly
+/// nRF52840) answers the query with an empty reply and queues -113 "Undefined
+/// header" — and a stale error there is read back by the next command that
+/// verifies itself via `SYSTem:ERRor?`, which then reports *its own* command as
+/// rejected. Probing on connect must leave nothing behind.
 pub fn discover<T: Transport>(s: &mut ScpiSession<T>) -> Result<Option<(u16, StreamFormat)>> {
+    let has_port = fetch_headers(s, None)?
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case("SYSTem:STReam:PORT?"));
+    if !has_port {
+        return Ok(None);
+    }
     let port: u16 = s
         .query("SYSTem:STReam:PORT?")?
         .trim()
@@ -208,6 +221,55 @@ impl GapTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
+    /// Replays canned replies and records every message sent.
+    struct Scripted {
+        sent: Vec<String>,
+        replies: VecDeque<&'static str>,
+    }
+
+    impl Transport for Scripted {
+        fn write_msg(&mut self, bytes: &[u8]) -> Result<()> {
+            self.sent.push(String::from_utf8_lossy(bytes).trim_end().to_string());
+            Ok(())
+        }
+        fn read_msg(&mut self, _max_len: usize) -> Result<Vec<u8>> {
+            let r = self.replies.pop_front().expect("unexpected read");
+            Ok(r.as_bytes().to_vec())
+        }
+    }
+
+    fn scripted(replies: &[&'static str]) -> ScpiSession<Scripted> {
+        ScpiSession::new(Scripted { sent: Vec::new(), replies: replies.iter().copied().collect() })
+    }
+
+    #[test]
+    fn discover_never_asks_a_device_without_a_data_plane() {
+        // butterfly nRF52840: no SYSTem:STReam:* at all. Asking would queue
+        // -113 for the next verified command to trip over.
+        let mut s = scripted(&["*IDN?\nBLE:SNIFf\nBLE:SNIFf:DONE?\n\n"]);
+        assert_eq!(discover(&mut s).unwrap(), None);
+        assert_eq!(s.transport().sent, ["SYST:HELP:HEAD?"]);
+    }
+
+    #[test]
+    fn discover_reads_port_and_format_when_advertised() {
+        let mut s = scripted(&[
+            "*IDN?\nSYSTem:STReam:PORT?\nSYSTem:STReam:FORMat?\n\n",
+            "5026\n",
+            "ver=1,stride=16,fields=ts:u64,v:u64\n",
+        ]);
+        let (port, fmt) = discover(&mut s).unwrap().unwrap();
+        assert_eq!(port, 5026);
+        assert_eq!(fmt.stride, 16);
+    }
+
+    #[test]
+    fn discover_treats_port_zero_as_no_data_plane() {
+        let mut s = scripted(&["SYSTem:STReam:PORT?\n\n", "0\n"]);
+        assert_eq!(discover(&mut s).unwrap(), None);
+    }
 
     #[test]
     fn parses_a_format_string() {
