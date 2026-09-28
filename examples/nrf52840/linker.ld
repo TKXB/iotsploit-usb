@@ -1,6 +1,9 @@
 /* Linker script for nRF52840 with SoftDevice s140 (BLE stack).
  * Flash starts after SoftDevice (0x27000), RAM shared with SoftDevice.
- * Based on nRF5 SDK usbd_ble_uart example. */
+ * Based on nRF5 SDK usbd_ble_uart example.
+ * RAM origin leaves headroom over what s140 needs for 1 central + 1 peripheral
+ * link (0x20002b28 sufficed for the central alone); a start below the
+ * SoftDevice's requirement makes nrf_sdh_ble_enable() fail and BLE stay off. */
 
 SEARCH_DIR(.)
 GROUP(-lgcc -lc -lnosys)
@@ -8,7 +11,7 @@ GROUP(-lgcc -lc -lnosys)
 MEMORY
 {
   FLASH (rx) : ORIGIN = 0x27000, LENGTH = 0xd9000
-  RAM (rwx) : ORIGIN = 0x20002b28, LENGTH = 0x3d4d8
+  RAM (rwx) : ORIGIN = 0x20004000, LENGTH = 0x3c000
 }
 
 SECTIONS

@@ -29,6 +29,7 @@ CFLAGS += -DNRF_SDH_BLE_ENABLED=1
 CFLAGS += -DNRF_SDH_ENABLED=1
 CFLAGS += -DNRF_SDH_SOC_ENABLED=1
 CFLAGS += -DSCPI_USER_CONFIG=1
+CFLAGS += -DUSBSCPI_TINYUSB_TX_BUF_SIZE=8192u   # must hold SYST:HELP:DESC? (see main.c)
 CFLAGS += -DS140
 CFLAGS += -DSOFTDEVICE_PRESENT
 CFLAGS += -mcpu=cortex-m4
@@ -110,6 +111,7 @@ SRC_FILES += \
   $(PROJ_DIR)/usb_descriptors.c \
   $(PROJ_DIR)/ble_scan_handler.c \
   $(PROJ_DIR)/ble_conn_handler.c \
+  $(PROJ_DIR)/ble_periph_handler.c \
   $(USBSCPI_ROOT)/src/usbscpi.c \
   $(wildcard $(USBSCPI_ROOT)/third_party/libscpi/src/*.c) \
   $(USBSCPI_ROOT)/glue/usbscpi_tinyusb.c \

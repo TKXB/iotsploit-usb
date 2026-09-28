@@ -143,8 +143,20 @@ static void ble_evt_handler(ble_evt_t const *p_ble_evt, void *p_context)
 {
     (void)p_context;
     const ble_gap_evt_t *gap = &p_ble_evt->evt.gap_evt;
+    uint16_t id = p_ble_evt->header.evt_id;
 
-    switch (p_ble_evt->header.evt_id) {
+    /* Peripheral links belong to ble_periph_handler.c. Only a CONNECTED event
+     * carries the role; after it, events are ours only on our handle (the
+     * TIMEOUT for a central connect attempt carries no handle yet). */
+    if (id == BLE_GAP_EVT_CONNECTED) {
+        if (gap->params.connected.role != BLE_GAP_ROLE_CENTRAL) {
+            return;
+        }
+    } else if (id != BLE_GAP_EVT_TIMEOUT && gap->conn_handle != s_conn_handle) {
+        return;
+    }
+
+    switch (id) {
 
     case BLE_GAP_EVT_CONNECTED:
         s_conn_handle = gap->conn_handle;

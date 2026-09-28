@@ -6,6 +6,7 @@
 #include "usbscpi_tinyusb.h"
 #include "ble_scan_handler.h"
 #include "ble_conn_handler.h"
+#include "ble_periph_handler.h"
 #include "nrfx_power.h"
 #include "nrfx_clock.h"
 #include "app_error.h"
@@ -15,10 +16,14 @@
 /* ---------- Static buffers (no dynamic allocation) ---------- */
 static uint8_t s_storage[2048];
 static char    s_line[96];
-/* io_buf doubles as the SYST:HELP:DESC? render buffer. With the scan + connect +
-   pair command set and three workflows the rendered line-record text is ~2 KiB,
-   so size it well above both that and the 256-byte mtu. */
-static uint8_t s_io[4096];
+/* io_buf doubles as the SYST:HELP:DESC? render buffer. With the scan, connect,
+   pair and peripheral command sets and four workflows the rendered line-record
+   text is ~4.3 KiB. The render fails outright once it outgrows io_buf or
+   max_block_len, and USB needs the TinyUSB glue's TX buffer to hold the whole
+   reply (USBSCPI_TINYUSB_TX_BUF_SIZE, set in the Makefile): keep all three at
+   the same size. */
+#define DESC_BUF_SIZE 8192
+static uint8_t s_io[DESC_BUF_SIZE];
 
 /* ---------- USB TX callback via TinyUSB glue ---------- */
 static int usb_tx(void *user, const uint8_t *data, size_t len, bool eom) {
@@ -208,6 +213,62 @@ static scpi_result_t cmd_ble_sec(scpi_t *ctx) {
     return SCPI_RES_OK;
 }
 
+/* ---------- BLE peripheral SCPI command callbacks ---------- */
+
+static scpi_result_t cmd_ble_adv_start(scpi_t *ctx) {
+    uint32_t io = 4;                               /* KeyboardDisplay when omitted */
+    (void)SCPI_ParamUInt32(ctx, &io, FALSE);
+    if (io > 4 || ble_periph_start((uint8_t)io) != 0) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_ble_adv_stop(scpi_t *ctx) {
+    (void)ctx;
+    ble_periph_stop();
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_ble_periph_state(scpi_t *ctx) {
+    SCPI_ResultInt32(ctx, ble_periph_state());
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_ble_periph_status(scpi_t *ctx) {
+    SCPI_ResultInt32(ctx, ble_periph_last_status());
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_ble_periph_passkey(scpi_t *ctx) {
+    uint32_t key = 0;
+    if (SCPI_ParamUInt32(ctx, &key, TRUE) != TRUE) return SCPI_RES_ERR;
+    return ble_periph_passkey(key) == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
+}
+
+static scpi_result_t cmd_ble_periph_passkey_get(scpi_t *ctx) {
+    uint32_t key = 0;
+    if (ble_periph_passkey_get(&key) != 0) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%06lu", (unsigned long)key);
+    SCPI_ResultCharacters(ctx, buf, strlen(buf));
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_ble_periph_sec(scpi_t *ctx) {
+    char buf[128];
+    if (ble_periph_sec_info(buf, sizeof(buf)) != 0) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    SCPI_ResultCharacters(ctx, buf, strlen(buf));
+    return SCPI_RES_OK;
+}
+
 static const scpi_command_t ble_commands[] = {
     { "BLE:SCAN:START",   cmd_ble_scan_start,  0 },
     { "BLE:SCAN:STOP",    cmd_ble_scan_stop,    0 },
@@ -235,6 +296,13 @@ static const scpi_command_t ble_commands[] = {
     { "BLE:PAIR:CONFirm",    cmd_ble_confirm_stub, 0 },
     { "BLE:PAIR:NUMCmp?",    cmd_ble_numcmp_stub,  0 },
     { "BLE:SEC?",            cmd_ble_sec,         0 },
+    { "BLE:ADV:STARt",          cmd_ble_adv_start,          0 },
+    { "BLE:ADV:STOP",           cmd_ble_adv_stop,           0 },
+    { "BLE:PERiph:STATe?",      cmd_ble_periph_state,       0 },
+    { "BLE:PERiph:STATus?",     cmd_ble_periph_status,      0 },
+    { "BLE:PERiph:PASSKey",     cmd_ble_periph_passkey,     0 },
+    { "BLE:PERiph:PASSKey?",    cmd_ble_periph_passkey_get, 0 },
+    { "BLE:PERiph:SEC?",        cmd_ble_periph_sec,         0 },
     SCPI_CMD_LIST_END
 };
 
@@ -256,6 +324,9 @@ static const usbscpi_param_desc_t desc_ble_passkey_params[] = {
 };
 static const usbscpi_param_desc_t desc_ble_auto_params[] = {
     { "filter", "string", false },
+};
+static const usbscpi_param_desc_t desc_ble_adv_params[] = {
+    { "io", "u32", false },
 };
 
 static const usbscpi_command_desc_t desc_commands[] = {
@@ -297,10 +368,25 @@ static const usbscpi_command_desc_t desc_commands[] = {
       NULL, 0, "string" },
     { "BLE:SEC?",            "query",   "Security info: mac,level,encrypted,authenticated,bonded,key_size",
       NULL, 0, "string" },
+    { "BLE:ADV:STARt",       "command", "Advertise as a peripheral; io=0 DisplayOnly 1 DisplayYesNo 2 KeyboardOnly 3 NoIO 4 KeyboardDisplay (default)",
+      desc_ble_adv_params, 1, NULL },
+    { "BLE:ADV:STOP",        "command", "Stop advertising and drop the peripheral link",
+      NULL, 0, NULL },
+    { "BLE:PERiph:STATe?",   "query",   "0=idle 1=advertising 2=connected 3=pairing 4=passkey 5=display 6=done 7=failed",
+      NULL, 0, "u32" },
+    { "BLE:PERiph:STATus?",  "query",   "Last peripheral GAP/SMP status code",
+      NULL, 0, "u32" },
+    { "BLE:PERiph:PASSKey",  "command", "Enter the 6-digit passkey the central shows",
+      desc_ble_passkey_params, 1, NULL },
+    { "BLE:PERiph:PASSKey?", "query",   "Get the passkey to enter on the central",
+      NULL, 0, "string" },
+    { "BLE:PERiph:SEC?",     "query",   "Peripheral link: mac,method,lesc,sec_mode,sec_level,encrypted,authenticated,bonded,key_size,peer_io,peer_bond,peer_mitm",
+      NULL, 0, "string" },
 };
 
 static const char *const desc_cpair_failed[] = { "6" };
 static const char *const desc_auto_failed[]  = { "7" };
+static const char *const desc_periph_failed[] = { "7" };
 
 /* Connect+pair prompts keyed by BLE:CPAIR:STATe? (see enum in ble_conn_handler.h):
  *   3 passkey  -> host types the passkey the peer displays
@@ -308,6 +394,11 @@ static const char *const desc_auto_failed[]  = { "7" };
 static const usbscpi_prompt_desc_t desc_cpair_prompts[] = {
     { "3", "passkey", "BLE:PAIR:PASSKey", NULL },
     { "4", "display", NULL,               "BLE:PAIR:PASSKey?" },
+};
+/* Peripheral prompts keyed by BLE:PERiph:STATe?. */
+static const usbscpi_prompt_desc_t desc_periph_prompts[] = {
+    { "4", "passkey", "BLE:PERiph:PASSKey", NULL },
+    { "5", "display", NULL,                 "BLE:PERiph:PASSKey?" },
 };
 /* Same prompts for the fully automatic workflow, keyed by BLE:AUTO:STATe?. */
 static const usbscpi_prompt_desc_t desc_auto_prompts[] = {
@@ -365,6 +456,24 @@ static const usbscpi_workflow_desc_t desc_workflows[] = {
         .result_query = "BLE:SEC?",
         .result_fields = "mac:mac,level:string,encrypted:bool,authenticated:bool,bonded:bool,key_size:u32",
         .timeout_ms = 60000,
+        .poll_ms = 300,
+    },
+    {
+        /* A person has to connect from a phone or PC, so allow two minutes. */
+        .name = "ble-peripheral",
+        .type = "trigger_poll_interactive",
+        .summary = "Advertise as a peripheral; report how a phone or PC connected and paired",
+        .trigger_cmd = "BLE:ADV:STARt",
+        .state_query = "BLE:PERiph:STATe?",
+        .success_value = "6",
+        .failed_values = desc_periph_failed,
+        .failed_value_count = 1,
+        .prompts = desc_periph_prompts,
+        .prompt_count = sizeof(desc_periph_prompts) / sizeof(desc_periph_prompts[0]),
+        .result_query = "BLE:PERiph:SEC?",
+        .result_fields = "mac:mac,method:string,lesc:bool,sec_mode:u32,sec_level:u32,encrypted:bool,"
+                         "authenticated:bool,bonded:bool,key_size:u32,peer_io:string,peer_bond:bool,peer_mitm:bool",
+        .timeout_ms = 120000,
         .poll_ms = 300,
     },
 };
@@ -512,7 +621,7 @@ int main(void) {
         .usb_tx        = usb_tx,
         .line_buf      = s_line,
         .line_buf_len  = sizeof(s_line),
-        .max_block_len = 4096,
+        .max_block_len = DESC_BUF_SIZE,
         .idn           = "IoTSploit,nRF52840,0001,0.1.0",
         .io_buf        = s_io,
         .io_buf_len    = sizeof(s_io),
@@ -529,6 +638,9 @@ int main(void) {
      * connect/pair BLE observer (harmless if the SoftDevice failed to start —
      * connect/pair commands then simply error). */
     ble_conn_init();
+    if (sd_on) {
+        ble_periph_init();
+    }
 
     /* 4. Main loop: pump USB + BLE events + the BLE:AUTO scan/select step */
     while (1) {
