@@ -214,7 +214,6 @@ usbtmc_response_capabilities_t const *tud_usbtmc_get_capabilities_cb(void) {
 
 /* tud_usbtmc_open_cb is provided by the iotsploit-usb TinyUSB glue
  * (it arms the first bulk-OUT read); do not define it here. */
-bool tud_usbtmc_msgBulkOut_start_cb(usbtmc_msg_request_dev_dep_out const *msg) { (void)msg; return true; }
 bool tud_usbtmc_initiate_abort_bulk_out_cb(uint8_t *tmcResult) { *tmcResult = USBTMC_STATUS_SUCCESS; return true; }
 bool tud_usbtmc_check_abort_bulk_out_cb(usbtmc_check_abort_bulk_rsp_t *rsp) { rsp->USBTMC_status = USBTMC_STATUS_SUCCESS; return true; }
 bool tud_usbtmc_initiate_abort_bulk_in_cb(uint8_t *tmcResult) { *tmcResult = USBTMC_STATUS_SUCCESS; return true; }

@@ -336,7 +336,7 @@ Route any out-of-band device-to-host bytes (e.g. UDS replies) through
 The glue does **not** cover the remaining strong-symbol USBTMC callbacks that
 TinyUSB's `usbtmc_device.c` requires (they have no library default). Every
 application must still define them or the link fails - see `examples/pico2/main.c`:
-`tud_usbtmc_get_capabilities_cb`, `tud_usbtmc_msgBulkOut_start_cb`,
+`tud_usbtmc_get_capabilities_cb`,
 `tud_usbtmc_initiate_abort_bulk_out_cb`, `tud_usbtmc_check_abort_bulk_out_cb`,
 `tud_usbtmc_initiate_abort_bulk_in_cb`, `tud_usbtmc_check_abort_bulk_in_cb`,
 `tud_usbtmc_initiate_clear_cb`, `tud_usbtmc_check_clear_cb`.

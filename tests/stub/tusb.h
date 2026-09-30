@@ -16,6 +16,10 @@
 #define USBTMC_STATUS_SUCCESS 0x01u
 
 typedef struct {
+    struct { unsigned int EOM : 1; } bmTransferAttributes;
+} usbtmc_msg_request_dev_dep_out;
+
+typedef struct {
     uint32_t TransferSize;
 } usbtmc_msg_request_dev_dep_in;
 

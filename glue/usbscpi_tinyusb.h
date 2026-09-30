@@ -24,6 +24,7 @@ extern "C" {
  * tud_usbtmc_msgBulkIn_request_cb(), which the glue defines.
  *
  * Integrators using this glue MUST NOT also define any of:
+ *   tud_usbtmc_msgBulkOut_start_cb
  *   tud_usbtmc_msg_data_cb, tud_usbtmc_bulkOut_clearFeature_cb,
  *   tud_usbtmc_bulkIn_clearFeature_cb,
  *   tud_usbtmc_msgBulkIn_request_cb, tud_usbtmc_msgBulkIn_complete_cb,

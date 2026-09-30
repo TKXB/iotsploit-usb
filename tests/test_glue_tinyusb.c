@@ -26,6 +26,7 @@ bool         stub_last_tx_eom = false;
 
 /* TinyUSB-provided callbacks the glue defines (no public prototypes upstream) */
 void tud_usbtmc_open_cb(uint8_t interface_id);
+bool tud_usbtmc_msgBulkOut_start_cb(usbtmc_msg_request_dev_dep_out const *msg);
 bool tud_usbtmc_msg_data_cb(void *data, size_t len, bool transfer_complete);
 bool tud_usbtmc_msgBulkIn_request_cb(usbtmc_msg_request_dev_dep_in const *request);
 bool tud_usbtmc_msgBulkIn_complete_cb(void);
@@ -120,6 +121,8 @@ static void test_query_buffers_then_transmits_on_in(void) {
 
     /* --- Phase 1: bulk-OUT "*IDN?\n" arrives (host is NOT reading yet) --- */
     stub_state = STUB_STATE_RCV;
+    usbtmc_msg_request_dev_dep_out out = { .bmTransferAttributes = { .EOM = 1 } };
+    assert(tud_usbtmc_msgBulkOut_start_cb(&out));
     char idn_cmd[] = "*IDN?\n";
     bool ok = tud_usbtmc_msg_data_cb(idn_cmd, strlen(idn_cmd), true);
     assert(ok);
@@ -173,10 +176,40 @@ static void test_query_buffers_then_transmits_on_in(void) {
     assert(tud_usbtmc_msgBulkIn_complete_cb()); /* settle TX state for the next test */
 }
 
+/* Each transfer ends, but the command ends only on the final EOM header. */
+static void test_split_query_preserves_message_eom(void) {
+    reset_stub();
+    static uint8_t storage[2048];
+    static char line[96];
+    usbscpi_config_t cfg = {
+        .usb_tx = usbscpi_tinyusb_tx, .line_buf = line,
+        .line_buf_len = sizeof(line), .idn = "Split,USBTMC,0001,1.0",
+    };
+    usbscpi_t *dev = usbscpi_init(storage, sizeof(storage), &cfg);
+    assert(dev);
+    usbscpi_tinyusb_bind(dev);
+    usbtmc_msg_request_dev_dep_out out = { .bmTransferAttributes = { .EOM = 0 } };
+    assert(tud_usbtmc_msgBulkOut_start_cb(&out));
+    char prefix[] = "*ID";
+    assert(tud_usbtmc_msg_data_cb(prefix, 3, true));
+    out.bmTransferAttributes.EOM = 1;
+    assert(tud_usbtmc_msgBulkOut_start_cb(&out));
+    char suffix[] = "N?";
+    assert(tud_usbtmc_msg_data_cb(suffix, 2, true));
+    stub_state = STUB_STATE_TX_REQUESTED;
+    usbtmc_msg_request_dev_dep_in request = { .TransferSize = 64 };
+    assert(tud_usbtmc_msgBulkIn_request_cb(&request));
+    assert(stub_last_tx_len == strlen(cfg.idn) + 1);
+    assert(memcmp(stub_last_tx, cfg.idn, strlen(cfg.idn)) == 0);
+    assert(stub_last_tx_eom);
+    assert(tud_usbtmc_msgBulkIn_complete_cb());
+}
+
 int main(void) {
     test_open_arms_bus_read();
     test_query_buffers_then_transmits_on_in();
     test_large_response_chunks_across_in_requests();
+    test_split_query_preserves_message_eom();
     puts("usbscpi tinyusb glue tests passed");
     return 0;
 }

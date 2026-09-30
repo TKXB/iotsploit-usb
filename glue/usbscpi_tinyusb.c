@@ -21,6 +21,7 @@
 #define USBSCPI_STB_SRQ (0x40u) /* Service Request   */
 
 static usbscpi_t *g_usbscpi;
+static bool s_rx_eom;
 
 /* Buffered device->host response (filled in the OUT path, sent in the IN path) */
 static uint8_t  s_tx_buf[USBSCPI_TINYUSB_TX_BUF_SIZE];
@@ -87,10 +88,16 @@ void tud_usbtmc_open_cb(uint8_t interface_id) {
     tud_usbtmc_start_bus_read();
 }
 
+/* Transfer completion is separate from the USBTMC message's EOM bit. */
+bool tud_usbtmc_msgBulkOut_start_cb(usbtmc_msg_request_dev_dep_out const *msg) {
+    s_rx_eom = msg->bmTransferAttributes.EOM;
+    return true;
+}
+
 /* Bulk-OUT data: feed the component, then re-arm the OUT endpoint. */
 bool tud_usbtmc_msg_data_cb(void *data, size_t len, bool transfer_complete) {
     if (g_usbscpi) {
-        usbscpi_on_rx(g_usbscpi, data, len, transfer_complete);
+        usbscpi_on_rx(g_usbscpi, data, len, transfer_complete && s_rx_eom);
     }
     tud_usbtmc_start_bus_read();
     return true;
