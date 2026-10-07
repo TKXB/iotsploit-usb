@@ -60,6 +60,55 @@ tests against the daemon or `stream_testgen`; core logic belongs in
 `tests/test_usbscpi.c`. Never reach real hardware from a CTest test unless it
 skips cleanly without it.
 
+## Built-In Firmware Fuzzing
+
+Agents must run this additional gate before committing a firmware feature change,
+as required by `AGENTS.md`. This policy is stricter than the default human Git
+hook: the C test script remains hardware-free, and the agent invokes fuzzing
+separately. Documentation-only commits are exempt.
+
+Use a Python checkout containing `tools/hardware/firmware_fuzz_gate.py`, its
+tracked `conf/fuzz/targets.json` and `conf/fuzz/features/*.json`, and the project's
+Poetry environment. The headless application needs the `iotsploit-fuzzer`,
+`iotsploit-django` and `iotsploit-core` packages and USB dependencies; it needs
+no running Django server or Redis. Keep machine-specific rig bindings outside
+tracked feature suites.
+
+Build the required board examples from this exact candidate tree and build the
+existing UI `firmware-flasher` CLI. Generate a candidate manifest in the existing
+flash-manifest format, with absolute image paths, versions and SHA-256 hashes.
+Each required board must expose the boot telemetry expected by the profile.
+
+From the Python checkout, with the paths set to the actual candidate and rig:
+
+```bash
+poetry run python tools/hardware/firmware_fuzz_gate.py \
+  --rig /path/to/rigs.json --manifest /path/to/candidate-manifest.json \
+  --ui-root /path/to/ui --firmware-root /path/to/iotsploit-usb \
+  --flasher /path/to/ui/firmware/target/debug/firmware-flasher \
+  --flash --iterations 64 --seed 47 --output artifacts/firmware-fuzz
+```
+
+The command runs the entire configured acceptance matrix. For a board-specific
+change, use `--target <profile-name>` for each affected target. For shared
+core/USBTMC changes, run all required targets. A feature shared by several boards
+requires every affected board/variant. Add the new feature's valid workflow,
+parameter boundaries and malformed cases to its suite before running the gate;
+an unrelated passing baseline is insufficient.
+
+When retained regressions exist, pass `--replay /path/to/campaign.jsonl`; the
+runner replays their complete ordered prefix before fresh mutation. Preserve
+exact inputs, transcripts and observations with the result artifacts. Source
+revisions/content fingerprints and flashed image hashes must describe the code
+being committed; repeat validation if firmware behavior changes afterward.
+
+Exit `0` means every required target passed. Exit `1` is a campaign failure and
+exit `2` is incomplete setup/validation. Both block an agent's feature commit.
+Unavailable hardware or a missing runner is a blocker, not permission to skip.
+Report it and leave the feature uncommitted. The current observer detects boot
+changes and protocol recovery failures; it does not establish absence of resource
+leaks or replace independent UART/probe monitoring.
+
 ## Git Enforcement
 
 `iotsploit-usb` is its own git repository. Enable the hook once per working

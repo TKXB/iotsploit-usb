@@ -8,7 +8,7 @@
 #include "scpi/scpi.h"
 
 #ifndef USBSCPI_MAX_CMDS
-#define USBSCPI_MAX_CMDS 48u          /* core + user commands, incl. END sentinel */
+#define USBSCPI_MAX_CMDS 49u          /* core + user commands, incl. END sentinel */
 #endif
 #ifndef USBSCPI_INPUT_BUF_LEN
 #define USBSCPI_INPUT_BUF_LEN 128u    /* libscpi working/parse buffer (one line)  */
@@ -100,6 +100,16 @@ static scpi_result_t cmd_idn(scpi_t *scpi) {
     usbscpi_t *ctx = scpi_owner(scpi);
     const char *idn = (ctx && ctx->cfg.idn) ? ctx->cfg.idn : "usbscpi,component,0,0.1.0";
     SCPI_ResultCharacters(scpi, idn, strlen(idn));   /* raw, no quotes */
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_syst_boot(scpi_t *scpi) {
+    usbscpi_t *ctx = scpi_owner(scpi);
+    if (!ctx || !ctx->cfg.boot_id || !ctx->cfg.boot_id[0]) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    SCPI_ResultCharacters(scpi, ctx->cfg.boot_id, strlen(ctx->cfg.boot_id));
     return SCPI_RES_OK;
 }
 
@@ -366,6 +376,7 @@ static const scpi_command_t core_commands[] = {
     { "SYSTem:ERRor?", SCPI_SystemErrorNextQ, 0 },
     { "SYSTem:ERRor:COUNt?", SCPI_SystemErrorCountQ, 0 },
     { "SYSTem:CAPabilities?", cmd_syst_cap, 0 },
+    { "SYSTem:BOOT?", cmd_syst_boot, 0 },
     { "SYSTem:HELP:HEADers?", cmd_syst_help_head, 0 },
     { "SYSTem:HELP:DESCription?", cmd_syst_help_desc, 0 },
     { "DATA:FREE?", cmd_data_free, 0 },

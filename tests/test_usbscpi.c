@@ -319,6 +319,35 @@ static void test_data_read_clamps_before_consuming(void) {
     assert(strcmp(f.tx, "0\n") == 0);
 }
 
+/* A stable identity cannot detect a warm reboot; the application supplies a
+ * per-boot token, which remains stable across SCPI clear/reset operations. */
+static void test_boot_identity(void) {
+    fixture_t f = {0};
+    uint8_t storage[2048];
+    char line[96];
+    usbscpi_config_t cfg = {
+        .usb_tx = tx_cb, .line_buf = line, .line_buf_len = sizeof(line),
+        .user = &f, .boot_id = "0123456789abcdef",
+    };
+    usbscpi_t *dev = usbscpi_init(storage, sizeof(storage), &cfg);
+    assert(dev);
+    const char *query = "SYST:BOOT?\n";
+    assert(usbscpi_on_rx(dev, query, strlen(query), true) == USBSCPI_OK);
+    assert(strcmp(f.tx, "0123456789abcdef\n") == 0);
+    usbscpi_clear(dev);
+    f.tx_len = 0;
+    assert(usbscpi_on_rx(dev, query, strlen(query), true) == USBSCPI_OK);
+    assert(strcmp(f.tx, "0123456789abcdef\n") == 0);
+
+    cfg.boot_id = NULL;
+    dev = usbscpi_init(storage, sizeof(storage), &cfg);
+    f.tx_len = 0;
+    assert(usbscpi_on_rx(dev, query, strlen(query), true) == USBSCPI_OK);
+    assert(f.tx_len == 0);
+    assert(usbscpi_on_rx(dev, "SYST:ERR?\n", 10, true) == USBSCPI_OK);
+    assert(strstr(f.tx, "-200") != NULL);
+}
+
 static void test_new_default_commands(void) {
     fixture_t f;
     uint8_t storage[2048];
@@ -613,6 +642,7 @@ int main(void) {
     test_binary_block_split_and_special_bytes();
     test_error_queue_and_free_query();
     test_batch_survives_failing_command();
+    test_boot_identity();
     test_new_default_commands();
     test_data_read_clamps_before_consuming();
     test_descriptor_query();

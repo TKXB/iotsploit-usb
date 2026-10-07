@@ -17,6 +17,7 @@
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/flash.h>
+#include <libopencm3/stm32/rng.h>
 #include <libopencm3/stm32/memorymap.h>
 #include <libopencm3/cm3/nvic.h>
 
@@ -33,6 +34,7 @@ static char    s_line[96];
 static uint8_t s_io[2048];
 /* The core retains this string for the application lifetime. */
 static char    s_idn[64];
+static char    s_boot_id[17];
 
 #define DEMO_VERSION "0.2.0"
 
@@ -347,6 +349,18 @@ static void build_idn(void) {
 int main(void) {
     board_init();
     build_idn();
+    rcc_periph_clock_enable(RCC_RNG);
+    rng_enable();
+    uint32_t words[2];
+    unsigned count = 0;
+    for (unsigned tries = 0; tries < 1000000 && count < 2; tries++) {
+        if (rng_get_random(&words[count])) count++;
+    }
+    rng_disable();
+    if (count == 2) {
+        snprintf(s_boot_id, sizeof(s_boot_id), "%08lx%08lx",
+                 (unsigned long)words[0], (unsigned long)words[1]);
+    }
 
     tusb_init();
 
@@ -356,6 +370,7 @@ int main(void) {
         .line_buf_len  = sizeof(s_line),
         .max_block_len = 4096,
         .idn           = s_idn,
+        .boot_id       = s_boot_id,
         .io_buf        = s_io,
         .io_buf_len    = sizeof(s_io),
         .proto         = 1,

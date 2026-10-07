@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_app_desc.h"
 #include "esp_mac.h"
+#include "esp_random.h"
 #include "esp_private/usb_phy.h"     /* usb_new_phy */
 #include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
@@ -870,6 +871,9 @@ static void scan_init_task(void *arg) {
 }
 
 void app_main(void) {
+    static char boot_id[17];
+    snprintf(boot_id, sizeof(boot_id), "%08lx%08lx",
+             (unsigned long)esp_random(), (unsigned long)esp_random());
     uint8_t mac[6];
     ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
     int idn_len = snprintf(s_idn, sizeof(s_idn),
@@ -896,6 +900,7 @@ void app_main(void) {
          * rejected in the IN path and the query just never answers. */
         .max_block_len = usbscpi_tinyusb_tx_capacity(),
         .idn           = s_idn,
+        .boot_id       = boot_id,
         .data_avail    = adc_avail,
         .data_read     = adc_read_cb,
         .io_buf        = s_io,

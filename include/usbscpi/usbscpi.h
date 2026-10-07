@@ -125,6 +125,7 @@ typedef struct {
     unsigned proto;
     size_t mtu;
     const usbscpi_descriptor_t *descriptor;  /* optional, NULL = unsupported */
+    const char *boot_id;  /* optional, unique per boot; caller-owned lifetime */
 } usbscpi_config_t;
 
 typedef enum {
