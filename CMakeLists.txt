@@ -196,4 +196,22 @@ if(USBSCPI_BUILD_TESTS)
     )
     target_link_libraries(test_glue_tinyusb PRIVATE usbscpi)
     add_test(NAME test_glue_tinyusb COMMAND test_glue_tinyusb)
+
+    # EvilDuck (examples/esp32s3-hid) portable core: key mapping, script
+    # validation, upload store and the asynchronous runner. These modules carry
+    # no RTOS/USB dependency on purpose, so the gate exercises them on the host;
+    # HID, the clock and readiness are injected fakes in the test. The firmware
+    # build (idf.py) stays out of the gate per testing.md.
+    add_executable(test_duckscript
+        tests/test_duckscript.c
+        examples/esp32s3-hid/main/duck_keymap.c
+        examples/esp32s3-hid/main/duckscript.c
+        examples/esp32s3-hid/main/duck_runner.c
+        examples/esp32s3-hid/main/duck_store.c
+    )
+    target_include_directories(test_duckscript PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/esp32s3-hid/main
+    )
+    target_compile_options(test_duckscript PRIVATE ${USBSCPI_WARNINGS})
+    add_test(NAME test_duckscript COMMAND test_duckscript)
 endif()
