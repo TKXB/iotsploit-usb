@@ -11,11 +11,13 @@
  * Button: PA0 (user).
  */
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/flash.h>
+#include <libopencm3/stm32/memorymap.h>
 #include <libopencm3/cm3/nvic.h>
 
 #include "tusb.h"
@@ -29,6 +31,10 @@ uint32_t SystemCoreClock = 168000000u;
 static uint8_t s_storage[2048];
 static char    s_line[96];
 static uint8_t s_io[2048];
+/* The core retains this string for the application lifetime. */
+static char    s_idn[64];
+
+#define DEMO_VERSION "0.2.0"
 
 /* ---------- USB TX callback via TinyUSB glue ---------- */
 static int usb_tx(void *user, const uint8_t *data, size_t len, bool eom) {
@@ -326,8 +332,21 @@ static void board_init(void) {
 }
 
 /* ---------- Main ---------- */
+/* *IDN? serial is the 96-bit factory unique ID, hex in memory order: the same
+ * bytes a debug probe reads at DESIG_UNIQUE_ID_BASE before flashing, so the
+ * host can tell this board from any other running the same firmware. */
+static void build_idn(void) {
+    const uint8_t *uid = (const uint8_t *)DESIG_UNIQUE_ID_BASE;
+    char *p = s_idn + snprintf(s_idn, sizeof(s_idn), "IoTSploit,STM32F4-Disco,");
+    for (int i = 0; i < 12; i++) {
+        p += snprintf(p, 3, "%02X", uid[i]);
+    }
+    snprintf(p, sizeof(s_idn) - (size_t)(p - s_idn), "," DEMO_VERSION);
+}
+
 int main(void) {
     board_init();
+    build_idn();
 
     tusb_init();
 
@@ -336,7 +355,7 @@ int main(void) {
         .line_buf      = s_line,
         .line_buf_len  = sizeof(s_line),
         .max_block_len = 4096,
-        .idn           = "IoTSploit,STM32F4-Disco,0001,0.1.0",
+        .idn           = s_idn,
         .io_buf        = s_io,
         .io_buf_len    = sizeof(s_io),
         .proto         = 1,

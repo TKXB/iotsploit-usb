@@ -140,14 +140,14 @@ d = os.open('/dev/usbtmc0', os.O_RDWR)
 os.write(d, b'*IDN?\n')
 print(os.read(d, 4096).decode().strip())
 "
-# IoTSploit,STM32F4-Disco,0001,0.1.0
+# IoTSploit,STM32F4-Disco,1E0034000951323530333138,0.2.0
 ```
 
 ### Test with iotsploit-host
 
 ```bash
 sudo iotsploit-host scpi "*IDN?"
-# IoTSploit,STM32F4-Disco,0001,0.1.0
+# IoTSploit,STM32F4-Disco,1E0034000951323530333138,0.2.0
 
 sudo iotsploit-host scpi "LED:GREen 1"
 sudo iotsploit-host scpi "LED:ALL 1"
@@ -159,7 +159,7 @@ sudo iotsploit-host scpi "BTN?"
 
 | Command | Returns | Description |
 |---|---|---|
-| `*IDN?` | string | Device identity |
+| `*IDN?` | string | Device identity; the serial is the 96-bit factory unique ID (0x1FFF7A10) as hex |
 | `*RST` | — | Reset SCPI state |
 | `*CLS` | — | Clear error queue |
 | `LED:SET <n> <val>` | — | Set LED n (0-3) to val (0/1) |
