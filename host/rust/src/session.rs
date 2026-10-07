@@ -70,13 +70,14 @@ impl<T: Transport> ScpiSession<T> {
         self.transport.read_msg(self.read_size)
     }
 
-    /// Send a query and return the response as a string with trailing CR/LF
-    /// removed. The response is never decoded as lossy UTF-8; invalid UTF-8 is
+    /// Send a query and return the response as a string. Trailing CR/LF is
+    /// removed for plain text; IEEE block responses retain all payload bytes.
+    /// The response is never decoded as lossy UTF-8; invalid UTF-8 is
     /// an error (use [`Self::query_raw`] for arbitrary bytes).
     pub fn query(&mut self, cmd: &str) -> Result<String> {
         let raw = self.query_raw(cmd)?;
         let mut end = raw.len();
-        while end > 0 && matches!(raw[end - 1], b'\n' | b'\r') {
+        while raw.first() != Some(&b'#') && end > 0 && matches!(raw[end - 1], b'\n' | b'\r') {
             end -= 1;
         }
         String::from_utf8(raw[..end].to_vec()).map_err(|e| Error::Scpi {
@@ -228,6 +229,14 @@ mod tests {
         let idn = s.query("*IDN?").unwrap();
         assert_eq!(idn, "IoTSploit,nRF52840,0001,0.1.0");
         assert_eq!(s.transport.last_write(), b"*IDN?\n");
+    }
+
+    #[test]
+    fn query_preserves_descriptor_block_newlines() {
+        // The final LF belongs to the declared 12-byte payload, not just the
+        // SCPI terminator. Removing it makes strict verification fail.
+        let mut s = session_with(&[b"#212DEV proto=1\n\r\n".to_vec()]);
+        assert_eq!(s.query("SYST:HELP:DESC?").unwrap(), "#212DEV proto=1\n\r\n");
     }
 
     #[test]

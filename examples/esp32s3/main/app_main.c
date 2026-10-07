@@ -5,6 +5,8 @@
 #include "freertos/task.h"
 #include "freertos/stream_buffer.h"
 #include "esp_log.h"
+#include "esp_app_desc.h"
+#include "esp_mac.h"
 #include "esp_private/usb_phy.h"     /* usb_new_phy */
 #include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
@@ -37,6 +39,8 @@ static char    s_line[96];
 /* See the note in net_scpi.c: the descriptor is all-or-nothing, so this is
  * sized for it rather than for the largest data read. */
 static uint8_t s_io[8192];
+/* Both USB and TCP contexts retain this string for the application lifetime. */
+static char s_idn[96];
 
 /* ---------- ADC oneshot 句柄 ---------- */
 static adc_oneshot_unit_handle_t s_adc1;
@@ -866,6 +870,14 @@ static void scan_init_task(void *arg) {
 }
 
 void app_main(void) {
+    uint8_t mac[6];
+    ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
+    int idn_len = snprintf(s_idn, sizeof(s_idn),
+                          "IoTSploit,ESP32S3,%02X%02X%02X%02X%02X%02X,%s",
+                          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                          esp_app_get_description()->version);
+    ESP_ERROR_CHECK(idn_len < 0 || (size_t)idn_len >= sizeof(s_idn)
+                    ? ESP_ERR_INVALID_SIZE : ESP_OK);
     adc_setup();
 
     /* 安装日志钩子:ESP_LOGx 同时走 UART 和 USB vendor bulk-IN(0x82)。
@@ -883,7 +895,7 @@ void app_main(void) {
         /* From the glue, not a literal: a block the glue cannot buffer is
          * rejected in the IN path and the query just never answers. */
         .max_block_len = usbscpi_tinyusb_tx_capacity(),
-        .idn           = "IoTSploit,ESP32S3,0001,0.1.0",
+        .idn           = s_idn,
         .data_avail    = adc_avail,
         .data_read     = adc_read_cb,
         .io_buf        = s_io,
