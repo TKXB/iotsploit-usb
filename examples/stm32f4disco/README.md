@@ -12,6 +12,7 @@ Bare-metal USBTMC + SCPI demo running on the STM32F4-Discovery board. The device
 | Board support | libopencm3 | Clock tree, GPIO, NVIC, vector table, interrupt routing |
 | CMSIS shim | `stm32f4xx.h` (local) | Minimal compatibility header so TinyUSB's DWC2 driver builds without STM32Cube HAL |
 | SCPI-over-USB glue | `usbscpi_tinyusb.c` | Bridges TinyUSB USBTMC callbacks to the iotsploit-usb core |
+| SocketCAN | TinyUSB vendor class | gs_usb (candleLight) protocol for the Linux `gs_usb` driver |
 
 ### Architecture
 
@@ -93,10 +94,10 @@ Link:    --specs=nano.specs --specs=nosys.specs -Wl,--gc-sections
 
 ```text
    text    data     bss     dec     hex  filename
-  40544     176    9364   50084    c3a4  stm32f4disco_usbscpi.elf
+  48004     204   12884   61092    eea4  stm32f4disco_usbscpi.elf
 
-FLASH: 40,552 B / 1 MB  (3.87%)
-RAM:    9,532 B / 128 KB (7.27%)
+FLASH: 48,012 B / 1 MB  (4.58%)
+RAM:   13,084 B / 128 KB (9.98%)
 ```
 
 ## Flash
@@ -184,7 +185,7 @@ sudo iotsploit-host scpi "BTN?"
 | `CAN:SEND <bus>,<id>,"<hex>"` | — | Send one frame (0-8 data bytes); id > 0x7FF is sent as 29-bit extended |
 | `CAN:RECV?` | string | Pop the oldest received frame: `bus,id,ext,rtr,len,data`; empty if none |
 | `CAN:COUNt?` | u32 | Received frames waiting |
-| `CAN:STATe? <bus>` | string | `open,tec,rec,busoff,rx_dropped` |
+| `CAN:STATe? <bus>` | string | `owner,tec,rec,busoff,rx_dropped`; owner 0 closed, 1 SCPI, 2 SocketCAN |
 
 ## CAN
 
@@ -210,11 +211,48 @@ sudo iotsploit-host scpi "CAN:STATe? 1"   # 1,0,0,0,0
 
 Quote the data: unquoted hex that starts with a digit parses as a number.
 
+### SocketCAN (gs_usb)
+
+The device also exposes a vendor interface (interface 0, bulk IN 0x81 / OUT
+0x02) that speaks the candleLight protocol, so the Linux `gs_usb` driver turns
+CAN1 and CAN2 into native SocketCAN interfaces. Its VID:PID is not in the
+driver's table, so bind it once per boot (`ff` restricts the match to the
+vendor interface; USBTMC stays on `usbtmc`):
+
+```bash
+sudo modprobe gs_usb
+echo 1209 0001 ff | sudo tee /sys/bus/usb/drivers/gs_usb/new_id
+ip -br link | grep can            # can0 = CAN1, can1 = CAN2
+sudo ip link set can0 up type can bitrate 500000
+sudo ip link set can1 up type can bitrate 500000
+candump can1 &
+cansend can0 123#DEADBEEF         # can1  123   [4]  DE AD BE EF
+```
+
+To bind automatically, add a udev rule:
+
+```text
+# /etc/udev/rules.d/60-iotsploit-gs_usb.rules
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="0001", RUN+="/bin/sh -c 'modprobe gs_usb; echo 1209 0001 ff > /sys/bus/usb/drivers/gs_usb/new_id'"
+```
+
+Bit timing comes from the kernel (42 MHz clock, tseg1 1-16, tseg2 1-8, sjw up
+to 4, brp 1-1024), so any bitrate `ip link` can reach works, not only the four
+`CAN:OPEN` rates. `listen-only on` and `loopback on` map to the bxCAN silent
+and loopback modes. Frames go out in the order the host sent them, and each one
+is echoed to the host once it has left the controller.
+
+A controller has one owner. `ip link set canN up` takes it, even from SCPI;
+`CAN:OPEN` and `CAN:SEND` on that bus then fail with an execution error until
+`ip link set canN down`. `CAN:STATe?` reports the owner. A gs_usb receive queue
+of 102 frames is separate from the SCPI one; frames lost to it are reported to
+SocketCAN as RX overflow (`ip -s link`).
+
 ## Source Files
 
 | File | Purpose |
 |---|---|
-| `main.c` | Board init (clocks, GPIO, USB), SCPI command callbacks, main loop |
+| `main.c` | Board init (clocks, GPIO, USB), SCPI command callbacks, gs_usb SocketCAN, main loop |
 | `usb_descriptors.c` | USB device/config/string descriptors |
 | `tusb_config.h` | TinyUSB compile-time configuration |
 | `stm32f4xx.h` | CMSIS compatibility shim for TinyUSB's DWC2 driver |

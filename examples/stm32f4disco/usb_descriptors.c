@@ -26,22 +26,29 @@ uint8_t const *tud_descriptor_device_cb(void) {
 }
 
 /* ------------------------------------------------------------------
- * USB Configuration Descriptor (USBTMC interface + bulk IN/OUT)
- * Uses TinyUSB's TUD_USBTMC_* macros (same as nrf52840 example).
+ * USB Configuration Descriptor: gs_usb (SocketCAN) + USBTMC
+ * gs_usb must be interface 0 with bulk IN 0x81 / OUT 0x02: Linux sends its
+ * control requests with wIndex 0, and kernels before endpoint discovery
+ * hard-code those two endpoint numbers.
  * ------------------------------------------------------------------ */
 enum {
-    ITF_NUM_USBTMC = 0,
+    ITF_NUM_GS_USB = 0,
+    ITF_NUM_USBTMC,
     ITF_NUM_TOTAL
 };
 
-#define USBTMC_EP_OUT 0x01
-#define USBTMC_EP_IN  0x81
+#define GS_USB_EP_IN  0x81
+#define GS_USB_EP_OUT 0x02
+#define USBTMC_EP_OUT 0x03
+#define USBTMC_EP_IN  0x83
 
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_USBTMC_IF_DESCRIPTOR_LEN + TUD_USBTMC_BULK_DESCRIPTORS_LEN)
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_VENDOR_DESC_LEN + \
+                          TUD_USBTMC_IF_DESCRIPTOR_LEN + TUD_USBTMC_BULK_DESCRIPTORS_LEN)
 
 uint8_t const desc_configuration[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN,
                           TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+    TUD_VENDOR_DESCRIPTOR(ITF_NUM_GS_USB, 4, GS_USB_EP_OUT, GS_USB_EP_IN, 64),
     TUD_USBTMC_IF_DESCRIPTOR(ITF_NUM_USBTMC, 2, 0, TUD_USBTMC_PROTOCOL_USB488),
     TUD_USBTMC_BULK_DESCRIPTORS(USBTMC_EP_OUT, USBTMC_EP_IN, 64),
 };
@@ -69,6 +76,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t language_id) {
     case 1: str = "IoTSploit";            break;
     case 2: str = "STM32F4-Disco USBTMC"; break;
     case 3: str = "0001";                 break;
+    case 4: str = "gs_usb CAN";           break;
     default: return NULL;
     }
 
