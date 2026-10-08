@@ -196,4 +196,37 @@ if(USBSCPI_BUILD_TESTS)
     )
     target_link_libraries(test_glue_tinyusb PRIVATE usbscpi)
     add_test(NAME test_glue_tinyusb COMMAND test_glue_tinyusb)
+
+    # EvilDuck (examples/esp32s3-hid) portable core: key mapping, script
+    # validation, upload store and the asynchronous runner. These modules carry
+    # no RTOS/USB dependency on purpose, so the gate exercises them on the host;
+    # HID, the clock and readiness are injected fakes in the test. The firmware
+    # build (idf.py) stays out of the gate per testing.md.
+    add_executable(test_duckscript
+        tests/test_duckscript.c
+        examples/esp32s3-hid/main/duck_keymap.c
+        examples/esp32s3-hid/main/duckscript.c
+        examples/esp32s3-hid/main/duck_runner.c
+        examples/esp32s3-hid/main/duck_store.c
+    )
+    target_include_directories(test_duckscript PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/esp32s3-hid/main
+    )
+    target_compile_options(test_duckscript PRIVATE ${USBSCPI_WARNINGS})
+    add_test(NAME test_duckscript COMMAND test_duckscript)
+    if(USBSCPI_BUILD_SOCKET_GLUE AND Python3_FOUND AND NOT CMAKE_CROSSCOMPILING)
+        add_executable(duck_socket_testgen
+            tests/duck_socket_testgen.c
+            examples/esp32s3-hid/main/duck_keymap.c
+            examples/esp32s3-hid/main/duckscript.c
+            examples/esp32s3-hid/main/duck_runner.c
+            examples/esp32s3-hid/main/duck_store.c)
+        target_include_directories(duck_socket_testgen PRIVATE examples/esp32s3-hid/main)
+        target_link_libraries(duck_socket_testgen PRIVATE usbscpi_socket_glue)
+        target_compile_options(duck_socket_testgen PRIVATE ${USBSCPI_WARNINGS})
+        add_test(NAME test_duck_socket COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_duck_socket.py $<TARGET_FILE:duck_socket_testgen>)
+        set_tests_properties(test_duck_socket PROPERTIES TIMEOUT 20)
+    endif()
+
 endif()

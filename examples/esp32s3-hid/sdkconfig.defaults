@@ -1,0 +1,9 @@
+CONFIG_IDF_TARGET="esp32s3"
+# FreeRTOS tick 1kHz for responsive tud_task polling
+CONFIG_FREERTOS_HZ=1000
+# USB-OTG is dedicated to USBTMC+HID; console stays on UART
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+# Default log level 3 = INFO
+CONFIG_LOG_DEFAULT_LEVEL=3
+# Single large app partition (headroom; no OTA/MSC/FS in this profile)
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
