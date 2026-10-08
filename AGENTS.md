@@ -30,29 +30,29 @@ See [.agents/standards/testing.md](.agents/standards/testing.md) for failure,
 skip, firmware, and host validation responsibilities. Host checks do not prove
 hardware behavior.
 
-## Built-In Firmware Fuzzing (Required)
+## Built-In Firmware Fuzzing
 
-Before every feature commit that changes firmware behavior, also run IoTSploit's
-own firmware fuzzing gate. This includes shared core, transport glue, board
-commands, wire contracts, and firmware build/configuration changes. Documentation
-changes alone do not require a hardware campaign.
+Before committing changes that affect firmware behavior, run IoTSploit's own
+firmware fuzzing gate. This includes shared core, transport glue, board
+commands, wire contracts, and firmware build/configuration changes.
+Documentation changes alone do not require a hardware campaign.
 
-- Use `tools/hardware/firmware_fuzz_gate.py` from the Python checkout. Do not
-  substitute libFuzzer, AFL, Radamsa, or another external fuzzing engine.
+- Use `tools/hardware/firmware_fuzz_gate.py`. Do not substitute libFuzzer,
+  AFL, Radamsa, or another external fuzzing engine.
 - Build and flash the exact candidate, exercise the new feature's valid workflow
   and mutations, and replay any retained regressions before fresh discovery.
 - Shared core/USBTMC changes require every target in the acceptance matrix;
   board-specific changes require the affected targets. Do not silently reduce
   the matrix to whichever board happens to be connected.
-- **Do not commit** if any required target fails or is incomplete, including
+- Do not commit if any required target fails or is incomplete, including
   missing hardware, toolchains, runner dependencies, or boot telemetry.
 - Report target names, image hashes, seed, executed/replayed case counts,
   failures, and evidence paths. See
   [.agents/standards/testing.md](.agents/standards/testing.md#built-in-firmware-fuzzing)
   for the command and setup.
 
-This is an agent pre-commit requirement. The Git hook below still runs the C
-gate only; it does not automatically execute hardware fuzzing for human commits.
+The Git hook below runs the C gate only; it does not run hardware fuzzing for
+human commits.
 
 This is a separate Git repository. Enable its hook explicitly, once per local
 working copy, from this directory:
