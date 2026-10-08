@@ -309,7 +309,70 @@ static void test_end_to_end_upload_then_run(void) {
     assert(typed_key(&f, 0x28));          /* ENTER */
 }
 
+/* A submitted release is not yet a delivered release. */
+static bool fake_complete(void *user) {
+    return ((fake_t *)user)->busy_reports == 0;
+}
+
+static void test_finish_completion_and_deadline(void) {
+    fake_t f; fake_init(&f);
+    duck_runner_t r; runner_init(&r, &f, 10, false);
+    r.cfg.complete = fake_complete;
+    f.busy_reports = 1;
+    assert(duck_runner_start(&r, "", 0) == 0);
+    duck_runner_poll(&r);
+    assert(duck_runner_state(&r) == DUCK_RUNNING);
+    assert(f.log_len == 1); /* only the final neutral transfer */
+    f.busy_reports = 0;
+    duck_runner_poll(&r);
+    assert(duck_runner_state(&r) == DUCK_DONE);
+
+    runner_init(&r, &f, 10, true);
+    f.now = 0; f.busy_reports = 10000;
+    assert(duck_runner_start(&r, "ENTER", 5) == 0);
+    duck_runner_poll(&r);
+    f.now = 10; duck_runner_poll(&r); /* runtime expires */
+    f.now = 110; duck_runner_poll(&r); /* release deadline expires */
+    assert(duck_runner_state(&r) == DUCK_ERROR);
+    assert(strstr(duck_runner_error(&r), "release timeout"));
+    f.busy_reports = 0;
+    assert(duck_runner_start(&r, "", 0) == 0); /* not permanently busy */
+    pump(&r);
+    assert(duck_runner_state(&r) == DUCK_DONE);
+
+    fake_init(&f); runner_init(&r, &f, 10, false);
+    f.fail_index = 1; /* final neutral report fails */
+    assert(duck_runner_start(&r, "", 0) == 0);
+    pump(&r);
+    assert(duck_runner_state(&r) == DUCK_ERROR);
+    assert(strstr(duck_runner_error(&r), "release failed"));
+
+    fake_init(&f); runner_init(&r, &f, 10, false);
+    r.cfg.complete = fake_complete;
+    f.busy_reports = 1;
+    assert(duck_runner_start(&r, "", 0) == 0);
+    duck_runner_poll(&r);
+    f.now = 100; duck_runner_poll(&r);
+    assert(duck_runner_state(&r) == DUCK_ERROR); /* accepted but never completed */
+}
+
+static void test_accept_then_immediate_stop(void) {
+    fake_t f; fake_init(&f);
+    duck_runner_t r; runner_init(&r, &f, 0, false);
+    assert(duck_runner_start(&r, "", 0) == 0);
+    pump(&r);
+    assert(duck_runner_state(&r) == DUCK_DONE);
+    assert(duck_runner_start(&r, "ENTER", 5) == 0);
+    assert(duck_runner_state(&r) == DUCK_RUNNING); /* no stale DONE */
+    duck_runner_stop(&r); /* before any poll */
+    pump(&r);
+    assert(duck_runner_state(&r) == DUCK_CANCELLED);
+    assert(!typed_key(&f, 0x28));
+}
+
 int main(void) {
+    test_finish_completion_and_deadline();
+    test_accept_then_immediate_stop();
     test_keymap();
     test_validate();
     test_runner_string();

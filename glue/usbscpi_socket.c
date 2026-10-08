@@ -49,12 +49,14 @@ int usbscpi_socket_tx(void *user, const uint8_t *data, size_t len, bool eom) {
 }
 
 /* Serve one accepted connection until it closes or errors. */
-static void serve_client(usbscpi_t *ctx, usbscpi_sock_t fd) {
+static void serve_client(usbscpi_t *ctx, usbscpi_sock_t fd,
+                         usbscpi_socket_session_t session, void *user) {
     int one = 1;
     /* Without TCP_NODELAY, Nagle delays every small SCPI reply by ~40 ms. */
     (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
 
     s_client_fd = fd;
+    if (session) session(user, true);
 
     uint8_t buf[USBSCPI_SOCKET_RX_BUF];
     for (;;) {
@@ -77,10 +79,17 @@ static void serve_client(usbscpi_t *ctx, usbscpi_sock_t fd) {
     /* A client that died mid-block leaves MODE_BLOCK_PAYLOAD and a partial line
      * buffer behind; without this the next session inherits the corruption. */
     usbscpi_clear(ctx);
+    if (session) session(user, false);
     usbscpi_closesocket(fd);
 }
 
 int usbscpi_socket_serve(usbscpi_t *ctx, const char *bind_addr, uint16_t port) {
+    return usbscpi_socket_serve_sessions(ctx, bind_addr, port, NULL, NULL);
+}
+
+int usbscpi_socket_serve_sessions(usbscpi_t *ctx, const char *bind_addr,
+                                 uint16_t port,
+                                 usbscpi_socket_session_t session, void *user) {
     if (!ctx || !bind_addr) {
         return -1;
     }
@@ -129,7 +138,7 @@ int usbscpi_socket_serve(usbscpi_t *ctx, const char *bind_addr, uint16_t port) {
             }
             break;
         }
-        serve_client(ctx, fd);
+        serve_client(ctx, fd, session, user);
     }
 
 done:

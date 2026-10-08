@@ -10,10 +10,12 @@ enum {
     RS_CHORD_PRESS,     /* press report for a chord line */
     RS_CHORD_RELEASE,   /* neutral release after a chord */
     RS_DELAY,           /* waiting for a DELAY deadline */
-    RS_FINISH           /* best-effort neutral release, then settle terminal */
+    RS_FINISH,          /* submit neutral release */
+    RS_FINISH_WAIT      /* wait for the neutral transfer to complete */
 };
 
 #define DUCK_DEFAULT_RUNTIME_MS 60000u
+#define DUCK_RELEASE_TIMEOUT_MS 100u
 #define DUCK_REPORTS_PER_POLL   8   /* bounded work per poll() call */
 
 static void set_err(duck_runner_t *r, const char *msg) {
@@ -98,6 +100,7 @@ static int submit_report(duck_runner_t *r, uint8_t mod, uint8_t key) {
 static void begin_finish(duck_runner_t *r, int reason, const char *msg) {
     r->term_reason = reason;
     if (msg && msg[0]) set_err(r, msg);
+    r->finish_ms = r->cfg.now_ms(r->cfg.user);
     r->phase = RS_FINISH;
 }
 
@@ -161,7 +164,7 @@ void duck_runner_poll(duck_runner_t *r) {
         uint32_t now = r->cfg.now_ms(r->cfg.user);
 
         /* Checked between every report and during every wait. */
-        if (r->phase != RS_FINISH) {
+        if (r->phase != RS_FINISH && r->phase != RS_FINISH_WAIT) {
             if ((uint32_t)(now - r->start_ms) >= limit) {
                 begin_finish(r, DUCK_ERROR, "runtime limit");
             } else if (r->stop_requested) {
@@ -210,11 +213,30 @@ void duck_runner_poll(duck_runner_t *r) {
             else return;  /* keep waiting; cancellation handled at loop top */
             break;
 
-        case RS_FINISH: {
-            int rc = submit_report(r, 0, 0);  /* neutral release, best effort */
-            if (rc == 0) return;              /* busy: retry next poll */
-            r->state = r->term_reason;        /* accepted or failed: settle */
-            return;
+        case RS_FINISH:
+        case RS_FINISH_WAIT: {
+            if (r->stop_requested && r->term_reason == DUCK_DONE)
+                r->term_reason = DUCK_CANCELLED;
+            if (r->phase == RS_FINISH_WAIT &&
+                (!r->cfg.complete || r->cfg.complete(r->cfg.user))) {
+                r->state = r->term_reason;
+                return;
+            }
+            if ((uint32_t)(now - r->finish_ms) >= DUCK_RELEASE_TIMEOUT_MS) {
+                set_err(r, "hid release timeout");
+                r->state = DUCK_ERROR;
+                return;
+            }
+            if (r->phase == RS_FINISH_WAIT) return;
+            int rc = submit_report(r, 0, 0);
+            if (rc == 0) return;
+            if (rc < 0) {
+                set_err(r, "hid release failed");
+                r->state = DUCK_ERROR;
+                return;
+            }
+            r->phase = RS_FINISH_WAIT;
+            break;
         }
         default:
             return;

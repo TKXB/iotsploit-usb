@@ -45,6 +45,14 @@ int usbscpi_socket_tx(void *user, const uint8_t *data, size_t len, bool eom);
  * cannot poison the next session. */
 int usbscpi_socket_serve(usbscpi_t *ctx, const char *bind_addr, uint16_t port);
 
+/* Optional application lifecycle notification, called on the serving thread
+ * before receiving a session's bytes and after clearing its framing on close.
+ * Applications can allocate session ownership and discard staged state here. */
+typedef void (*usbscpi_socket_session_t)(void *user, bool connected);
+int usbscpi_socket_serve_sessions(usbscpi_t *ctx, const char *bind_addr,
+                                 uint16_t port,
+                                 usbscpi_socket_session_t session, void *user);
+
 /* Non-zero while a client is connected. Lets an application avoid radio or
  * power operations that would drop the link carrying the command. */
 int usbscpi_socket_client_connected(void);

@@ -29,9 +29,9 @@
  * scan task is involved. Recovery/provisioning is over UART or reflashing,
  * since USBTMC is absent.
  *
- * SCPI handlers run on the socket-serve task; HID submission and the runner
- * poll run on the USB task. They share only application state (the runner
- * start handoff and the upload store), guarded by one short-held mutex. No
+ * SCPI handlers run on the socket-serve task; HID submission and runner
+ * polling run on the USB task. Runner and store state share one short-held
+ * mutex; accepting RUN publishes its state before the next command. No
  * script runs at boot or on reconnect.
  */
 
@@ -56,13 +56,13 @@ static char    s_idn[96];
 
 static duck_runner_t s_runner;
 static duck_store_t  s_store;
-static SemaphoreHandle_t s_lock;   /* guards the store + the run handoff */
+static SemaphoreHandle_t s_lock;   /* guards runner + store state */
 
-/* Run handoff: a SCPI handler (socket task) snapshots the script here and
- * raises the pending flag; the USB task starts the runner from it. */
+/* Immutable snapshot for the active run, separate from upload storage. */
 static char    s_runbuf[DUCK_SCRIPT_MAX];
 static size_t  s_runlen;
-static volatile bool s_start_pending;
+static int s_session_owner;
+static int s_next_owner;
 
 /* Milestone-1 fixed demo: harmless, visible, self-terminating. */
 static const char s_demo[] =
@@ -94,7 +94,7 @@ static uint32_t now_ms(void *user) {
 static int on_block_begin(void *user, size_t total_len) {
     (void)user;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    int rc = duck_store_block_begin(&s_store, 1 /*TCP owner*/, total_len);
+    int rc = duck_store_block_begin(&s_store, s_session_owner, total_len);
     xSemaphoreGive(s_lock);
     return rc;
 }
@@ -116,7 +116,7 @@ static int on_block_end(void *user, size_t total_len) {
 /* ---------- DUCK:* SCPI commands (socket task) ---------- */
 static scpi_result_t cmd_duck_run(scpi_t *ctx) {
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    bool busy = (duck_runner_state(&s_runner) == DUCK_RUNNING) || s_start_pending;
+    bool busy = (duck_runner_state(&s_runner) == DUCK_RUNNING);
     bool receiving = (duck_store_upload_state(&s_store) == DUCK_UP_RECEIVING);
     if (busy || receiving) {
         xSemaphoreGive(s_lock);
@@ -129,32 +129,48 @@ static scpi_result_t cmd_duck_run(scpi_t *ctx) {
     if (!script) { script = s_demo; len = sizeof(s_demo) - 1; }
     memcpy(s_runbuf, script, len);
     s_runlen = len;
-    s_start_pending = true;               /* USB task starts it */
+    /* Initialise the runner under the same mutex used by poll and STOP.
+     * This publishes RUNNING before the next command, without typing here. */
+    int rc = duck_runner_start(&s_runner, s_runbuf, s_runlen);
     xSemaphoreGive(s_lock);
-    ESP_LOGI(TAG, "DUCK:RUN queued, %u bytes", (unsigned)len);
+    if (rc != 0) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    ESP_LOGI(TAG, "DUCK:RUN accepted, %u bytes", (unsigned)len);
     return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_duck_stop(scpi_t *ctx) {
     (void)ctx;
-    duck_runner_stop(&s_runner);          /* sets a volatile flag; idempotent */
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    duck_runner_stop(&s_runner);
+    xSemaphoreGive(s_lock);
     return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_duck_state(scpi_t *ctx) {
-    SCPI_ResultUInt32(ctx, (uint32_t)duck_runner_state(&s_runner));
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    uint32_t state = (uint32_t)duck_runner_state(&s_runner);
+    xSemaphoreGive(s_lock);
+    SCPI_ResultUInt32(ctx, state);
     return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_duck_line(scpi_t *ctx) {
-    SCPI_ResultUInt32(ctx, duck_runner_line(&s_runner));
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    uint32_t line = duck_runner_line(&s_runner);
+    xSemaphoreGive(s_lock);
+    SCPI_ResultUInt32(ctx, line);
     return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_duck_err(scpi_t *ctx) {
     char buf[96];
+    xSemaphoreTake(s_lock, portMAX_DELAY);
     snprintf(buf, sizeof buf, "%u,\"%s\"",
              (unsigned)duck_runner_line(&s_runner), duck_runner_error(&s_runner));
+    xSemaphoreGive(s_lock);
     SCPI_ResultCharacters(ctx, buf, strlen(buf));
     return SCPI_RES_OK;
 }
@@ -163,7 +179,7 @@ static scpi_result_t cmd_duck_up_start(scpi_t *ctx) {
     uint32_t len = 0;
     if (SCPI_ParamUInt32(ctx, &len, TRUE) != TRUE) return SCPI_RES_ERR;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    int rc = duck_store_reserve(&s_store, 1 /*TCP owner*/, (size_t)len);
+    int rc = duck_store_reserve(&s_store, s_session_owner, (size_t)len);
     xSemaphoreGive(s_lock);
     if (rc != 0) {
         SCPI_ErrorPush(ctx, SCPI_ERROR_SETTINGS_CONFLICT);
@@ -175,7 +191,7 @@ static scpi_result_t cmd_duck_up_start(scpi_t *ctx) {
 static scpi_result_t cmd_duck_up_abort(scpi_t *ctx) {
     (void)ctx;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    duck_store_abort(&s_store, 1);
+    duck_store_abort(&s_store, s_session_owner);
     xSemaphoreGive(s_lock);
     return SCPI_RES_OK;
 }
@@ -204,7 +220,7 @@ static const scpi_command_t duck_commands[] = {
 
 /* ---------- Descriptor metadata (SYSTem:HELP:DESCription?) ---------- */
 static const usbscpi_param_desc_t desc_up_start_params[] = {
-    { "length", "u32", true },
+    { .name = "length", .type = "u32", .required = true },
 };
 static const usbscpi_command_desc_t desc_commands[] = {
     { "DUCK:RUN",           "command", "Run the committed script, or the demo",
@@ -328,7 +344,9 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 void tud_umount_cb(void) {
     /* Detach mid-run: discard queued reports and end with a delivery error.
      * A new RUN is required after reconnect; scripts never resume. */
+    xSemaphoreTake(s_lock, portMAX_DELAY);
     duck_runner_detach(&s_runner);
+    xSemaphoreGive(s_lock);
 }
 
 /* ---------- esp32s3 internal PHY ---------- */
@@ -386,24 +404,35 @@ static void wifi_sta_start(void) {
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
+/* Runs on the socket task; no bytes from the next session are accepted before
+ * the preceding session's staged upload and execution have been cancelled. */
+static void net_session(void *user, bool connected) {
+    (void)user;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (connected) {
+        /* Positive, bounded token; avoids signed overflow after many sessions. */
+        s_next_owner = s_next_owner == INT32_MAX ? 1 : s_next_owner + 1;
+        s_session_owner = s_next_owner;
+    } else {
+        duck_store_abort(&s_store, s_session_owner);
+        duck_runner_stop(&s_runner);
+        s_session_owner = 0;
+    }
+    xSemaphoreGive(s_lock);
+}
+
 /* ---------- network control task ---------- */
 static void net_task(void *arg) {
     usbscpi_t *dev = (usbscpi_t *)arg;
     wifi_sta_start();
 
-    int waited = 0;
-    while (!s_got_ip && waited < 30000) {   /* bounded association timeout */
-        vTaskDelay(pdMS_TO_TICKS(200));
-        waited += 200;
-    }
-    if (!s_got_ip) {
-        ESP_LOGE(TAG, "Wi-Fi association timed out; SCPI listener not started");
-        vTaskDelete(NULL);
-        return;
-    }
+    /* Keep waiting across association failures: HID-only has no USB control
+     * fallback, and the event handler continues to retry the association. */
+    while (!s_got_ip) vTaskDelay(pdMS_TO_TICKS(200));
     ESP_LOGI(TAG, "SCPI/TCP listening on %s:%d (control is UNAUTHENTICATED)",
              s_ip, NET_SCPI_PORT);
-    if (usbscpi_socket_serve(dev, "0.0.0.0", NET_SCPI_PORT) != 0) {
+    if (usbscpi_socket_serve_sessions(dev, "0.0.0.0", NET_SCPI_PORT,
+                                     net_session, NULL) != 0) {
         ESP_LOGE(TAG, "listen on port %d failed", NET_SCPI_PORT);
     }
     vTaskDelete(NULL);
@@ -412,21 +441,14 @@ static void net_task(void *arg) {
 /* ---------- USB service + runner pump ----------
  * Drives TinyUSB (HID) and the runner. The runner never blocks: each poll does
  * bounded work and returns on a busy endpoint or unmet deadline. The run
- * handoff from the socket task is consumed here so duck_runner_start and
- * duck_runner_poll stay on one task. */
+ * state is protected by the same mutex used by the socket task. */
 static void usb_task(void *arg) {
     (void)arg;
     for (;;) {
         tud_task_ext(10, false);
-        if (s_start_pending) {
-            xSemaphoreTake(s_lock, portMAX_DELAY);
-            if (s_start_pending) {
-                duck_runner_start(&s_runner, s_runbuf, s_runlen);
-                s_start_pending = false;
-            }
-            xSemaphoreGive(s_lock);
-        }
+        xSemaphoreTake(s_lock, portMAX_DELAY);
         duck_runner_poll(&s_runner);
+        xSemaphoreGive(s_lock);
     }
 }
 
@@ -445,6 +467,7 @@ void app_main(void) {
     duck_runner_cfg_t rcfg = {
         .submit = hid_submit,
         .ready = hid_ready,
+        .complete = hid_ready,
         .now_ms = now_ms,
         .user = NULL,
         .max_runtime_ms = 60000,

@@ -44,6 +44,7 @@ typedef uint32_t (*duck_clock_t)(void *user);
 
 typedef struct {
     duck_hid_submit_t submit;
+    duck_hid_ready_t  complete;  /* last report delivered; NULL = synchronous */
     duck_hid_ready_t  ready;     /* may be NULL */
     duck_clock_t      now_ms;
     void             *user;
@@ -74,6 +75,7 @@ typedef struct {
 
     uint32_t start_ms;
     uint32_t delay_deadline;
+    uint32_t finish_ms;
 
     char     err[DUCK_ERR_MAX];
 } duck_runner_t;
