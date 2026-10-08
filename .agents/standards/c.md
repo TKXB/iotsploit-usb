@@ -17,8 +17,8 @@ tools/testing/test-c-full.sh         # the commit-time gate (build/c-agent-gate)
 
 Firmware examples use their own build systems; see each example's README:
 `idf.py build` (`examples/esp32s3`, `examples/esp32s3-spp-security`), `make`
-(`examples/stm32f4disco`, `examples/nrf52840`, `examples/butterfly-nrf52840`),
-and the Pico SDK via `cmake/iotsploit-usb-pico.cmake` (`examples/pico2`).
+(`examples/stm32f4disco`, `examples/stm32f4disco-socketcan`,
+`examples/nrf52840`, `examples/butterfly-nrf52840`), and the Pico SDK via `cmake/iotsploit-usb-pico.cmake` (`examples/pico2`).
 
 ## Warnings
 

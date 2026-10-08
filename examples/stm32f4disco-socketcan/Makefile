@@ -1,4 +1,4 @@
-PROJECT     := stm32f4disco_usbscpi
+PROJECT     := stm32f4disco_socketcan
 OUTPUT_DIR  := _build
 
 # ---- Paths (override with env vars if needed) ----
@@ -6,6 +6,8 @@ USBSCPI_ROOT  := $(abspath $(CURDIR)/../..)
 TINYUSB_ROOT  ?= $(HOME)/nordic/tinyusb
 LIBOPENCM3_DIR ?= $(HOME)/Projects/libopencm3
 PROJ_DIR      := $(CURDIR)
+# Board files shared with the plain example: CMSIS shim, linker script, OpenOCD.
+BOARD_DIR     := $(USBSCPI_ROOT)/examples/stm32f4disco
 
 # ---- Toolchain ----
 CC      := arm-none-eabi-gcc
@@ -30,10 +32,11 @@ CFLAGS  += -DCFG_TUSB_MCU=OPT_MCU_STM32F4
 CFLAGS  += -DSCPI_USER_CONFIG=1
 
 # ---- Include paths ----
-# IMPORTANT: PROJ_DIR must come first so stm32f4xx.h (CMSIS shim) is found
-# before any system header.
+# IMPORTANT: PROJ_DIR (tusb_config.h) and BOARD_DIR (stm32f4xx.h CMSIS shim)
+# must come first so they are found before any system header.
 INC_FOLDERS := \
   $(PROJ_DIR) \
+  $(BOARD_DIR) \
   $(USBSCPI_ROOT)/include \
   $(USBSCPI_ROOT)/glue \
   $(USBSCPI_ROOT)/third_party/libscpi/inc \
@@ -59,6 +62,7 @@ TINYUSB_SRCS := \
   $(TINYUSB_ROOT)/src/common/tusb_fifo.c \
   $(TINYUSB_ROOT)/src/device/usbd.c \
   $(TINYUSB_ROOT)/src/class/usbtmc/usbtmc_device.c \
+  $(TINYUSB_ROOT)/src/class/vendor/vendor_device.c \
   $(TINYUSB_ROOT)/src/portable/synopsys/dwc2/dcd_dwc2.c \
   $(TINYUSB_ROOT)/src/portable/synopsys/dwc2/dwc2_common.c
 
@@ -75,6 +79,7 @@ VPATH := \
   $(TINYUSB_ROOT)/src/common \
   $(TINYUSB_ROOT)/src/device \
   $(TINYUSB_ROOT)/src/class/usbtmc \
+  $(TINYUSB_ROOT)/src/class/vendor \
   $(TINYUSB_ROOT)/src/portable/synopsys/dwc2
 
 # Object files: flatten to _build/<basename>.o (no name collisions in this project)
@@ -83,7 +88,7 @@ OBJS := $(foreach src,$(ALL_SRCS),$(OUTPUT_DIR)/$(notdir $(src:.c=.o)))
 # ---- Linker flags ----
 # NOTE: libraries (LIBS) must come AFTER object files on the link line.
 LDFLAGS  := $(CPU_FLAGS) $(OPT)
-LDFLAGS  += -T$(PROJ_DIR)/linker.ld
+LDFLAGS  += -T$(BOARD_DIR)/linker.ld
 LDFLAGS  += -Wl,--gc-sections
 LDFLAGS  += -Wl,-Map=$(OUTPUT_DIR)/$(PROJECT).map
 LDFLAGS  += -Wl,--print-memory-usage
@@ -102,7 +107,7 @@ $(OUTPUT_DIR)/%.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Link (object files first, then libraries)
-$(OUTPUT_DIR)/$(PROJECT).elf: $(OBJS) $(PROJ_DIR)/linker.ld
+$(OUTPUT_DIR)/$(PROJECT).elf: $(OBJS) $(BOARD_DIR)/linker.ld
 	@mkdir -p $(OUTPUT_DIR)
 	$(CC) $(LDFLAGS) $(OBJS) $(LIBS) -o $@
 	$(SIZE) $@
@@ -117,7 +122,7 @@ $(OUTPUT_DIR)/$(PROJECT).hex: $(OUTPUT_DIR)/$(PROJECT).elf
 
 # Flash via on-board ST-Link (openocd)
 flash: $(OUTPUT_DIR)/$(PROJECT).elf
-	openocd -f $(PROJ_DIR)/openocd.cfg \
+	openocd -f $(BOARD_DIR)/openocd.cfg \
 	  -c "program $(OUTPUT_DIR)/$(PROJECT).elf verify reset exit"
 
 clean:
