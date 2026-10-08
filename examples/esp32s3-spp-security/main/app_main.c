@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_private/usb_phy.h"     /* usb_new_phy */
 #include "tusb.h"
 #include "usbscpi/usbscpi.h"
@@ -274,6 +275,19 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     (void)index; return desc_configuration;
 }
 
+/* Chip-unique serial number, shared by the USB descriptor and *IDN? so two
+ * identical boards can be told apart. */
+static const char *board_serial(void) {
+    static char serial[13];
+    if (serial[0] == '\0') {
+        uint8_t mac[6] = { 0 };
+        esp_efuse_mac_get_default(mac);
+        snprintf(serial, sizeof(serial), "%02X%02X%02X%02X%02X%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+    return serial;
+}
+
 static uint16_t _desc_str[32];
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
     (void)langid;
@@ -282,7 +296,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
     case 0: _desc_str[1] = 0x0409; n = 1; break;
     case 1: str = "IoTSploit";              break;
     case 2: str = "ESP32-S3 SPP Security";  break;
-    case 3: str = "0001";                   break;
+    case 3: str = board_serial();  break;
     default: return NULL;
     }
     if (str) while (*str && n < 31) _desc_str[1 + n++] = *str++;
@@ -336,12 +350,16 @@ void app_main(void) {
     usb_phy_start();
     tusb_init();
 
+    /* *IDN? carries the same chip-unique serial as the USB descriptor. */
+    static char idn[64];
+    snprintf(idn, sizeof(idn), "IoTSploit,ESP32S3-SPP-SEC,%s,0.1.0", board_serial());
+
     usbscpi_config_t cfg = {
         .usb_tx        = usb_tx,
         .line_buf      = s_line,
         .line_buf_len  = sizeof(s_line),
         .max_block_len = 4096,
-        .idn           = "IoTSploit,ESP32S3-SPP-SEC,0001,0.1.0",
+        .idn           = idn,
         .io_buf        = s_io,
         .io_buf_len    = sizeof(s_io),
         .proto         = 1,

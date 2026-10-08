@@ -22,6 +22,8 @@
 #include "nrfx_clock.h"
 #include "app_error.h"
 
+const char *board_serial(void); /* usb_descriptors.c */
+
 /* ---------- Static buffers (no dynamic allocation) ---------- */
 static uint8_t s_storage[2048];
 static char    s_line[128];
@@ -304,12 +306,16 @@ int main(void) {
     ble_sniff_init();
 
     /* 3. Init usbscpi core. */
+    /* *IDN? carries the same chip-unique serial as the USB descriptor. */
+    static char idn[64];
+    snprintf(idn, sizeof(idn), "IoTSploit,butterfly-nRF52840,%s,0.1.0", board_serial());
+
     usbscpi_config_t cfg = {
         .usb_tx        = usb_tx,
         .line_buf      = s_line,
         .line_buf_len  = sizeof(s_line),
         .max_block_len = 4096,
-        .idn           = "IoTSploit,butterfly-nRF52840,0001,0.1.0",
+        .idn           = idn,
         .io_buf        = s_io,
         .io_buf_len    = sizeof(s_io),
         .proto         = 1,

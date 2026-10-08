@@ -1,3 +1,5 @@
+#include <libopencm3/stm32/desig.h>
+
 #include "tusb.h"
 #include "usbscpi/usbscpi.h"
 
@@ -61,6 +63,16 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
 /* ------------------------------------------------------------------
  * USB String Descriptors
  * ------------------------------------------------------------------ */
+/* Chip-unique serial number, shared by the USB descriptor and *IDN? so two
+ * identical boards can be told apart. */
+const char *board_serial(void) {
+    static char serial[25];
+    if (serial[0] == '\0') {
+        desig_get_unique_id_as_string(serial, sizeof(serial));
+    }
+    return serial;
+}
+
 static uint16_t _desc_str[32];
 
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t language_id) {
@@ -75,7 +87,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t language_id) {
         break;
     case 1: str = "IoTSploit";            break;
     case 2: str = "STM32F4-Disco SocketCAN"; break;
-    case 3: str = "0001";                 break;
+    case 3: str = board_serial();         break;
     case 4: str = "gs_usb CAN";           break;
     default: return NULL;
     }

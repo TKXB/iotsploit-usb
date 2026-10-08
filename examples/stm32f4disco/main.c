@@ -27,6 +27,8 @@
 #include "usbscpi/usbscpi.h"
 #include "usbscpi_tinyusb.h"
 
+const char *board_serial(void); /* usb_descriptors.c */
+
 /* ---------- SystemCoreClock (consumed by dwc2_stm32.h) ---------- */
 uint32_t SystemCoreClock = 168000000u;
 
@@ -554,12 +556,16 @@ int main(void) {
 
     tusb_init();
 
+    /* *IDN? carries the same chip-unique serial as the USB descriptor. */
+    static char idn[64];
+    snprintf(idn, sizeof(idn), "IoTSploit,STM32F4-Disco,%s,0.1.0", board_serial());
+
     usbscpi_config_t cfg = {
         .usb_tx        = usb_tx,
         .line_buf      = s_line,
         .line_buf_len  = sizeof(s_line),
         .max_block_len = 4096,
-        .idn           = "IoTSploit,STM32F4-Disco,0001,0.1.0",
+        .idn           = idn,
         .io_buf        = s_io,
         .io_buf_len    = sizeof(s_io),
         .proto         = 1,

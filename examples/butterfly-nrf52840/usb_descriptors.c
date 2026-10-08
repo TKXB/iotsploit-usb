@@ -1,3 +1,4 @@
+#include "nrf.h"
 #include "tusb.h"
 #include "usbscpi/usbscpi.h"
 
@@ -53,6 +54,20 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
 /* ------------------------------------------------------------------
  * USB String Descriptors
  * ------------------------------------------------------------------ */
+/* Chip-unique serial number, shared by the USB descriptor and *IDN? so two
+ * identical boards can be told apart. */
+const char *board_serial(void) {
+    static char serial[17];
+    if (serial[0] == '\0') {
+        static const char hex[] = "0123456789ABCDEF";
+        uint32_t id[2] = { NRF_FICR->DEVICEID[1], NRF_FICR->DEVICEID[0] };
+        for (int i = 0; i < 16; i++) {
+            serial[i] = hex[(id[i / 8] >> (28 - 4 * (i % 8))) & 0xFu];
+        }
+    }
+    return serial;
+}
+
 static uint16_t _desc_str[32];
 
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t language_id) {
@@ -67,7 +82,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t language_id) {
         break;
     case 1: str = "IoTSploit"; break;
     case 2: str = "butterfly nRF52840 USBTMC"; break;
-    case 3: str = "0002"; break;
+    case 3: str = board_serial(); break;
     default: return NULL;
     }
 
