@@ -51,7 +51,8 @@ APP_SRCS := \
 USBSCPI_SRCS := \
   $(USBSCPI_ROOT)/src/usbscpi.c \
   $(wildcard $(USBSCPI_ROOT)/third_party/libscpi/src/*.c) \
-  $(USBSCPI_ROOT)/glue/usbscpi_tinyusb.c
+  $(USBSCPI_ROOT)/glue/usbscpi_tinyusb.c \
+  $(USBSCPI_ROOT)/helpers/ring_buffer.c
 
 TINYUSB_SRCS := \
   $(TINYUSB_ROOT)/src/tusb.c \
@@ -68,6 +69,7 @@ VPATH := \
   $(PROJ_DIR) \
   $(USBSCPI_ROOT)/src \
   $(USBSCPI_ROOT)/glue \
+  $(USBSCPI_ROOT)/helpers \
   $(USBSCPI_ROOT)/third_party/libscpi/src \
   $(TINYUSB_ROOT)/src \
   $(TINYUSB_ROOT)/src/common \

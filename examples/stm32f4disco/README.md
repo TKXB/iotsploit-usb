@@ -39,6 +39,8 @@ libopencm3                TinyUSB DWC2 driver          libscpi v2.3
 | Clock | HSE 8 MHz -> PLL -> 168 MHz SYSCLK, 48 MHz PLLQ (USB) |
 | LEDs | PD12 (green), PD13 (orange), PD14 (red), PD15 (blue) |
 | Button | PA0 (user, active high) |
+| CAN1 | PD0 (RX) / PD1 (TX), AF9, external transceiver |
+| CAN2 | PB12 (RX) / PB13 (TX), AF9, external transceiver |
 | Flash | 1 MB at 0x08000000 |
 | SRAM | 128 KB at 0x20000000 (USB cannot access CCM at 0x10000000) |
 | Debug | On-board ST-Link/V2 (SWD) |
@@ -178,6 +180,35 @@ sudo iotsploit-host scpi "BTN?"
 | `BTN?` | u32 | Read user button (PA0), 1=pressed |
 | `GPIO:SET <pin> <val>` | — | Set GPIOA pin (0-15) |
 | `GPIO:GET? <pin>` | u32 | Read GPIOA pin (0-15) |
+| `CAN:OPEN <bus>,<bitrate>` | — | Start bus 1 or 2 at 125000/250000/500000/1000000 bit/s, accept all IDs |
+| `CAN:SEND <bus>,<id>,"<hex>"` | — | Send one frame (0-8 data bytes); id > 0x7FF is sent as 29-bit extended |
+| `CAN:RECV?` | string | Pop the oldest received frame: `bus,id,ext,rtr,len,data`; empty if none |
+| `CAN:COUNt?` | u32 | Received frames waiting |
+| `CAN:STATe? <bus>` | string | `open,tec,rec,busoff,rx_dropped` |
+
+## CAN
+
+Wire each controller to its own 3.3 V CAN transceiver (SN65HVD230, TJA1051T/3,
+MCP2562 with VIO = 3.3 V): MCU TX -> transceiver TXD, MCU RX -> transceiver RXD.
+Tie the transceiver's standby/silent pin low and terminate each bus with 120 Ω
+at both ends. CAN2 shares filter banks with CAN1, so the CAN1 clock is always
+enabled; bus 1 uses filter bank 0 and bus 2 uses bank 14.
+
+Bit timing is fixed at 14 time quanta (1 + 11 + 2, sample point 85.7 %) from
+the 42 MHz APB1 clock. Received frames from both buses share a 64-frame queue
+filled by the RX0 interrupts; frames arriving while it is full are counted in
+`rx_dropped`. `CAN:OPEN` fails with an execution error when the controller
+cannot leave init mode, which usually means no transceiver is connected.
+
+```bash
+sudo iotsploit-host scpi "CAN:OPEN 1,500000"
+sudo iotsploit-host scpi "CAN:OPEN 2,500000"
+sudo iotsploit-host scpi 'CAN:SEND 1,#H123,"DEADBEEF"'
+sudo iotsploit-host scpi "CAN:RECV?"      # 2,0x123,0,0,4,DEADBEEF if CAN1 and CAN2 share a bus
+sudo iotsploit-host scpi "CAN:STATe? 1"   # 1,0,0,0,0
+```
+
+Quote the data: unquoted hex that starts with a digit parses as a number.
 
 ## Source Files
 
