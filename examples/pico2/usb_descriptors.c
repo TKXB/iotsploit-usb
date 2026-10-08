@@ -1,3 +1,4 @@
+#include "pico/unique_id.h"
 #include "tusb.h"
 #include "usbscpi/usbscpi.h"
 
@@ -36,18 +37,13 @@ enum {
 #define USBTMC_EP_OUT 0x01
 #define USBTMC_EP_IN  0x81
 
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_INTERFACE_DESC_LEN + TUD_ENDPOINT_DESC_LEN * 2)
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_USBTMC_IF_DESCRIPTOR_LEN + TUD_USBTMC_BULK_DESCRIPTORS_LEN)
 
 uint8_t const desc_configuration[] = {
-    /* Configuration descriptor */
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN,
                           TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
-    /* Interface descriptor: Class=0xFE, SubClass=0x03, Protocol=0x01 (USBTMC) */
-    TUD_INTERFACE_DESCRIPTOR(ITF_NUM_USBTMC, 0, 2, 0xFE, 0x03, 0x01, 0),
-    /* Bulk OUT endpoint */
-    TUD_ENDPOINT_DESCRIPTOR(USBTMC_EP_OUT, TUSB_XFER_BULK, 64, 0),
-    /* Bulk IN endpoint */
-    TUD_ENDPOINT_DESCRIPTOR(USBTMC_EP_IN, TUSB_XFER_BULK, 64, 0),
+    TUD_USBTMC_IF_DESCRIPTOR(ITF_NUM_USBTMC, 2, 0, TUD_USBTMC_PROTOCOL_USB488),
+    TUD_USBTMC_BULK_DESCRIPTORS(USBTMC_EP_OUT, USBTMC_EP_IN, 64),
 };
 
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
@@ -58,6 +54,16 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
 /* ------------------------------------------------------------------
  * USB String Descriptors
  * ------------------------------------------------------------------ */
+/* Chip-unique serial number, shared by the USB descriptor and *IDN? so two
+ * identical boards can be told apart. */
+const char *board_serial(void) {
+    static char serial[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
+    if (serial[0] == '\0') {
+        pico_get_unique_board_id_string(serial, sizeof(serial));
+    }
+    return serial;
+}
+
 static uint16_t _desc_str[32];
 
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t language_id) {
@@ -72,7 +78,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t language_id) {
         break;
     case 1: str = "IoTSploit"; break;
     case 2: str = "Pico2 USBTMC"; break;
-    case 3: str = "0001"; break;
+    case 3: str = board_serial(); break;
     default: return NULL;
     }
 

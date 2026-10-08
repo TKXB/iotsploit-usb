@@ -14,7 +14,8 @@ name = "iotsploit-host"
 path = "src/bin/iotsploit-host.rs"
 
 [features]
-default = ["kernel"]
+# TCP is std-only, so it costs nothing to include by default.
+default = ["kernel", "tcp"]
 kernel = []                         # Linux /dev/usbtmcN backend
 # Raw SCPI over TCP (port 5025). std-only, no extra dependencies.
 tcp = []

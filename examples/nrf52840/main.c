@@ -13,6 +13,8 @@
 #include "nrf_soc.h"
 #include "nrf_sdh_soc.h"
 
+const char *board_serial(void); /* usb_descriptors.c */
+
 /* ---------- Static buffers (no dynamic allocation) ---------- */
 static uint8_t s_storage[2048];
 static char    s_line[96];
@@ -91,9 +93,9 @@ static scpi_result_t cmd_ble_scan_clear(scpi_t *ctx) {
 /* The iotsploit-ui BLE panel drives scans as a timed operation:
  *   BLE:SCAN <secs>  ->  poll BLE:SCAN:DONE?  ->  BLE:SCAN? <index>
  * The nRF's native interface is start/stop with a BLE:SCAN:STATe? poll, so these
- * three aliases bridge the dialect without any host/UI change. They are kept out
- * of the descriptor on purpose: the descriptor advertises the native ble-scan
- * workflow, and the UI does not read the descriptor. */
+ * three aliases bridge the dialect without any host/UI change. BLE:SCAN and
+ * BLE:SCAN:DONE? are also the trigger and done query of the descriptor's ble-scan
+ * workflow, so they are described; BLE:SCAN? is a UI-only alias and is not. */
 
 static scpi_result_t cmd_ble_scan_timed(scpi_t *ctx) {
     uint32_t secs = 5;                             /* default when omitted */
@@ -310,6 +312,9 @@ static const scpi_command_t ble_commands[] = {
 /* The device is the single source of truth for its command/workflow metadata:
    the host fetches this over SYST:HELP:DESC? instead of carrying a local copy. */
 
+static const usbscpi_param_desc_t desc_ble_scan_timed_params[] = {
+    { "duration", "u32", false },
+};
 static const usbscpi_param_desc_t desc_ble_scan_result_params[] = {
     { "index", "u32", true },
 };
@@ -342,6 +347,10 @@ static const usbscpi_command_desc_t desc_commands[] = {
       desc_ble_scan_result_params, 1, "string" },
     { "BLE:SCAN:CLEar",  "command", "Clear scan results",
       NULL, 0, NULL },
+    { "BLE:SCAN",        "command", "Clear results, then scan for N seconds (default 5)",
+      desc_ble_scan_timed_params, 1, NULL },
+    { "BLE:SCAN:DONE?",  "query",   "1 = scan finished, 0 = still scanning",
+      NULL, 0, "bool" },
     { "BLE:CONNect",         "command", "Connect to BLE scan result by index",
       desc_ble_conn_params, 1, NULL },
     { "BLE:CONNect:STATe?",  "query",   "0=idle 1=connecting 2=connected 3=failed",
@@ -617,12 +626,16 @@ int main(void) {
     }
 
     /* 2. Init usbscpi core */
+    /* *IDN? carries the same chip-unique serial as the USB descriptor. */
+    static char idn[64];
+    snprintf(idn, sizeof(idn), "IoTSploit,nRF52840,%s,0.1.0", board_serial());
+
     usbscpi_config_t cfg = {
         .usb_tx        = usb_tx,
         .line_buf      = s_line,
         .line_buf_len  = sizeof(s_line),
         .max_block_len = DESC_BUF_SIZE,
-        .idn           = "IoTSploit,nRF52840,0001,0.1.0",
+        .idn           = idn,
         .io_buf        = s_io,
         .io_buf_len    = sizeof(s_io),
         .proto         = 1,

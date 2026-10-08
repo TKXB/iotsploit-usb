@@ -10,6 +10,7 @@ pub mod caps;
 #[cfg(feature = "tcp")]
 pub mod dataplane;
 pub mod descriptor;
+pub mod discover;
 pub mod headers;
 pub mod session;
 #[cfg(feature = "tcp")]
