@@ -53,6 +53,9 @@ static void serve_client(usbscpi_t *ctx, usbscpi_sock_t fd) {
     int one = 1;
     /* Without TCP_NODELAY, Nagle delays every small SCPI reply by ~40 ms. */
     (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
+    /* recv() below blocks with no timeout; keepalive is what ends it, and frees
+     * the port, when the client is gone without having closed. */
+    usbscpi_sock_set_keepalive(fd);
 
     s_client_fd = fd;
 

@@ -95,6 +95,9 @@ static void serve_consumer(usbscpi_ring_t *ring, usbscpi_sock_t fd, size_t strid
     int one = 1;
     /* Without TCP_NODELAY, Nagle holds small record batches for ~40 ms. */
     (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
+    /* An idle stream sends nothing, so a vanished consumer would otherwise stay
+     * attached and keep the next one out. */
+    usbscpi_sock_set_keepalive(fd);
     if (usbscpi_sock_set_nonblocking(fd) != 0) {
         usbscpi_closesocket(fd);
         return;

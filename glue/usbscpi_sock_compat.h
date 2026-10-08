@@ -113,4 +113,41 @@ static inline int usbscpi_sock_would_block(void) {
 #define MSG_NOSIGNAL 0
 #endif
 
+/* Both glues serve one peer at a time, so a peer that vanished without a FIN
+ * (Wi-Fi dropped, laptop slept) holds the port until TCP notices. With no
+ * keepalive an idle connection is never probed, and the OS default idle is two
+ * hours. These probe after 30 s idle and give up after 3 misses 5 s apart. */
+#ifndef USBSCPI_SOCK_KEEPIDLE_S
+#define USBSCPI_SOCK_KEEPIDLE_S 30
+#endif
+#ifndef USBSCPI_SOCK_KEEPINTVL_S
+#define USBSCPI_SOCK_KEEPINTVL_S 5
+#endif
+#ifndef USBSCPI_SOCK_KEEPCNT
+#define USBSCPI_SOCK_KEEPCNT 3
+#endif
+
+/* Best effort: an option the stack does not know keeps its default. macOS and
+ * older Windows spell the idle option TCP_KEEPALIVE; lwIP defines both, and
+ * its TCP_KEEPALIVE means something else, so TCP_KEEPIDLE is tried first. */
+static inline void usbscpi_sock_set_keepalive(usbscpi_sock_t fd) {
+    int v = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const char *)&v, sizeof(v));
+#if defined(TCP_KEEPIDLE)
+    v = USBSCPI_SOCK_KEEPIDLE_S;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, (const char *)&v, sizeof(v));
+#elif defined(TCP_KEEPALIVE)
+    v = USBSCPI_SOCK_KEEPIDLE_S;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, (const char *)&v, sizeof(v));
+#endif
+#if defined(TCP_KEEPINTVL)
+    v = USBSCPI_SOCK_KEEPINTVL_S;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, (const char *)&v, sizeof(v));
+#endif
+#if defined(TCP_KEEPCNT)
+    v = USBSCPI_SOCK_KEEPCNT;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, (const char *)&v, sizeof(v));
+#endif
+}
+
 #endif /* USBSCPI_SOCK_COMPAT_H */
