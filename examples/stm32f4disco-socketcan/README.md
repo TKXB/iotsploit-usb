@@ -70,8 +70,8 @@ A controller has one owner. `ip link set canN up` takes it, even from SCPI;
 `owner,tec,rec,busoff,rx_dropped` with owner 0 closed, 1 SCPI, 2 SocketCAN.
 
 ```bash
-sudo iotsploit-host scpi "*IDN?"          # IoTSploit,STM32F4-Disco-SocketCAN,0001,0.1.0
-sudo iotsploit-host scpi "CAN:STATe? 1"   # 2,0,0,0,0 while can0 is up
+sudo iotsploit-host send "*IDN?"          # IoTSploit,STM32F4-Disco-SocketCAN,<chip serial>,0.1.0
+sudo iotsploit-host send "CAN:STATe? 1"   # 2,0,0,0,0 while can0 is up
 ```
 
 ## Source Files

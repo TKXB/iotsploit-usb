@@ -201,102 +201,19 @@ USBTMC's `REQUEST_DEV_DEP_MSG_IN` handshake.
 so a device serving both USB and TCP needs two `usbscpi_t` instances, each with
 its own storage, `line_buf` and `io_buf`.
 
-## ESP32-S3 Example Build and Flash
+## Building and Flashing the Examples
 
-Example path:
+Each board builds with its own toolchain; see the README in its directory
+(`examples/esp32s3/README.md`, `examples/stm32f4disco/README.md`, …). After
+flashing, check the board from the host:
 
-```bash
-cd /home/tkxb/Projects/esp32s3_demo/iotsploit-usb/examples/esp32s3
+```sh
+iotsploit-host devices      # every connected board, numbered, with its identity
+iotsploit-host -d 1 info    # what board 1 is and what it can do
 ```
 
-Use the installed ESP-IDF v5.2.2 environment:
-
-```bash
-source /home/tkxb/HDD/Projects/esp-idf/export.sh
-```
-
-Verified tools:
-
-```text
-ESP-IDF v5.2.2
-idf.py: /home/tkxb/HDD/Projects/esp-idf/tools/idf.py
-compiler: /home/tkxb/.espressif/tools/xtensa-esp-elf/esp-13.2.0_20230928/xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc
-```
-
-Note: an ESP-IDF v5.4 checkout exists at `/home/tkxb/HDD/Projects/esp-idf_master/esp-idf`, but its export failed because the v5.4 `xtensa-esp-elf` tool was not installed.
-
-Build the firmware:
-
-```bash
-source /home/tkxb/HDD/Projects/esp-idf/export.sh
-idf.py build
-```
-
-The build generates:
-
-```text
-build/esp32s3_usbscpi_demo.bin
-```
-
-List connected serial adapters:
-
-```bash
-python3 -m serial.tools.list_ports -v
-```
-
-The ESP32-S3 board was found on:
-
-```text
-/dev/ttyUSB2
-CP2102N USB to UART Bridge Controller
-VID:PID=10C4:EA60
-SER=4c4818609ae7ec11bcd67e60e89bdf6f
-```
-
-Flash through the CP2102N UART adapter:
-
-```bash
-source /home/tkxb/HDD/Projects/esp-idf/export.sh
-idf.py -p /dev/ttyUSB2 flash
-```
-
-`idf.py flash` uses esptool's default reset behavior, which toggles CP210x RTS/DTR to place the ESP32-S3 into download mode automatically.
-
-Flash result:
-
-```text
-Chip is ESP32-S3 (QFN56) revision v0.1
-MAC: 34:85:18:41:c6:ac
-Writing bootloader, app, and partition table succeeded
-Hard resetting via RTS pin
-```
-
-Verify boot with:
-
-```bash
-source /home/tkxb/HDD/Projects/esp-idf/export.sh
-idf.py -p /dev/ttyUSB2 monitor
-```
-
-Verified boot output:
-
-```text
-Project name: esp32s3_usbscpi_demo
-App version: 399bc25-dirty
-ESP-IDF: v5.2.2
-Calling app_main()
-Returned from app_main()
-Wi-Fi and BLE initialization logs appeared
-```
-
-Observed warning:
-
-```text
-Detected size(8192k) larger than the size in the binary image header(2048k).
-Using the size in the binary image header.
-```
-
-This means the board has 8 MB flash, while the current firmware image is configured for 2 MB flash.
+Every board reports a chip-unique serial number in its USB descriptor and in
+`*IDN?`, so identical boards can be told apart.
 
 ## TinyUSB Glue
 

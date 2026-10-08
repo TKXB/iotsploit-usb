@@ -4,24 +4,49 @@ ESP32-S3 USBTMC (Test and Measurement Class) demo using TinyUSB.
 
 ## Build
 
+Tested with ESP-IDF v5.2.2. Load the ESP-IDF environment first (adjust the path
+to your installation):
+
 ```bash
-. /home/tkxb/HDD/Projects/esp-idf/export.sh
-cd /home/tkxb/Projects/iotsploit-usb/examples/esp32s3
+. $HOME/esp/esp-idf/export.sh
+cd examples/esp32s3
 idf.py set-target esp32s3
 idf.py build
 ```
 
+The build produces `build/esp32s3_usbscpi_demo.bin`.
+
 ## Flash & Monitor
 
+Find the board's serial port, then flash and watch it boot:
+
 ```bash
-idf.py -p /dev/ttyACM0 flash monitor
+python3 -m serial.tools.list_ports -v
+idf.py -p <port> flash monitor
+```
+
+`idf.py flash` toggles RTS/DTR to enter download mode, which works through the
+common CP210x USB-UART bridges. The boot log ends with `Calling app_main()`.
+
+If the monitor warns `Detected size(8192k) larger than the size in the binary
+image header(2048k)`, the board has 8 MB of flash while the image is configured
+for 2 MB. It still boots; set the flash size in `idf.py menuconfig` to use the
+rest.
+
+Once the USB port enumerates, check it from the host:
+
+```bash
+iotsploit-host devices
+iotsploit-host info
 ```
 
 ## Host Test (pyvisa)
 
 ```python
 import pyvisa
-d = pyvisa.ResourceManager().open_resource('USB0::0x1209::0x0001::0001::INSTR')
+rm = pyvisa.ResourceManager()
+# The serial number is the board's factory MAC; list_resources() shows it.
+d = rm.open_resource(next(r for r in rm.list_resources() if '0x1209::0x0001' in r))
 print(d.query('*IDN?'))
 print(d.query('SYST:CAP?'))
 d.write('GPIO:SET 2,1')

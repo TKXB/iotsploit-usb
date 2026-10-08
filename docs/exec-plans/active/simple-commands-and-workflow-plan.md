@@ -1,6 +1,6 @@
 # Simple Commands and Workflow
 
-Status: decided, not started. Proposal page with current-vs-proposed
+Status: phase 1 done; phases 2 and 3 not started. Proposal page with current-vs-proposed
 comparisons: https://claude.ai/artifact/NxmUuLzzxvQ7KXArH3qZbj
 
 ## Goal
@@ -70,8 +70,8 @@ table and the descriptor), `tools/fw <board> flash`, `tools/fw <board> check`.
 - Default build lacks `tcp`, yet `--help` shows TCP and `stream` examples.
 - Device errors print an empty line and exit 0.
 - Handler and descriptor tables drift: nRF52840 has 31 handlers vs 26
-  descriptor entries (3 used by its own `ble-scan` workflow, 2 stubs);
-  Pico2 has no descriptor.
+  descriptor entries (2 used by its own `ble-scan` workflow, 1 UI alias,
+  2 UI stubs); Pico2 has no descriptor.
 - Ten state queries return bare numbers that differ by board: "pair done" is
   `4` on esp32s3 and `3` on nrf52840; `ble-connect-pair` succeeds on `6` vs
   `5`.
@@ -126,9 +126,10 @@ transport tests passes `tools/testing/test-c-full.sh`; every host step passes
    `pico_get_unique_board_id`, STM32 `UID_BASE`). Done when two identical
    boards show different serials in `devices`.
 8. **Pico2 descriptor.** Describe `GPIO:SET`, `GPIO:GET?`, `ADC:READ?`.
-9. **nRF52840 descriptor drift.** Describe `BLE:SCAN`, `BLE:SCAN:DONE?`,
-   `BLE:SCAN?` (used by its `ble-scan` workflow); delete the
-   `BLE:PAIR:CONFirm` and `BLE:PAIR:NUMCmp?` stubs, which no prompt uses.
+9. **nRF52840 descriptor drift.** Describe `BLE:SCAN` and `BLE:SCAN:DONE?`,
+   the trigger and done query of its own `ble-scan` workflow. `BLE:SCAN?` and
+   the `BLE:PAIR:CONFirm`/`BLE:PAIR:NUMCmp?` stubs stay undescribed and are
+   kept: the iotsploit-ui BLE panel calls them.
 10. **Wrong summary.** esp32s3 `ble-connect`: it connects, it does not pair.
 11. **Docs.** Move the ESP32-S3 build/flash section out of the root README into
     `examples/esp32s3/README.md` with generic paths; fix host README
@@ -136,6 +137,22 @@ transport tests passes `tools/testing/test-c-full.sh`; every host step passes
     the new commands.
 12. **Phase gate.** C gate, `cargo test`, `tests/scpi_tcp_smoke.py`, and the
     per-OS smoke checklist on every available board.
+
+**Phase 1 outcome.**
+
+- Host: steps 1–6 as written. `send` checks errors in the same message
+  (`*CLS;<cmd>;:SYSTem:ERRor?`): verified on the daemon that a failed query
+  then returns its error immediately instead of timing out over TCP, and that
+  USBTMC's single-message replies and TCP's per-line replies parse alike.
+- Firmware: steps 7–10 as written, plus three fixes the Pico2 example needed to
+  build at all (glue include path, stale TinyUSB descriptor macros, a comment
+  ended early by `msgBulkIn_*/`); its `io_buf` grew to 1024 bytes to hold the
+  descriptor.
+- Built here: stm32f4disco, stm32f4disco-socketcan, pico2. Not built (SDK
+  downloads blocked): nrf52840, butterfly-nrf52840, esp32s3,
+  esp32s3-spp-security; their descriptor tables were compiled and emitted
+  through the core on the host, and parsed by `iotsploit-host help`.
+- Not flashed or exercised on hardware.
 
 ### Phase 2: One vocabulary (old names kept as aliases)
 

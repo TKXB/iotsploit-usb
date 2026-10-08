@@ -1,9 +1,17 @@
 # iotsploit-host (Rust)
 
 A command-line tool that lets you control any **`iotsploit-usb`** device from
-your PC over a standard USB cable. The device speaks **SCPI over USBTMC**; this
-host talks to it through the Linux kernel's `/dev/usbtmcN` driver, so you do
-not need any board-specific code on the PC — one binary controls every board.
+your PC, over USB or the network. The device speaks **SCPI** (over USBTMC or raw
+TCP on port 5025) and describes its own commands and workflows, so you do not
+need any board-specific code on the PC: one binary controls every board.
+
+```sh
+iotsploit-host devices            # what's connected
+iotsploit-host info               # what this board is
+iotsploit-host help               # what it can do
+iotsploit-host send GPIO:SET 2,1  # do one thing
+iotsploit-host workflow wifi-scan # run a multi-step job
+```
 
 > This implements **Milestones 0–10** of the host plan
 > ([`docs/iotsploit-usb-rust-host-plan.md`](../../docs/iotsploit-usb-rust-host-plan.md)):
@@ -33,23 +41,19 @@ not need any board-specific code on the PC — one binary controls every board.
 
 ## 1. What you can do with it
 
-- Discover and open any `iotsploit-usb` device automatically.
-- Send SCPI commands and read text responses.
-- Read **binary block** responses (e.g. `DATA:READ?`) without corrupting them
-  as text.
-- Parse `*IDN?`, `SYSTem:CAPabilities?`, and `SYSTem:HELP:HEADers?`.
-- Query the on-device **line-record descriptor** (`SYSTem:HELP:DESCription?`)
-  to discover commands, parameters, and workflows.
-- Run **generic workflows** (`trigger → poll → count → fetch` or interactive
-  polling) from command/workflow metadata read **live from the device** — there
-  are no local profile files to keep in sync.
-- Drain the SCPI error queue.
-- Drive everything from a one-liner or an interactive prompt.
+- List every connected board with its identity, and pick one by number.
+- See what a board is (`info`) and what it can do (`help`), straight from the
+  board's own description of its commands and workflows.
+- Send any SCPI command (`send`). Text, binary blocks and errors are handled
+  for you: if the device rejects a command you see why, with a suggestion for
+  a mistyped name, and the exit status says it failed.
+- Run multi-step **workflows** (`trigger → poll → fetch`, or interactive ones
+  such as BLE pairing) that the device describes.
+- Read a device's continuous data stream over TCP (`stream`).
+- Drive everything from one-liners or an interactive prompt.
 
-It is **device-independent**: it learns what commands exist from the device
-itself, and profiles provide metadata for workflow automation. The same
-binary works for the nRF52840, ESP32-S3, Pico2, and any future
-`iotsploit-usb` board.
+It is **device-independent**: the same binary works for the nRF52840,
+ESP32-S3, Pico2, STM32F4 and any future `iotsploit-usb` board.
 
 ## 2. Prerequisites
 
@@ -86,15 +90,15 @@ cd host/rust
 cargo build --release
 ```
 
-The binary is at `target/release/iotsploit-host`. The default (Linux kernel)
-build has **zero external dependencies**. The `raw-usb` feature adds `nusb`
+The binary is at `target/release/iotsploit-host`. The default build (Linux
+kernel USBTMC plus TCP) has **zero external dependencies**. The `raw-usb` feature adds `nusb`
 (pure Rust — no libusb C library to install) plus `futures-lite`/`async-io`;
 it is needed on Windows/macOS and optional on Linux.
 
 **Platform-specific build:**
 
 ```sh
-# Linux (default: kernel backend, no extra deps)
+# Linux (default: kernel USBTMC + TCP, no extra deps)
 cargo build --release
 
 # Windows / macOS / Linux (raw USB backend via nusb)
@@ -119,7 +123,7 @@ The USBTMC device node is root-only by default. You have two options.
 **Option A — run with `sudo` (quickest):**
 
 ```sh
-sudo iotsploit-host idn
+sudo iotsploit-host info
 ```
 
 **Option B — a udev rule (recommended, so you never need `sudo`):**
@@ -146,147 +150,146 @@ runs as your normal user.
 
 ## 5. Quick start
 
-```sh
-$ iotsploit-host list          # show USBTMC nodes without opening one
-/dev/usbtmc0
+```console
+$ iotsploit-host devices
+#  ADDRESS   IDENTITY
+1  usbtmc:0  IoTSploit,nRF52840,6F1A2B3C4D5E6F70,0.1.0
+2  usbtmc:1  IoTSploit,ESP32S3,34851841C6AC,0.1.0
 
-$ iotsploit-host idn           # who are you?
-IoTSploit,nRF52840,0001,0.1.0
+$ iotsploit-host -d 2 info
+device     IoTSploit,ESP32S3,34851841C6AC,0.1.0
+address    usbtmc:1
+protocol   1   mtu 256   max block 4096
+commands   34   workflows 5   stream yes
 
-$ iotsploit-host caps          # what can you do?
-raw      : proto=1;mtu=256;maxblock=4096;feat=
-proto    : Some(1)
-mtu      : Some(256)
-maxblock : Some(4096)
-features : []
-
-$ iotsploit-host headers       # list every SCPI command the device knows
-*IDN?
-*RST
-*CLS
-...
-DATA:READ?
-BLE:SCAN:START
-BLE:SCAN:STOP
-...
-```
-
-If `list` shows exactly one node, every other command auto-detects it — no
-`--device` needed.
-
-Profiles and workflows (metadata comes from the connected device):
-
-```sh
-$ iotsploit-host profile                # show the device's commands & workflows
-idn      : IoTSploit,ESP32S3,0001,0.1.0
-commands : 22
-  GPIO:SET [command] Set GPIO output level
+$ iotsploit-host -d 2 help
+COMMANDS (send with: iotsploit-host send <command>)
+  GPIO:SET <pin>,<value>   Set GPIO output level
   ...
-workflows: 3
-  wifi-scan (TriggerPollFetch) Scan for Wi-Fi access points
+WORKFLOWS (run with: iotsploit-host workflow <name>)
+  wifi-scan  Scan for Wi-Fi access points
+  ...
 
-$ iotsploit-host workflow wifi-scan     # run a workflow
-trigger: WLAN:SCAN
-done after 1.4s
-results (2):
-  [0] MyWiFi,-52,cc:cc:cc:cc:cc:cc
-  [1] GuestNet,-78,aa:bb:cc:dd:ee:ff
+$ iotsploit-host -d 2 send GPIO:SET 2,1
+ok
 
-$ iotsploit-host describe               # on-device descriptor (if supported)
-DEV name=esp32s3 idn="IoTSploit,ESP32S3,0001,0.1.0" proto=1 mtu=256 max_block=4096
-CMD GPIO:SET kind=command summary="Set GPIO output level" param=pin:u32:req param=value:bool:req returns=none
-...
-WF wifi-scan type=trigger_poll_fetch trigger=WLAN:SCAN done=WLAN:SCAN:DONE?:1 count=WLAN:SCAN:COUNt? fetch=WLAN:SCAN?#index
+$ iotsploit-host -d 2 workflow wifi-scan
+found 2 result(s):
+  [ 0] MyWiFi,-52,6,WPA2_PSK,cc:cc:cc:cc:cc:cc
+  [ 1] GuestNet,-78,11,OPEN,aa:bb:cc:dd:ee:ff
 ```
 
-On Windows/macOS, use the raw USB backend with `--backend raw`:
-
-```sh
-iotsploit-host --backend raw --vid 1209 --pid 0001 idn
-```
+With exactly one board connected, `-d` is not needed. To stop typing it, set
+`IOTSPLOIT_DEVICE` (for example `export IOTSPLOIT_DEVICE=tcp://192.168.4.1`).
 
 ## 6. Command reference
 
-General form:
-
 ```
-iotsploit-host [--device <path>] <command> [args]
+iotsploit-host [-d <device>] <command> [args]
 ```
-
-`--device /dev/usbtmc0` selects a specific node when several are present.
 
 | Command | What it does |
 |---|---|
-| `list` | Print every `/dev/usbtmc*` node (Linux only, does not open the device). |
-| `idn` | Query `*IDN?` and print the identity string. |
-| `caps` | Query `SYSTem:CAPabilities?`, parse it, print structured fields. |
-| `headers` | Fetch and list all command headers (`SYSTem:HELP:HEADers?`). |
-| `describe` | Query `SYSTem:HELP:DESCription?` (line-record descriptor). |
-| `query '<cmd>'` | Send any SCPI query, print its text response. |
-| `write '<cmd>'` | Send a non-query SCPI command (no response printed). |
-| `block-read '<cmd>' [--out <file>]` | Query a binary-block response and write the payload to a file (or stdout). |
-| `errors` | Drain the `SYSTem:ERRor?` queue until "No error". |
-| `workflow <name> [params]` | Run a device-described workflow (e.g. `wifi-scan`, `ble-scan`). |
-| `profile` | Show the connected device's full command/workflow descriptor. |
-| `repl` | Interactive SCPI prompt. |
-| `-h, --help` | Show built-in help. |
-| `-V, --version` | Show version. |
+| `devices` | List connected USB devices, numbered, with their `*IDN?`. |
+| `info` | Identity, address, capabilities, and how many commands and workflows the device describes. |
+| `help [name]` | Every command and workflow the device describes; with a name, its parameters, types and summary. Names may be long or short form, in any case (`help gpio:set`). |
+| `send <command>` | Send one SCPI command. Prints a text reply, writes a binary block to stdout (or `-o <file>`), prints `ok` on stderr for a command with no reply, or prints the device's error. |
+| `workflow <name> [params]` | Run a workflow the device describes (`help <name>` shows its parameters). |
+| `stream [count]` | Read records from the device's data plane (TCP devices). |
+| `repl` | Interactive prompt; each line is sent like `send`. |
+| `errors` | Read and clear the device's error queue. |
+
+| Option | Meaning |
+|---|---|
+| `-d, --device <dev>` | A number from `devices`, `usbtmc:N` (or `/dev/usbtmcN`), `usb:<vid>:<pid>[/<serial>]` (hex), or `tcp://<host>[:<port>]`. Default: `$IOTSPLOIT_DEVICE`, else the only connected USB device. |
+| `-o, --out <file>` | Save a binary reply to a file. |
+| `--timeout <ms>` | Read timeout for TCP and raw USB (default 5000). |
+
+Exit status: `0` ok, `1` the device reported an error, `2` usage error,
+`3` could not connect.
 
 ### Examples
 
 ```sh
-# Text query
-iotsploit-host query '*IDN?'
-iotsploit-host query 'BLE:SCAN:STATe?'
-
-# Non-query command (returns quickly; keeps the link in sync)
-iotsploit-host write 'BLE:SCAN:CLEar'
-
-# Binary block: payload goes to a file (raw bytes, never text-decoded)
-iotsploit-host block-read 'DATA:READ? 64' --out adc.bin
-ls -l adc.bin            # size == number of payload bytes
-
-# Binary block to stdout (pipe into another tool)
-iotsploit-host block-read 'DATA:READ? 64' | od -A x -t x1
-
-# Error queue
-iotsploit-host errors
+iotsploit-host send '*IDN?'
+iotsploit-host send GPIO:SET 2,1            # unquoted arguments are joined
+iotsploit-host send 'DATA:READ? 64' -o adc.bin
+iotsploit-host send 'DATA:READ? 64' | od -A x -t x1
+iotsploit-host help ble-scan
+iotsploit-host -d tcp://10.42.0.57 workflow wifi-scan
 ```
 
-> Quoting: SCPI commands usually contain `:` or `?`, so wrap them in single
-> quotes (`'*IDN?'`) to protect them from the shell.
+> Quoting: a command ending in `?` can match files in some shells, so quote
+> queries (`'*IDN?'`).
+
+When the device rejects a command, `send` says why and exits with status 1:
+
+```console
+$ iotsploit-host send GPIO:GTE? 2
+error -113 Undefined header: GPIO:GTE?
+  did you mean `GPIO:GET?`
+```
+
+`send` asks for the error queue in the same message as the command
+(`*CLS;<command>;:SYSTem:ERRor?`), so checking costs no extra round trip and a
+rejected query fails at once instead of waiting for a reply that never comes.
+
+### Older names
+
+These still work, print the name that replaces them, and will be removed in a
+later release:
+
+| Old | New |
+|---|---|
+| `list` | `devices` |
+| `idn`, `caps` | `info` |
+| `headers`, `describe`, `profile` | `help` |
+| `query`, `write`, `block-read` | `send` |
+| `--backend`, `--vid`, `--pid`, `--serial` | `-d` |
 
 ## 7. Interactive mode (REPL)
 
-`repl` opens a prompt where each line is sent as one SCPI message:
+`repl` opens a prompt where each line is sent like `send`:
 
 ```
 $ iotsploit-host repl
-iotsploit-host repl - type SCPI commands, Ctrl-D to exit
+connected to usbtmc:0; type SCPI commands, `quit` or Ctrl-D to exit
 > *IDN?
-IoTSploit,nRF52840,0001,0.1.0
-> SYST:CAP?
-proto=1;mtu=256;maxblock=4096;feat=
+IoTSploit,nRF52840,6F1A2B3C4D5E6F70,0.1.0
 > BLE:SCAN:CLEar
 ok
-> BLE:SCAN:STATe?
+> BLE:SCAN:STAT?
 0
+> BLE:SCAN:STRT
+error -113 Undefined header: BLE:SCAN:STRT
+  did you mean `BLE:SCAN:START`
 > quit
 ```
 
-Rules inside the REPL:
-- A line ending in `?` is sent as a **query** and the text response is printed.
-- Any other line is sent as a **command** and `ok` is printed.
-- `exit` / `quit` / Ctrl-D leaves the REPL.
-- Errors are printed but do not end the session.
-
-The REPL is great for poking at a device, but for automation prefer the
-one-liner commands above (they are easy to script).
+Errors are printed but do not end the session. For automation prefer the
+one-line commands, which are easy to script.
 
 ## 8. Worked example: a BLE scan on the nRF52840
 
-The nRF52840 example firmware exposes a small BLE-scan command set. The
-built-in `nrf52840` profile knows how to drive it:
+```console
+$ iotsploit-host help ble-scan
+ble-scan
+  Scan for BLE devices
+
+  usage: iotsploit-host workflow ble-scan [duration]
+    duration  u32  optional
+
+  results: addr, rssi (dbm), name, conn
+  starts with BLE:SCAN; gives up after 30 s
+
+$ iotsploit-host workflow ble-scan 8
+found 3 result(s):
+  [ 0] AA:BB:CC:DD:EE:FF,-67,MySensor,C
+  [ 1] 11:22:33:44:55:66,-81,(unknown),N
+  [ 2] DE:AD:BE:EF:00:01,-55,Headphones,C
+```
+
+The same scan by hand, one command at a time:
 
 ```text
 > BLE:SCAN:CLEar        # forget previous results
@@ -294,41 +297,11 @@ ok
 > BLE:SCAN:START        # begin scanning
 ok
 > BLE:SCAN:STATe?       # 1 = still scanning, 0 = idle/finished
-1
-> BLE:SCAN:STATe?
 0
 > BLE:SCAN:COUNt?       # how many devices were seen
 3
-> BLE:SCAN:RESult? 0    # addr,rssi,name
-AA:BB:CC:DD:EE:FF,-67,MySensor
-> BLE:SCAN:RESult? 1
-11:22:33:44:55:66,-81,(unknown)
-> BLE:SCAN:RESult? 2
-DE:AD:BE:EF:00:01,-55,Headphones
-> BLE:SCAN:STOP         # optional: stop early
-ok
-> errors
-(no errors)
-```
-
-Or with the descriptor-driven workflow engine (does all the polling for you):
-
-```sh
-# Fetch the device descriptor, trigger scan, poll until done, fetch all results
-iotsploit-host workflow ble-scan
-# output:
-# trigger: BLE:SCAN:START
-# done after 3.2s
-# results (3):
-#   [0] AA:BB:CC:DD:EE:FF,-67,MySensor
-#   [1] 11:22:33:44:55:66,-81,(unknown)
-#   [2] DE:AD:BE:EF:00:01,-55,Headphones
-```
-
-You can inspect the connected device's full descriptor:
-
-```sh
-iotsploit-host profile                # commands + workflows from the device
+> BLE:SCAN:RESult? 0    # addr,rssi,name,conn
+AA:BB:CC:DD:EE:FF,-67,MySensor,C
 ```
 
 ## 9. How it works
@@ -338,7 +311,7 @@ your shell ──► iotsploit-host (Rust) ──► Transport trait
                                            │
                           ┌────────────────┼────────────────┐
                           │                │                │
-                  /dev/usbtmcN      nusb (raw USB)    (future TCP)
+                  /dev/usbtmcN      nusb (raw USB)    TCP :5025
                   Linux kernel       Win / mac / Linux
                                            │
                                   USB cable (USBTMC)
@@ -351,8 +324,11 @@ your shell ──► iotsploit-host (Rust) ──► Transport trait
   - `usbtmc_kernel.rs`: Linux `/dev/usbtmcN` backend (default, zero-dep).
   - `usbtmc_raw.rs`: raw USBTMC bulk transfers via `nusb` (pure Rust,
     `--features raw-usb`). Used on Windows/macOS and optionally on Linux.
+  - `tcp.rs`: raw SCPI over TCP, restoring message boundaries from the stream.
+- **Discover** (`discover.rs`): the `-d` address syntax and the `devices` list.
 - **Session** (`session.rs`): appends the SCPI `\n` terminator, trims trailing
-  CR/LF from text, and never decodes binary blocks as text.
+  CR/LF from text, never decodes binary blocks as text, and runs a command
+  together with its error check (`send_checked`).
 - **Block** (`block.rs`): parses/encodes IEEE 488.2 definite-length arbitrary
   blocks (`#<digits><len><payload>`), preserving arbitrary bytes.
 - **Caps** (`caps.rs`): tolerantly parses `SYSTem:CAPabilities?`.
@@ -370,48 +346,56 @@ feature adds `nusb` (pure Rust, no libusb) plus `futures-lite`/`async-io`.
 
 ## 10. Troubleshooting
 
-**`permission denied opening /dev/usbtmc0`** — the node is root-only. Use
-`sudo`, or set up the udev rule in [§4](#4-granting-usb-access-one-time).
+**`devices` shows `(cannot open: … permission denied …)`** — the node is
+root-only. Use `sudo`, or set up the udev rule in
+[§4](#4-granting-usb-access-one-time).
 
-**`no /dev/usbtmc* device found`** — the board is not enumerated. Check
-`lsusb` for `1209:0001`, re-plug the cable, and confirm the firmware is
-flashed and running.
+**`no USB device found`** — the board is not enumerated. Check `lsusb` for
+`1209:0001`, re-plug the cable, and confirm the firmware is flashed and
+running. Network devices are never discovered; name them with
+`-d tcp://<host>`.
 
-**`found N usbtmc devices`** — more than one USBTMC device is attached. Pick
-one explicitly: `iotsploit-host --device /dev/usbtmc1 idn`.
+**`2 devices connected; choose one with -d <number>`** — pick one from
+`iotsploit-host devices`, for example `iotsploit-host -d 2 info`.
 
-**`caps` shows `mtu = None` and a `warning: unparseable numeric fields: mtu="zu"`**
-— expected on some boards (e.g. the nRF52840) whose C library prints the `%zu`
-format specifier literally as `zu`. The parser reports it as a warning and
-falls back to safe defaults instead of failing.
+**`error -113 Undefined header`** — the device does not know that command.
+`help` lists the ones it does; the error line suggests the closest match.
 
-**`block-read` writes a 0-byte file** — the command succeeded, but the device
-returned an empty block. On the nRF52840, `DATA:READ?` is empty because no
-data source is wired up in that example firmware; the path itself is correct.
+**`warning: unparseable capability fields: mtu="zu"`** — expected on some
+boards (e.g. the nRF52840) whose C library prints the `%zu` format specifier
+literally as `zu`. The parser falls back to safe defaults instead of failing.
 
-**A `query` prints an empty line** — the command likely errored on the device
-(unknown header, bad parameter, …). Run `iotsploit-host errors` to see the
-SCPI error queue.
+**A binary reply is 0 bytes** — the command succeeded, but the device returned
+an empty block. On the nRF52840, `DATA:READ?` is empty because no data source
+is wired up in that example firmware; the path itself is correct.
+
+**`help` lists names only** — the firmware does not serve
+`SYSTem:HELP:DESCription?`. Update it to get parameter details and workflows.
 
 ## 11. Testing
 
 Unit + fake-transport integration tests (no hardware needed):
 
 ```sh
-cargo test          # 61 tests, zero external deps
+cargo test          # 106 tests, zero external deps
 ```
 
-Hardware smoke test (nRF52840, after granting access):
+`tests/scpi_tcp_smoke.py` and the daemon cover the TCP path without hardware:
 
 ```sh
-iotsploit-host idn
-iotsploit-host caps
-iotsploit-host headers
-iotsploit-host describe
-iotsploit-host workflow ble-scan
-iotsploit-host query 'BLE:SCAN:STATe?'
-iotsploit-host block-read 'DATA:READ? 64' --out /tmp/adc.bin
-iotsploit-host errors
+./build/examples/daemon/usbscpi_daemon 127.0.0.1 5025 &
+iotsploit-host -d tcp://127.0.0.1 info
+```
+
+Hardware smoke test (after granting access):
+
+```sh
+iotsploit-host devices
+iotsploit-host info
+iotsploit-host help
+iotsploit-host send '*IDN?'
+iotsploit-host send 'DATA:READ? 64' -o /tmp/adc.bin
+iotsploit-host workflow ble-scan      # or wifi-scan on the ESP32-S3
 ```
 
 ---
@@ -429,7 +413,7 @@ just permission to access the device (the same udev rule, or run with `sudo`):
 
 ```sh
 cargo build --release --features raw-usb
-sudo iotsploit-host --backend raw --vid 1209 --pid 0001 idn
+sudo iotsploit-host -d usb:1209:0001 info
 ```
 
 `nusb` detaches the kernel `usbtmc` driver automatically when it claims the
@@ -452,7 +436,8 @@ Windows has no `/dev/usbtmcN` equivalent. Use the raw USB backend:
    - Set the driver to `WinUSB` and click `Replace Driver`.
 4. Run:
    ```sh
-   iotsploit-host.exe --backend raw --vid 1209 --pid 0001 idn
+   iotsploit-host.exe devices
+   iotsploit-host.exe info
    ```
 
 No NI-VISA dependency is required.
@@ -470,7 +455,8 @@ Homebrew libusb required):
    ```
 2. Run (the first time macOS will prompt for USB permission):
    ```sh
-   iotsploit-host --backend raw --vid 1209 --pid 0001 idn
+   iotsploit-host devices
+   iotsploit-host info
    ```
 
 For distribution, the binary should be code-signed and notarized. This is a
@@ -493,9 +479,9 @@ USB shim, so the Linux ✓ exercises the same code).
 
 | Check | Linux kernel | Linux raw (nusb) | Windows | macOS |
 |---|---|---|---|---|
-| `--backend ... idn` works | ✓ | ✓ | ▢ | ▢ |
-| `headers` / `describe` | ✓ | ✓ | ▢ | ▢ |
-| `query '*IDN?'` matches expected IDN | ✓ | ✓ | ▢ | ▢ |
-| `block-read 'DATA:READ? 64' --out f` | ✓ | ✓ | ▢ | ▢ |
+| `info` works | ✓ | ✓ | ▢ | ▢ |
+| `help` | ✓ | ✓ | ▢ | ▢ |
+| `send '*IDN?'` matches expected IDN | ✓ | ✓ | ▢ | ▢ |
+| `send 'DATA:READ? 64' -o f` | ✓ | ✓ | ▢ | ▢ |
 | `workflow wifi-scan` (esp32s3) | ✓ | ✓ | ▢ | ▢ |
 | `workflow ble-scan` (nrf52840) | ✓ | ▢ | ▢ | ▢ |

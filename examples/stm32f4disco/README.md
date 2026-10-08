@@ -142,19 +142,19 @@ d = os.open('/dev/usbtmc0', os.O_RDWR)
 os.write(d, b'*IDN?\n')
 print(os.read(d, 4096).decode().strip())
 "
-# IoTSploit,STM32F4-Disco,0001,0.1.0
+# IoTSploit,STM32F4-Disco,<chip serial>,0.1.0
 ```
 
 ### Test with iotsploit-host
 
 ```bash
-sudo iotsploit-host scpi "*IDN?"
-# IoTSploit,STM32F4-Disco,0001,0.1.0
+sudo iotsploit-host send "*IDN?"
+# IoTSploit,STM32F4-Disco,<chip serial>,0.1.0
 
-sudo iotsploit-host scpi "LED:GREen 1"
-sudo iotsploit-host scpi "LED:ALL 1"
-sudo iotsploit-host scpi "LED:TOGgle 2"
-sudo iotsploit-host scpi "BTN?"
+sudo iotsploit-host send "LED:GREen 1"
+sudo iotsploit-host send "LED:ALL 1"
+sudo iotsploit-host send "LED:TOGgle 2"
+sudo iotsploit-host send "BTN?"
 ```
 
 ## SCPI Commands
@@ -201,11 +201,11 @@ filled by the RX0 interrupts; frames arriving while it is full are counted in
 cannot leave init mode, which usually means no transceiver is connected.
 
 ```bash
-sudo iotsploit-host scpi "CAN:OPEN 1,500000"
-sudo iotsploit-host scpi "CAN:OPEN 2,500000"
-sudo iotsploit-host scpi 'CAN:SEND 1,#H123,"DEADBEEF"'
-sudo iotsploit-host scpi "CAN:RECV?"      # 2,0x123,0,0,4,DEADBEEF if CAN1 and CAN2 share a bus
-sudo iotsploit-host scpi "CAN:STATe? 1"   # 1,0,0,0,0
+sudo iotsploit-host send "CAN:OPEN 1,500000"
+sudo iotsploit-host send "CAN:OPEN 2,500000"
+sudo iotsploit-host send 'CAN:SEND 1,#H123,"DEADBEEF"'
+sudo iotsploit-host send "CAN:RECV?"      # 2,0x123,0,0,4,DEADBEEF if CAN1 and CAN2 share a bus
+sudo iotsploit-host send "CAN:STATe? 1"   # 1,0,0,0,0
 ```
 
 Quote the data: unquoted hex that starts with a digit parses as a number.

@@ -29,7 +29,7 @@ level**.
 
 | Command | Type | Description |
 |---|---|---|
-| `*IDN?` | query | `IoTSploit,ESP32S3-SPP-SEC,0001,0.1.0` |
+| `*IDN?` | query | `IoTSploit,ESP32S3-SPP-SEC,<factory MAC>,0.1.0` |
 | `SYSTem:HELP:DESCription?` | query | Machine-readable command/workflow metadata |
 | `BLE:ADV:STARt` | command | Start BLE SPP advertising |
 | `BLE:ADV:STOP` | command | Stop advertising |
@@ -70,7 +70,9 @@ idf.py -p /dev/ttyACM0 flash monitor    # CP210x UART port for the console
 ```python
 import time, pyvisa
 
-d = pyvisa.ResourceManager().open_resource("USB0::0x1209::0x0001::0001::INSTR")
+rm = pyvisa.ResourceManager()
+# The serial number is the board's factory MAC; list_resources() shows it.
+d = rm.open_resource(next(r for r in rm.list_resources() if '0x1209::0x0001' in r))
 print(d.query("*IDN?"))
 print(d.query("SYSTem:HELP:DESCription?"))
 
