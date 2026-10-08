@@ -9,6 +9,64 @@ pub struct ScpiError {
     pub message: String,
 }
 
+/// What a command produced, as returned by [`ScpiSession::send_checked`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Output {
+    /// A non-query command, or a query that failed before producing output.
+    None,
+    /// Text response with trailing line endings removed. Multi-line responses
+    /// (`SYSTem:HELP:HEADers?`) keep their inner newlines.
+    Text(String),
+    /// Payload of an IEEE 488.2 definite-length block response.
+    Block(Vec<u8>),
+}
+
+/// Result of [`ScpiSession::send_checked`]: the command's output plus every
+/// error the device queued while running it (empty on success).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checked {
+    pub output: Output,
+    pub errors: Vec<ScpiError>,
+}
+
+/// `<code>,"<message>"` — the shape of a `SYSTem:ERRor?` reply.
+fn parse_error_entry(line: &[u8]) -> Option<ScpiError> {
+    let text = std::str::from_utf8(line).ok()?.trim_end_matches(['\r', '\n']);
+    let (code, msg) = text.split_once(',')?;
+    let code: i32 = code.trim().parse().ok()?;
+    let msg = msg.trim();
+    if msg.len() < 2 || !msg.starts_with('"') || !msg.ends_with('"') {
+        return None;
+    }
+    Some(ScpiError { code, message: msg[1..msg.len() - 1].to_string() })
+}
+
+/// Split a response byte stream into its framed items (`#` blocks by length,
+/// text by `\n`). Returns `None` while the last item is still incomplete.
+fn split_items(buf: &[u8]) -> Option<Vec<&[u8]>> {
+    let mut items = Vec::new();
+    let mut i = 0;
+    while i < buf.len() {
+        let rest = &buf[i..];
+        let len = if rest[0] == b'#' && rest.len() > 1 && rest[1].is_ascii_digit() && rest[1] != b'0' {
+            let nd = (rest[1] - b'0') as usize;
+            let digits = rest.get(2..2 + nd)?;
+            let n: usize = std::str::from_utf8(digits).ok()?.parse().ok()?;
+            let end = 2 + nd + n;
+            if rest.len() < end {
+                return None;
+            }
+            // The block's own terminator, if it has arrived.
+            if rest.get(end) == Some(&b'\n') { end + 1 } else { end }
+        } else {
+            rest.iter().position(|&b| b == b'\n')? + 1
+        };
+        items.push(&rest[..len]);
+        i += len;
+    }
+    Some(items)
+}
+
 /// A SCPI session that wraps a transport and speaks the `iotsploit-usb`
 /// text/block protocol.
 pub struct ScpiSession<T: Transport> {
@@ -159,6 +217,66 @@ impl<T: Transport> ScpiSession<T> {
         Ok(caps::parse_capabilities(&raw))
     }
 
+    /// Run one command and report whether the device accepted it, in a single
+    /// round trip.
+    ///
+    /// The message sent is `*CLS;<cmd>;:SYSTem:ERRor?`. `*CLS` drops errors
+    /// left over from earlier sessions so they are not blamed on `cmd`, and the
+    /// trailing error query always produces a reply. That reply matters: a
+    /// failed query produces no output at all, so without it a TCP read would
+    /// wait for the full timeout. Every response arrives in order — as one
+    /// message over USBTMC, one per line over TCP — and the error entry is
+    /// always last.
+    ///
+    /// Only the first queued error comes back with the command; any further
+    /// ones are drained with separate `SYSTem:ERRor?` queries.
+    ///
+    /// Not for `SYSTem:ERRor?` itself (its reply would be indistinguishable
+    /// from the appended one) or for `DATA:WRITE` blocks.
+    pub fn send_checked(&mut self, cmd: &str) -> Result<Checked> {
+        self.write(&format!("*CLS;{cmd};:SYSTem:ERRor?"))?;
+        let mut buf: Vec<u8> = Vec::new();
+        for _ in 0..4096 {
+            buf.extend_from_slice(&self.transport.read_msg(self.read_size)?);
+            let Some(items) = split_items(&buf) else { continue };
+            let Some((last, body)) = items.split_last() else { continue };
+            let Some(first_err) = parse_error_entry(last) else { continue };
+            let output = Self::output_of(cmd, body, self.max_block_len)?;
+            let mut errors = Vec::new();
+            if first_err.code != 0 {
+                errors.push(first_err);
+                errors.extend(self.drain_errors()?);
+            }
+            return Ok(Checked { output, errors });
+        }
+        Err(Error::Scpi {
+            cmd: cmd.to_string(),
+            msg: "no error-queue reply after the command".into(),
+        })
+    }
+
+    fn output_of(cmd: &str, body: &[&[u8]], max_block_len: usize) -> Result<Output> {
+        match body {
+            [] => Ok(Output::None),
+            [one] if one.first() == Some(&b'#') => {
+                Ok(Output::Block(block::parse_block(one, max_block_len)?.to_vec()))
+            }
+            _ => {
+                let joined: Vec<u8> = body.concat();
+                let mut end = joined.len();
+                while end > 0 && matches!(joined[end - 1], b'\n' | b'\r') {
+                    end -= 1;
+                }
+                String::from_utf8(joined[..end].to_vec())
+                    .map(Output::Text)
+                    .map_err(|e| Error::Scpi {
+                        cmd: cmd.to_string(),
+                        msg: format!("response is not valid UTF-8: {e}"),
+                    })
+            }
+        }
+    }
+
     /// Drain the SCPI error queue via `SYSTem:ERRor?` until it reports
     /// "No error" (code 0).
     pub fn drain_errors(&mut self) -> Result<Vec<ScpiError>> {
@@ -274,6 +392,63 @@ mod tests {
         s.write_block("DATA:WRITE", &[0x01, 0x02, 0x03]).unwrap();
         // encode_block([1,2,3]) = "#1" + "3" + payload
         assert_eq!(s.transport.last_write(), b"DATA:WRITE #13\x01\x02\x03\n");
+    }
+
+    #[test]
+    fn send_checked_query_over_tcp_framing() {
+        let mut s = session_with(&[b"IoTSploit,tcp-demo,0001,0.1.0\n".to_vec(), b"0,\"No error\"\n".to_vec()]);
+        let c = s.send_checked("*IDN?").unwrap();
+        assert_eq!(c.output, Output::Text("IoTSploit,tcp-demo,0001,0.1.0".into()));
+        assert!(c.errors.is_empty());
+        assert_eq!(s.transport.last_write(), b"*CLS;*IDN?;:SYSTem:ERRor?\n");
+    }
+
+    #[test]
+    fn send_checked_query_over_usbtmc_framing() {
+        // USBTMC delivers everything one command produced as one message.
+        let mut s = session_with(&[b"0\n0,\"No error\"\n".to_vec()]);
+        let c = s.send_checked("GPIO:GET? 1").unwrap();
+        assert_eq!(c.output, Output::Text("0".into()));
+        assert!(c.errors.is_empty());
+    }
+
+    #[test]
+    fn send_checked_failed_query_reports_error_without_output() {
+        let mut s = session_with(&[
+            b"-113,\"Undefined header\"\n".to_vec(),
+            b"0,\"No error\"\n".to_vec(),
+        ]);
+        let c = s.send_checked("FOO:BAR?").unwrap();
+        assert_eq!(c.output, Output::None);
+        assert_eq!(c.errors, vec![ScpiError { code: -113, message: "Undefined header".into() }]);
+    }
+
+    #[test]
+    fn send_checked_write_collects_every_queued_error() {
+        let mut s = session_with(&[
+            b"-109,\"Missing parameter\"\n".to_vec(),
+            b"-221,\"Settings conflict\"\n".to_vec(),
+            b"0,\"No error\"\n".to_vec(),
+        ]);
+        let c = s.send_checked("GPIO:SET 1").unwrap();
+        assert_eq!(c.output, Output::None);
+        assert_eq!(c.errors.len(), 2);
+        assert_eq!(c.errors[1].code, -221);
+    }
+
+    #[test]
+    fn send_checked_block_payload_may_look_like_an_error_line() {
+        // Payload `0,"x"\n` is 6 bytes; length framing must not end early.
+        let mut s = session_with(&[b"#160,\"x\"\n\n0,\"No error\"\n".to_vec()]);
+        let c = s.send_checked("DEMO:DATA? 6").unwrap();
+        assert_eq!(c.output, Output::Block(b"0,\"x\"\n".to_vec()));
+    }
+
+    #[test]
+    fn send_checked_keeps_multiline_output() {
+        let mut s = session_with(&[b"*IDN?\nGPIO:SET\n\n".to_vec(), b"0,\"No error\"\n".to_vec()]);
+        let c = s.send_checked("SYST:HELP:HEAD?").unwrap();
+        assert_eq!(c.output, Output::Text("*IDN?\nGPIO:SET".into()));
     }
 
     #[test]

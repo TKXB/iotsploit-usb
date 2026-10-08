@@ -38,6 +38,39 @@ const USB_SUBCLASS_USBTMC: u8 = 0x03;
 // USB interface class for the vendor-specific device-log interface (EP bulk-IN).
 const USB_CLASS_VENDOR: u8 = 0xFF;
 
+/// A USB device with a USBTMC interface, as seen at enumeration (unopened).
+#[derive(Debug, Clone)]
+pub struct UsbtmcInfo {
+    pub bus: u8,
+    pub addr: u8,
+    pub vid: u16,
+    pub pid: u16,
+    pub serial: Option<String>,
+}
+
+/// Every USB device exposing a USBTMC interface, ordered by bus and address.
+/// Enumeration only: nothing is opened or claimed.
+pub fn list_usbtmc() -> Vec<UsbtmcInfo> {
+    let mut out: Vec<UsbtmcInfo> = nusb::list_devices()
+        .map(|it| {
+            it.filter(|d| {
+                d.interfaces()
+                    .any(|i| i.class() == USB_CLASS_APP_SPEC && i.subclass() == USB_SUBCLASS_USBTMC)
+            })
+            .map(|d| UsbtmcInfo {
+                bus: d.bus_number(),
+                addr: d.device_address(),
+                vid: d.vendor_id(),
+                pid: d.product_id(),
+                serial: d.serial_number().map(str::to_string),
+            })
+            .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by_key(|d| (d.bus, d.addr));
+    out
+}
+
 /// Raw USBTMC transport backed by `nusb`.
 pub struct UsbtmcRaw {
     // The claimed interface keeps the underlying device alive; dropping it
@@ -93,7 +126,8 @@ impl UsbtmcRaw {
         Self::from_device(device)
     }
 
-    /// Auto-detect a single USBTMC device by interface class.
+    /// Auto-detect a single USBTMC device by interface class. The CLI selects
+    /// devices through [`crate::discover`] instead; this stays for library users.
     pub fn auto_detect() -> Result<Self> {
         let mut matches: Vec<_> = nusb::list_devices()
             .map_err(map_io_err)?
