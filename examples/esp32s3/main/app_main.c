@@ -258,238 +258,6 @@ static scpi_result_t cmd_ble_sec(scpi_t *ctx) {
     return SCPI_RES_OK;
 }
 
-/* ---------- Descriptor metadata (SYSTem:HELP:DESCription?) ---------- */
-
-static const usbscpi_param_desc_t desc_gpio_set_params[] = {
-    { "pin",   "u32",   true  },
-    { "value", "bool",  true  },
-};
-static const usbscpi_param_desc_t desc_gpio_get_params[] = {
-    { "pin", "u32", true },
-};
-static const usbscpi_param_desc_t desc_adc_read_params[] = {
-    { "channel", "u32", false },
-};
-static const usbscpi_param_desc_t desc_wlan_scan_get_params[] = {
-    { "index", "u32", true },
-};
-static const usbscpi_param_desc_t desc_ble_scan_params[] = {
-    { "duration", "u32", false },
-};
-static const usbscpi_param_desc_t desc_ble_scan_get_params[] = {
-    { "index", "u32", true },
-};
-/* The connect/connect-pair index is a row in the BLE scan-results table, so it
- * advertises an options source: hosts populate a picker from BLE:SCAN results
- * instead of asking for a raw index (which is meaningless without a scan). */
-static const usbscpi_param_desc_t desc_ble_conn_params[] = {
-    { "index", "u32", true, "BLE:SCAN:COUNt?", "BLE:SCAN?" },
-};
-static const usbscpi_param_desc_t desc_ble_pair_passkey_params[] = {
-    { "key", "string", true },
-};
-static const usbscpi_param_desc_t desc_ble_pair_confirm_params[] = {
-    { "accept", "bool", false },
-};
-
-static const usbscpi_param_desc_t desc_framing_params[] = {
-    { .name = "on", .type = "bool", .required = true },
-};
-
-static const usbscpi_command_desc_t desc_commands[] = {
-    /* The data plane is driven entirely by these — the host UI has no separate
-     * start/stop control, on purpose. They must be here and not only in the
-     * SCPI command table: a host with a descriptor shows the descriptor's
-     * commands and never falls back to SYSTem:HELP:HEADers?, so a command
-     * missing here is invisible even though it works when typed. Summaries are
-     * kept terse because the whole descriptor is emitted as one block. */
-    { "SYSTem:STReam:STARt",   "command", "Start the BLE RSSI capture",
-      NULL, 0, "none" },
-    { "SYSTem:STReam:STOP",    "command", "Stop the capture",
-      NULL, 0, "none" },
-    { "SYSTem:STReam:STATe?",  "query",   "enabled,attached",
-      NULL, 0, "string" },
-    { "SYSTem:STReam:COUNt?",  "query",   "Reports captured",
-      NULL, 0, "u32" },
-    { "SYSTem:STReam:DROPped?","query",   "Reports lost to overflow",
-      NULL, 0, "u32" },
-    { "SYSTem:STReam:TORN?",   "query",   "Records cut by a reconnect",
-      NULL, 0, "u32" },
-    { "SYSTem:STReam:PORT?",   "query",   "Data-plane TCP port",
-      NULL, 0, "u32" },
-    { "SYSTem:STReam:FORMat?", "query",   "Record version, stride, schema",
-      NULL, 0, "string" },
-    { "SYSTem:STReam:FRAMing", "command", "Frame the USB vendor pipe (1=on)",
-      desc_framing_params, 1, "none" },
-    { "SYSTem:STReam:FRAMing?","query",   "USB framing state",
-      NULL, 0, "u32" },
-    { "GPIO:SET",              "command", "Set GPIO output level",
-      desc_gpio_set_params,  2, "none" },
-    { "GPIO:GET?",             "query",   "Read GPIO input level",
-      desc_gpio_get_params,  1, "u32" },
-    { "ADC:READ?",             "query",   "Read ADC value",
-      desc_adc_read_params,  1, "u32" },
-    { "WLAN:SCAN",             "command", "Trigger a Wi-Fi SSID scan",
-      NULL, 0, NULL },
-    { "WLAN:SCAN:DONE?",       "query",   "1 = scan finished, 0 = still scanning",
-      NULL, 0, "bool" },
-    { "WLAN:SCAN:COUNt?",      "query",   "Number of access points found",
-      NULL, 0, "u32" },
-    { "WLAN:SCAN?",            "query",   "Get scan result by index (ssid,rssi,channel,authmode,bssid)",
-      desc_wlan_scan_get_params, 1, "string" },
-    { "BLE:SCAN",              "command", "Start BLE scan for N seconds",
-      desc_ble_scan_params, 1, NULL },
-    { "BLE:SCAN:DONE?",        "query",   "1 = scan finished, 0 = still scanning",
-      NULL, 0, "bool" },
-    { "BLE:SCAN:COUNt?",       "query",   "Number of BLE devices found",
-      NULL, 0, "u32" },
-    { "BLE:SCAN?",             "query",   "Get BLE scan result by index (addr,rssi,name,adv_type)",
-      desc_ble_scan_get_params, 1, "string" },
-    { "BLE:CONNect",          "command", "Connect to BLE scan result by index",
-      desc_ble_conn_params, 1, NULL },
-    { "BLE:CONNect:STATe?",   "query",   "0=idle 1=connecting 2=connected 3=failed",
-      NULL, 0, "u32" },
-    { "BLE:CONNect:STATus?",  "query",   "Last disconnect status code",
-      NULL, 0, "u32" },
-    { "BLE:CPAIR",            "command", "Connect to BLE scan result by index and pair in one step",
-      desc_ble_conn_params, 1, NULL },
-    { "BLE:CPAIR:STATe?",     "query",   "0=idle 1=connecting 2=pairing 3=passkey 4=numcmp 5=display 6=done 7=failed",
-      NULL, 0, "u32" },
-    { "BLE:DISConnect",       "command", "Disconnect active BLE connection",
-      NULL, 0, NULL },
-    { "BLE:PAIR",             "command", "Initiate BLE pairing",
-      NULL, 0, NULL },
-    { "BLE:PAIR:STATe?",      "query",   "0=idle 1=in-progress 2=passkey-needed 3=numcmp-needed 4=done 5=failed 6=display-key",
-      NULL, 0, "u32" },
-    { "BLE:PAIR:PASSKey",     "command", "Enter the 6-digit passkey shown on the peer",
-      desc_ble_pair_passkey_params, 1, NULL },
-    { "BLE:PAIR:PASSKey?",    "query",   "Get the passkey to enter on the peer",
-      NULL, 0, "string" },
-    { "BLE:PAIR:NUMCmp?",     "query",   "Get the numeric comparison value",
-      NULL, 0, "u32" },
-    { "BLE:PAIR:CONFirm",     "command", "Confirm (1) or reject (0) numeric comparison",
-      desc_ble_pair_confirm_params, 1, NULL },
-    { "BLE:SEC?",             "query",   "Security info: mac,level,encrypted,authenticated,bonded,key_size",
-      NULL, 0, "string" },
-};
-
-static const char *const desc_ble_connect_failed[] = { "3" };
-
-static const char *const desc_ble_pair_failed[] = { "5" };
-
-/* Interactive prompts for the ble-pair workflow, keyed by BLE:PAIR:STATe?:
- *   2 passkey-needed  -> user types the passkey the peer shows
- *   3 numcmp-needed   -> user compares BLE:PAIR:NUMCmp? and accepts/rejects
- *   6 display-key     -> device shows BLE:PAIR:PASSKey? for the user to enter on the peer */
-static const usbscpi_prompt_desc_t desc_ble_pair_prompts[] = {
-    { "2", "passkey", "BLE:PAIR:PASSKey", NULL },
-    { "3", "confirm", "BLE:PAIR:CONFirm", "BLE:PAIR:NUMCmp?" },
-    { "6", "display", NULL,               "BLE:PAIR:PASSKey?" },
-};
-
-static const char *const desc_ble_connpair_failed[] = { "7" };
-
-/* One-step connect+pair prompts, keyed by BLE:CPAIR:STATe? (the combined
- * state machine). The passkey/confirm/display responses reuse the same
- * BLE:PAIR:* commands as the standalone ble-pair workflow. */
-static const usbscpi_prompt_desc_t desc_ble_connpair_prompts[] = {
-    { "3", "passkey", "BLE:PAIR:PASSKey", NULL },
-    { "4", "confirm", "BLE:PAIR:CONFirm", "BLE:PAIR:NUMCmp?" },
-    { "5", "display", NULL,               "BLE:PAIR:PASSKey?" },
-};
-
-static const usbscpi_workflow_desc_t desc_workflows[] = {
-    {
-        .name = "wifi-scan",
-        .type = "trigger_poll_fetch",
-        .summary = "Scan for Wi-Fi access points",
-        .trigger_cmd = "WLAN:SCAN",
-        .done_query = "WLAN:SCAN:DONE?",
-        .done_value = "1",
-        .count_query = "WLAN:SCAN:COUNt?",
-        .fetch_query = "WLAN:SCAN?",
-        .fields = "ssid:string,rssi:i32:dbm,channel:u32,authmode:string,bssid:mac",
-        .state_query = NULL,
-        .success_value = NULL,
-        .failed_values = NULL,
-        .failed_value_count = 0,
-        .timeout_ms = 15000,
-        .poll_ms = 250,
-    },
-    {
-        .name = "ble-scan",
-        .type = "trigger_poll_fetch",
-        .summary = "Scan for BLE devices",
-        .trigger_cmd = "BLE:SCAN",
-        .done_query = "BLE:SCAN:DONE?",
-        .done_value = "1",
-        .count_query = "BLE:SCAN:COUNt?",
-        .fetch_query = "BLE:SCAN?",
-        .fields = "addr:mac,rssi:i32:dbm,name:string,adv_type:string",
-        .state_query = NULL,
-        .success_value = NULL,
-        .failed_values = NULL,
-        .failed_value_count = 0,
-        .timeout_ms = 30000,
-        .poll_ms = 500,
-    },
-    {
-        .name = "ble-connect",
-        .type = "trigger_poll_interactive",
-        .summary = "Connect to a device from the last BLE scan",
-        .trigger_cmd = "BLE:CONNect",
-        .done_query = NULL,
-        .done_value = NULL,
-        .count_query = NULL,
-        .fetch_query = NULL,
-        .state_query = "BLE:CONNect:STATe?",
-        .success_value = "2",
-        .failed_values = desc_ble_connect_failed,
-        .failed_value_count = 1,
-        .timeout_ms = 15000,
-        .poll_ms = 200,
-    },
-    {
-        .name = "ble-pair",
-        .type = "trigger_poll_interactive",
-        .summary = "Pair with the connected BLE device",
-        .trigger_cmd = "BLE:PAIR",
-        .done_query = NULL,
-        .done_value = NULL,
-        .count_query = NULL,
-        .fetch_query = NULL,
-        .state_query = "BLE:PAIR:STATe?",
-        .success_value = "4",
-        .failed_values = desc_ble_pair_failed,
-        .failed_value_count = 1,
-        .prompts = desc_ble_pair_prompts,
-        .prompt_count = sizeof(desc_ble_pair_prompts) / sizeof(desc_ble_pair_prompts[0]),
-        .timeout_ms = 30000,
-        .poll_ms = 200,
-    },
-    {
-        .name = "ble-connect-pair",
-        .type = "trigger_poll_interactive",
-        .summary = "Connect to a BLE device and pair in one step",
-        .trigger_cmd = "BLE:CPAIR",
-        .state_query = "BLE:CPAIR:STATe?",
-        .success_value = "6",
-        .failed_values = desc_ble_connpair_failed,
-        .failed_value_count = 1,
-        .prompts = desc_ble_connpair_prompts,
-        .prompt_count = sizeof(desc_ble_connpair_prompts) / sizeof(desc_ble_connpair_prompts[0]),
-        .timeout_ms = 45000,
-        .poll_ms = 200,
-    },
-};
-
-static const usbscpi_descriptor_t s_descriptor = {
-    .commands = desc_commands,
-    .command_count = sizeof(desc_commands) / sizeof(desc_commands[0]),
-    .workflows = desc_workflows,
-    .workflow_count = sizeof(desc_workflows) / sizeof(desc_workflows[0]),
-};
-
 /* ---- BLE RSSI data plane control ----------------------------------------
  * The ble-scan workflow keeps one sample per device and so cannot answer
  * "how did this RSSI move". These stream every advertisement report instead;
@@ -565,43 +333,230 @@ static scpi_result_t cmd_stream_state(scpi_t *ctx) {
     return SCPI_RES_OK;
 }
 
-static const scpi_command_t demo_commands[] = {
-    { "SYSTem:STReam:PORT?",    cmd_stream_port,    0 },
-    { "SYSTem:STReam:FRAMing",  cmd_stream_framing, 0 },
-    { "SYSTem:STReam:FRAMing?", cmd_stream_framing_q, 0 },
-    { "SYSTem:STReam:STARt",    cmd_stream_start,   0 },
-    { "SYSTem:STReam:STOP",     cmd_stream_stop,    0 },
-    { "SYSTem:STReam:FORMat?",  cmd_stream_format,  0 },
-    { "SYSTem:STReam:COUNt?",   cmd_stream_count,   0 },
-    { "SYSTem:STReam:DROPped?", cmd_stream_dropped, 0 },
-    { "SYSTem:STReam:TORN?",    cmd_stream_torn,    0 },
-    { "SYSTem:STReam:STATe?",   cmd_stream_state,   0 },
-    { "GPIO:SET",  cmd_gpio_set, 0 },
-    { "GPIO:GET?", cmd_gpio_get, 0 },
-    { "ADC:READ?", cmd_adc_read, 0 },
-    { "WLAN:SCAN",        cmd_wlan_scan,  0 },
-    { "WLAN:SCAN:DONE?",  cmd_wlan_done,  0 },
-    { "WLAN:SCAN:COUNt?", cmd_wlan_count, 0 },
-    { "WLAN:SCAN?",       cmd_wlan_get,   0 },
-    { "BLE:SCAN",         cmd_ble_scan,   0 },
-    { "BLE:SCAN:DONE?",   cmd_ble_done,   0 },
-    { "BLE:SCAN:COUNt?",  cmd_ble_count,  0 },
-    { "BLE:SCAN?",        cmd_ble_get,    0 },
-    { "BLE:CONNect",          cmd_ble_conn,         0 },
-    { "BLE:CONNect:STATe?",   cmd_ble_conn_state,   0 },
-    { "BLE:CONNect:STATus?",  cmd_ble_conn_status,  0 },
-    { "BLE:CPAIR",            cmd_ble_connpair,       0 },
-    { "BLE:CPAIR:STATe?",     cmd_ble_connpair_state, 0 },
-    { "BLE:DISConnect",       cmd_ble_disconn,      0 },
-    { "BLE:PAIR",             cmd_ble_pair,         0 },
-    { "BLE:PAIR:STATe?",      cmd_ble_pair_state,   0 },
-    { "BLE:PAIR:PASSKey",     cmd_ble_pair_passkey, 0 },
-    { "BLE:PAIR:PASSKey?",    cmd_ble_pair_passkey_q, 0 },
-    { "BLE:PAIR:NUMCmp?",     cmd_ble_numcmp,       0 },
-    { "BLE:PAIR:CONFirm",     cmd_ble_confirm,      0 },
-    { "BLE:SEC?",             cmd_ble_sec,          0 },
-    SCPI_CMD_LIST_END
-    /* *IDN? / SYST:CAP? / SYST:HELP:HEAD? / SYST:ERR? / DATA:READ? 由 core 白送 */
+/* ---------- Jobs (.agents/standards/scpi-commands.md) ----------
+ * WLAN:SCAN, BLE:SCAN and BLE:CONNect are jobs: STARt, then STATe? reports one
+ * word. These handlers map the scanners' done flags and the BLE connect/pair
+ * state machines (ble_conn.h) onto those words; the machines are unchanged. */
+
+static bool s_wlan_started;
+static bool s_ble_started;
+
+static scpi_result_t cmd_wlan_start(scpi_t *ctx) {
+    scpi_result_t r = cmd_wlan_scan(ctx);
+    if (r == SCPI_RES_OK) s_wlan_started = true;
+    return r;
+}
+
+static scpi_result_t cmd_wlan_state(scpi_t *ctx) {
+    SCPI_ResultMnemonic(ctx, !s_wlan_started ? "IDLE" : wifi_scan_done() ? "DONE" : "RUNNING");
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_ble_start(scpi_t *ctx) {
+    scpi_result_t r = cmd_ble_scan(ctx);
+    if (r == SCPI_RES_OK) s_ble_started = true;
+    return r;
+}
+
+static scpi_result_t cmd_ble_state(scpi_t *ctx) {
+    SCPI_ResultMnemonic(ctx, !s_ble_started ? "IDLE" : ble_scan_done() ? "DONE" : "RUNNING");
+    return SCPI_RES_OK;
+}
+
+/* BLE:CONNect:STARt <index>[,<pair>]: connect to a scan result and, unless
+ * pair is 0, pair in the same job. */
+static bool s_conn_pair;
+static bool s_conn_failure_reported;
+
+static scpi_result_t cmd_ble_connect_start(scpi_t *ctx) {
+    uint32_t idx = 0, pair = 1;
+    if (SCPI_ParamUInt32(ctx, &idx, TRUE) != TRUE) return SCPI_RES_ERR;
+    (void)SCPI_ParamUInt32(ctx, &pair, FALSE);
+    ESP_LOGI(TAG, "BLE:CONNect:STARt idx=%u pair=%u", (unsigned)idx, (unsigned)pair);
+    s_conn_pair = pair != 0;
+    s_conn_failure_reported = false;
+    int rc = s_conn_pair ? ble_connpair_start((size_t)idx) : ble_conn_start((size_t)idx);
+    return rc == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
+}
+
+static const char *connect_state_word(void) {
+    if (s_conn_pair) {
+        switch (ble_connpair_state()) {
+        case BLE_CP_CONNECTING:
+        case BLE_CP_PAIRING: return "RUNNING";
+        case BLE_CP_PASSKEY: return "PASSKEY";
+        case BLE_CP_NUMCMP:  return "CONFIRM";
+        case BLE_CP_DISPLAY: return "DISPLAY";
+        case BLE_CP_DONE:    return "DONE";
+        case BLE_CP_FAILED:  return "FAILED";
+        default:             return "IDLE";
+        }
+    }
+    switch (ble_conn_state()) {
+    case BLE_CONN_CONNECTING: return "RUNNING";
+    case BLE_CONN_CONNECTED:  return "DONE";
+    case BLE_CONN_FAILED:     return "FAILED";
+    default:                  return "IDLE";
+    }
+}
+
+static scpi_result_t cmd_ble_connect_state(scpi_t *ctx) {
+    const char *word = connect_state_word();
+    /* FAILED carries a reason in the error queue, once per attempt; the GAP
+     * status code is in the device log. */
+    if (strcmp(word, "FAILED") == 0 && !s_conn_failure_reported) {
+        s_conn_failure_reported = true;
+        ESP_LOGW(TAG, "BLE connect failed, GAP status %d", ble_conn_last_status());
+        usbscpi_queue_error(ctx, SCPI_ERROR_EXECUTION_ERROR);
+    }
+    SCPI_ResultMnemonic(ctx, word);
+    return SCPI_RES_OK;
+}
+
+/* ---------- Commands: declared once, described for hosts ---------- */
+
+static const usbscpi_param_desc_t gpio_set_params[] = {
+    USBSCPI_PARAM("pin", "u32", true),
+    USBSCPI_PARAM("value", "bool", true),
+};
+static const usbscpi_param_desc_t pin_params[] = {
+    USBSCPI_PARAM("pin", "u32", true),
+};
+static const usbscpi_param_desc_t adc_params[] = {
+    USBSCPI_PARAM("channel", "u32", false),
+};
+static const usbscpi_param_desc_t ble_scan_params[] = {
+    USBSCPI_PARAM("duration", "u32", false),
+};
+static const usbscpi_param_desc_t wlan_fetch_params[] = {
+    USBSCPI_PARAM_PICK("index", "WLAN:SCAN:COUNt?", "WLAN:SCAN:FETCh?"),
+};
+static const usbscpi_param_desc_t ble_fetch_params[] = {
+    USBSCPI_PARAM_PICK("index", "BLE:SCAN:COUNt?", "BLE:SCAN:FETCh?"),
+};
+static const usbscpi_param_desc_t ble_connect_params[] = {
+    USBSCPI_PARAM_PICK("index", "BLE:SCAN:COUNt?", "BLE:SCAN:FETCh?"),
+    USBSCPI_PARAM("pair", "bool", false),
+};
+static const usbscpi_param_desc_t key_params[] = {
+    USBSCPI_PARAM("key", "u32", true),
+};
+static const usbscpi_param_desc_t accept_params[] = {
+    USBSCPI_PARAM("accept", "bool", false),
+};
+static const usbscpi_param_desc_t framing_params[] = {
+    USBSCPI_PARAM("value", "bool", true),
+};
+
+/* The data plane is driven entirely by the SYSTem:STReam commands, so they
+ * are described too. ALIAS entries are the names from before the command
+ * standard: they still work for older hosts and the UI, but are not described. */
+#define ESP_COMMANDS(CMD, ALIAS)                                                          \
+    CMD("SYSTem:STReam:STARt",   cmd_stream_start,   "command", "Start the BLE RSSI capture", \
+        USBSCPI_NO_PARAMS, "none")                                                        \
+    CMD("SYSTem:STReam:STOP",    cmd_stream_stop,    "command", "Stop the capture",       \
+        USBSCPI_NO_PARAMS, "none")                                                        \
+    CMD("SYSTem:STReam:STATe?",  cmd_stream_state,   "query",   "enabled,attached",       \
+        USBSCPI_NO_PARAMS, "string")                                                      \
+    CMD("SYSTem:STReam:COUNt?",  cmd_stream_count,   "query",   "Reports captured",       \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("SYSTem:STReam:DROPped?", cmd_stream_dropped, "query",  "Reports lost to overflow", \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("SYSTem:STReam:TORN?",   cmd_stream_torn,    "query",   "Records cut by a reconnect", \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("SYSTem:STReam:PORT?",   cmd_stream_port,    "query",   "Data-plane TCP port",    \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("SYSTem:STReam:FORMat?", cmd_stream_format,  "query",   "Record version, stride, schema", \
+        USBSCPI_NO_PARAMS, "string")                                                      \
+    CMD("SYSTem:STReam:FRAMing", cmd_stream_framing, "command", "Frame the USB vendor pipe", \
+        USBSCPI_PARAMS(framing_params), "none")                                           \
+    CMD("SYSTem:STReam:FRAMing?", cmd_stream_framing_q, "query", "USB framing state",     \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("GPIO",              cmd_gpio_set,   "command", "Set a GPIO output level",        \
+        USBSCPI_PARAMS(gpio_set_params), "none")                                          \
+    CMD("GPIO?",             cmd_gpio_get,   "query",   "Read a GPIO input level",        \
+        USBSCPI_PARAMS(pin_params), "u32")                                                \
+    CMD("ADC?",              cmd_adc_read,   "query",   "Read the ADC",                   \
+        USBSCPI_PARAMS(adc_params), "u32")                                                \
+    CMD("WLAN:SCAN:STARt",   cmd_wlan_start, "command", "Scan for Wi-Fi access points (USB only)", \
+        USBSCPI_NO_PARAMS, "none")                                                        \
+    CMD("WLAN:SCAN:STATe?",  cmd_wlan_state, "query",   "IDLE, RUNNING or DONE",          \
+        USBSCPI_NO_PARAMS, "string")                                                      \
+    CMD("WLAN:SCAN:COUNt?",  cmd_wlan_count, "query",   "Access points found",            \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("WLAN:SCAN:FETCh?",  cmd_wlan_get,   "query",   "Access point by index",          \
+        USBSCPI_PARAMS(wlan_fetch_params), "string")                                      \
+    CMD("BLE:SCAN:STARt",    cmd_ble_start,  "command", "Scan for BLE devices for N seconds (default 5)", \
+        USBSCPI_PARAMS(ble_scan_params), "none")                                          \
+    CMD("BLE:SCAN:STATe?",   cmd_ble_state,  "query",   "IDLE, RUNNING or DONE",          \
+        USBSCPI_NO_PARAMS, "string")                                                      \
+    CMD("BLE:SCAN:COUNt?",   cmd_ble_count,  "query",   "BLE devices found",              \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("BLE:SCAN:FETCh?",   cmd_ble_get,    "query",   "BLE device by index",            \
+        USBSCPI_PARAMS(ble_fetch_params), "string")                                       \
+    CMD("BLE:CONNect:STARt", cmd_ble_connect_start, "command",                           \
+        "Connect to a scanned device and pair (pair=0 to only connect)",                  \
+        USBSCPI_PARAMS(ble_connect_params), "none")                                       \
+    CMD("BLE:CONNect:STATe?", cmd_ble_connect_state, "query",                            \
+        "IDLE, RUNNING, PASSKEY, CONFIRM, DISPLAY, DONE or FAILED",                       \
+        USBSCPI_NO_PARAMS, "string")                                                      \
+    CMD("BLE:DISConnect",    cmd_ble_disconn, "command", "Drop the BLE connection",       \
+        USBSCPI_NO_PARAMS, "none")                                                        \
+    CMD("BLE:PAIR:PASSKey",  cmd_ble_pair_passkey, "command", "Enter the passkey shown on the peer", \
+        USBSCPI_PARAMS(key_params), "none")                                               \
+    CMD("BLE:PAIR:PASSKey?", cmd_ble_pair_passkey_q, "query", "Passkey to enter on the peer", \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("BLE:PAIR:NUMCmp?",  cmd_ble_numcmp, "query",   "Number to compare with the peer", \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("BLE:PAIR:CONFirm",  cmd_ble_confirm, "command", "Accept (1) or reject (0) the number", \
+        USBSCPI_PARAMS(accept_params), "none")                                            \
+    CMD("BLE:SEC?",          cmd_ble_sec,    "query",   "mac,level,encrypted,authenticated,bonded,key_size", \
+        USBSCPI_NO_PARAMS, "string")                                                      \
+    ALIAS("GPIO:SET",            cmd_gpio_set)                                            \
+    ALIAS("GPIO:GET?",           cmd_gpio_get)                                            \
+    ALIAS("ADC:READ?",           cmd_adc_read)                                            \
+    ALIAS("WLAN:SCAN",           cmd_wlan_start)                                          \
+    ALIAS("WLAN:SCAN:DONE?",     cmd_wlan_done)                                           \
+    ALIAS("WLAN:SCAN?",          cmd_wlan_get)                                            \
+    ALIAS("BLE:SCAN",            cmd_ble_start)                                           \
+    ALIAS("BLE:SCAN:DONE?",      cmd_ble_done)                                            \
+    ALIAS("BLE:SCAN?",           cmd_ble_get)                                             \
+    ALIAS("BLE:CONNect",         cmd_ble_conn)                                            \
+    ALIAS("BLE:CONNect:STATus?", cmd_ble_conn_status)                                     \
+    ALIAS("BLE:CPAIR",           cmd_ble_connpair)                                        \
+    ALIAS("BLE:CPAIR:STATe?",    cmd_ble_connpair_state)                                  \
+    ALIAS("BLE:PAIR",            cmd_ble_pair)                                            \
+    ALIAS("BLE:PAIR:STATe?",     cmd_ble_pair_state)
+USBSCPI_DEFINE_COMMANDS(esp, ESP_COMMANDS);
+
+/* ---------- Workflows ---------- */
+
+static const usbscpi_prompt_desc_t connect_prompts[] = {
+    USBSCPI_PROMPT_PASSKEY("BLE:PAIR:PASSKey"),
+    USBSCPI_PROMPT_CONFIRM("BLE:PAIR:CONFirm", "BLE:PAIR:NUMCmp?"),
+    USBSCPI_PROMPT_DISPLAY("BLE:PAIR:PASSKey?"),
+};
+static const char *const connect_old_names[] = { "ble-connect-pair" };
+
+static const usbscpi_workflow_desc_t esp_workflows[] = {
+    { USBSCPI_WF_ACQUIRE("wifi-scan", "WLAN:SCAN", "Scan for Wi-Fi access points",
+                         "ssid:string,rssi:i32:dbm,channel:u32,authmode:string,bssid:mac",
+                         15000) },
+    { USBSCPI_WF_ACQUIRE("ble-scan", "BLE:SCAN", "Scan for BLE devices",
+                         "addr:mac,rssi:i32:dbm,name:string,adv_type:string", 30000) },
+    { USBSCPI_WF_INTERACTIVE("ble-connect", "BLE:CONNect",
+                             "Connect to a scanned device and pair", 45000),
+      USBSCPI_WF_PROMPTS(connect_prompts),
+      USBSCPI_WF_RESULT("BLE:SEC?",
+                        "mac:mac,level:u32,encrypted:bool,authenticated:bool,bonded:bool,key_size:u32"),
+      USBSCPI_WF_RENAMED_FROM(connect_old_names) },
+};
+
+static const usbscpi_descriptor_t s_descriptor = {
+    .commands = esp_desc_commands,
+    .command_count = USBSCPI_COUNT(esp_desc_commands),
+    .workflows = esp_workflows,
+    .workflow_count = USBSCPI_COUNT(esp_workflows),
 };
 
 /* ---------- TinyUSB USBTMC 必须回调(glue 未提供的补 stub) ---------- */
@@ -913,11 +868,11 @@ void app_main(void) {
 
     usbscpi_t *dev = usbscpi_init(s_storage, sizeof(s_storage), &cfg);
     usbscpi_tinyusb_bind(dev);          /* glue 接管 IN/OUT 路径 */
-    usbscpi_register(dev, demo_commands);
+    usbscpi_register(dev, esp_scpi_commands);
 
     /* Second context for SCPI over TCP: same commands and descriptor, its own
      * buffers and its own usb_tx. See net_scpi.h for why it cannot be shared. */
-    net_scpi_start(&cfg, demo_commands, NET_SCPI_SSID, NET_SCPI_PASS);
+    net_scpi_start(&cfg, esp_scpi_commands, NET_SCPI_SSID, NET_SCPI_PASS);
 
     xTaskCreate(usb_task, "usb", 6144, dev, 5, NULL);
     /* USB 起来后再异步初始化无线,避免阻塞枚举 */
