@@ -11,6 +11,7 @@ pub mod caps;
 pub mod dataplane;
 pub mod descriptor;
 pub mod discover;
+pub mod framing;
 pub mod headers;
 pub mod session;
 #[cfg(feature = "tcp")]

@@ -58,9 +58,17 @@ board:
 | `ble-connect`, `ble-pair`, `ble-connect-pair`, `ble-auto` | `ble-connect` (picks from last scan or scans first; pairs unless `--no-pair`; `--name` filter; reports security) |
 | `ble-peripheral` (nrf52840), `ble-security` (esp32s3-spp-security) | `ble-peripheral` |
 | `wifi-scan`, `ble-sniff`, `demo-scan` | unchanged names, job pattern |
+| none (CAN boards) | a stream, not a workflow (below) |
 
-Open question: the three CAN boards have no workflow; decide whether
-`can-capture` adds anything beyond `stream`.
+Decided (revised after hardware testing): CAN capture is a **stream**. The
+first cut was a `can-capture` job (start → poll → fetch) over a 128-frame
+snapshot; on a real STM32F4 it reached `DONE` only after 128 frames or an
+explicit `STOP`, so a quiet bus or a short capture timed out in the GUI, which
+had no Stop. Every CAN board now captures the same way: SCPI configures the bus
+(`CAN:OPEN`) and starts/stops (`SYSTem:STReam:STARt` / `:STOP`); frames arrive
+as data-plane records (TCP on `can`, the USB vendor pipe on the STM32 boards)
+until the user stops. No snapshot limit, nothing to poll. See *Streams* in
+`.agents/standards/scpi-commands.md`.
 
 Firmware, 3 steps: declare each command once (X-macro emits both the libscpi
 table and the descriptor), `tools/fw <board> flash`, `tools/fw <board> check`.
@@ -138,6 +146,34 @@ transport tests passes `tools/testing/test-c-full.sh`; every host step passes
 12. **Phase gate.** C gate, `cargo test`, `tests/scpi_tcp_smoke.py`, and the
     per-OS smoke checklist on every available board.
 
+**Phase 2 note (nRF52840 ble-auto).** `ble-connect` is identical on the
+ESP32-S3 and nRF52840 (`BLE:CONNect:STARt <index>[,<pair>]`), so a host drives
+both the same way. The nRF's old `BLE:AUTO` (scan + name-filter + connect +
+pair) stays as a working, undescribed alias: driving "scan first, then connect
+by name" from one workflow needs a host-side name->index step the engine does
+not have yet, and `--name` is deferred rather than faked. `ble-connect` lists
+`ble-auto` and `ble-connect-pair` as its `renamed_from`.
+
+**Phase 2 note (CAN capture).** Replaced the STM32 `can-capture` job with the
+data plane (see the revised decision above). `examples/stm32f4disco/can_stream.h`
+(shared by both STM32 boards): the RX ISR timestamps each frame (SysTick, µs)
+into a 256-record ring while `SYSTem:STReam` runs, and the main loop sends one
+32-byte record per frame as a REC frame on a vendor bulk-IN endpoint, the
+ESP32-S3's envelope. Schema
+`ts_us:u64:us,dropped:u64,can_id:u32:hex,len:u8,flags:u8,bus:u8,rsv:u8,data:bytes8`
+(the Linux `can` board's names, classic-CAN sized). The stream interface is
+vendor class with subclass/protocol `0x49`/`0x53`: on the SocketCAN board it
+sits beside gs_usb (EP IN 0x82 / OUT 0x01), and the host would otherwise have
+claimed gs_usb's interface. Host: `dataplane::discover` reports a USB-only data
+plane as port 0, `framing::FrameDecoder` and `UsbRecordStream` read it, the log
+reader keeps eight bulk-IN transfers in flight (a timed-out read no longer
+cancels one), and `stream` works over USB. GUI: Start/Stop and Record (CSV)
+in the Data Plane tab, with received/lost counts. Built here, not flashed:
+the hardware checklist is in `examples/stm32f4disco/README.md`. The stm32 LED
+per-colour and `LED:ALL` demo headers collapse into `LED <index>,<value>` per
+the standard, with `LED:SET`/`LED:GET?`/`BTN?`/`CAN:RECV?`/`CAN:COUNt?` kept as
+aliases.
+
 **Phase 1 outcome.**
 
 - Host: steps 1–6 as written. `send` checks errors in the same message
@@ -156,11 +192,10 @@ transport tests passes `tools/testing/test-c-full.sh`; every host step passes
 
 ### Phase 2: One vocabulary (old names kept as aliases)
 
-1. **Decide the open question**: does CAN get a `can-capture` workflow or is
-   `stream` enough.
+1. **Decided**: CAN capture is a stream (see the workflow table above).
 2. **Command standard.** `.agents/standards/scpi-commands.md`: the three
-   patterns, the state words (`IDLE RUNNING DONE FAILED CONNECTING CONNECTED
-   PAIRING PASSKEY CONFIRM DISPLAY ADVERTISING`), one parameter dictionary
+   patterns, the job states (`IDLE RUNNING DONE FAILED`, plus `PASSKEY CONFIRM
+   DISPLAY` while a job waits on the user), one parameter dictionary
    (`pin value index duration channel key accept bus id data bitrate filter`),
    and `fields=` required on every `FETCh?`.
 3. **One command list.** `USBSCPI_DEFINE_COMMANDS` X-macro and `P_*` param
@@ -169,18 +204,21 @@ transport tests passes `tools/testing/test-c-full.sh`; every host step passes
    same headers.
 4. **Workflow macros.** `USBSCPI_WF_ACQUIRE(name, prefix, summary, fields)`
    derives `:STARt`, `:STATe?`=`DONE`, `:COUNt?`, `:FETCh?`;
-   `USBSCPI_WF_INTERACTIVE(...)` takes named states and prompts. No host
-   engine change: it already compares trimmed strings.
-5. **Workflow renames in the descriptor.** Add a `deprecated=<new-name>` key so
-   the host can print "renamed to …" for one release.
+   `USBSCPI_WF_INTERACTIVE(...)` takes named states and prompts. The host
+   engine already compares trimmed strings; it gains one change: a fetch
+   workflow stops on `FAILED` instead of waiting for the timeout.
+5. **Workflow renames in the descriptor.** A workflow lists its old names
+   (`renamed_from`); the core emits the full WF line again under each old name
+   with `renamed=<new-name>`. Older hosts ignore the key and keep working; the
+   new host prints "renamed to …".
 6. **Migrate boards, one commit each**, in this order: `daemon` (covered by
    the TCP smoke test), `esp32s3`, `nrf52840`, `butterfly-nrf52840`,
    `esp32s3-spp-security`, `stm32f4disco`, `stm32f4disco-socketcan`, `can`,
    `pico2`. Each: X-macro list, three patterns, named states, dictionary
    parameter names, old headers as hidden aliases (in the libscpi table, not
    the descriptor), `:STATus?` removed (reasons go to `SYST:ERR?`).
-7. **Consolidate workflows** to the nine in the table above, on the
-   boards that have them.
+7. **Consolidate workflows** to the nine in the table above, on the boards
+   that have them; CAN capture is a stream.
 8. **`run`.** No name lists workflows; named params (`--duration 8`) from the
    descriptor; progress on stderr; Ctrl-C sends the job's `:STOP`; results as
    a table from `fields=`; an index param with an options source shows a

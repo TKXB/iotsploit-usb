@@ -27,6 +27,9 @@
 #include "usbscpi/usbscpi.h"
 #include "usbscpi_tinyusb.h"
 
+#define CAN_STREAM_VENDOR 0  /* the only vendor interface */
+#include "can_stream.h"
+
 const char *board_serial(void); /* usb_descriptors.c */
 
 /* ---------- SystemCoreClock (consumed by dwc2_stm32.h) ---------- */
@@ -35,7 +38,9 @@ uint32_t SystemCoreClock = 168000000u;
 /* ---------- Static buffers (no dynamic allocation) ---------- */
 static uint8_t s_storage[2048];
 static char    s_line[96];
-static uint8_t s_io[2048];
+/* Also holds the SYSTem:HELP:DESCription? reply, about 2 KB with the stream
+ * commands, so it has room to spare. */
+static uint8_t s_io[4096];
 
 /* ---------- USB TX callback via TinyUSB glue ---------- */
 static int usb_tx(void *user, const uint8_t *data, size_t len, bool eom) {
@@ -72,42 +77,6 @@ static scpi_result_t cmd_led_get(scpi_t *ctx) {
         return SCPI_RES_ERR;
     }
     SCPI_ResultUInt32(ctx, (gpio_get(GPIOD, led_pins[idx]) != 0) ? 1 : 0);
-    return SCPI_RES_OK;
-}
-
-/* ---- Named LED commands (tag = led_pins[] index) ----
- * SCPI short-form mnemonics follow IEEE 488.2 convention:
- *   GREen (PD12), ORAnge (PD13), RED (PD14), BLUe (PD15) */
-static scpi_result_t cmd_led_named_set(scpi_t *ctx) {
-    uint32_t val;
-    if (SCPI_ParamUInt32(ctx, &val, TRUE) != TRUE) return SCPI_RES_ERR;
-    int32_t idx = SCPI_CmdTag(ctx);
-    if (val) gpio_set(GPIOD, led_pins[idx]);
-    else     gpio_clear(GPIOD, led_pins[idx]);
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_led_named_get(scpi_t *ctx) {
-    int32_t idx = SCPI_CmdTag(ctx);
-    SCPI_ResultUInt32(ctx, (gpio_get(GPIOD, led_pins[idx]) != 0) ? 1 : 0);
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_led_all_set(scpi_t *ctx) {
-    uint32_t val;
-    if (SCPI_ParamUInt32(ctx, &val, TRUE) != TRUE) return SCPI_RES_ERR;
-    if (val) gpio_set(GPIOD, GPIO12 | GPIO13 | GPIO14 | GPIO15);
-    else     gpio_clear(GPIOD, GPIO12 | GPIO13 | GPIO14 | GPIO15);
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_led_all_get(scpi_t *ctx) {
-    uint32_t state = 0;
-    if (gpio_get(GPIOD, GPIO12)) state |= (1u << 0);  /* green  */
-    if (gpio_get(GPIOD, GPIO13)) state |= (1u << 1);  /* orange */
-    if (gpio_get(GPIOD, GPIO14)) state |= (1u << 2);  /* red    */
-    if (gpio_get(GPIOD, GPIO15)) state |= (1u << 3);  /* blue   */
-    SCPI_ResultUInt32(ctx, state);
     return SCPI_RES_OK;
 }
 
@@ -163,7 +132,8 @@ static scpi_result_t cmd_gpio_get(scpi_t *ctx) {
 
 /* ---------- CAN (bxCAN1 + bxCAN2) ----------
  * Bus numbers on the SCPI side are 1 and 2. Received frames are queued by the
- * RX0 ISRs into one ring and drained by CAN:RECV?. Both ISRs run at the same
+ * RX0 ISRs into the stream (can_stream.h) while SYSTem:STReam is running, and
+ * otherwise into one ring drained by CAN:RECV?. Both ISRs run at the same
  * NVIC priority, so they never preempt each other and the ring keeps a single
  * producer at a time. */
 
@@ -199,6 +169,10 @@ static void can_rx_drain(uint8_t bus) {
         rec.ext = ext ? 1u : 0u;
         rec.rtr = rtr ? 1u : 0u;
         if (rec.len > sizeof(rec.data)) rec.len = sizeof(rec.data);  /* DLC 9-15 = 8 bytes */
+        if (can_stream_running()) {
+            can_stream_push(bus, rec.id, ext, rtr, rec.len, rec.data);
+            continue;
+        }
         /* Whole records only: a partial one would misalign every later read. */
         if (usbscpi_ring_free(&s_can_ring) < sizeof(rec)) {
             s_can_dropped++;
@@ -337,122 +311,75 @@ static scpi_result_t cmd_can_state(scpi_t *ctx) {
 
 /* ---------- SCPI command descriptor (enables SYSTem:HELP:DESCription?) ---------- */
 
-static const usbscpi_param_desc_t desc_led_set_params[] = {
-    { "index", "u32",  true },
-    { "value", "bool", true },
+/* SYSTem:STReam:STARt needs a bus to listen on. */
+static bool can_stream_any_bus_open(void) {
+    return s_can_open[0] || s_can_open[1];
+}
+
+/* Commands declared once (.agents/standards/scpi-commands.md). LED and GPIO are
+ * settings; CAN:OPEN/SEND are actions; received frames stream through
+ * SYSTem:STReam (can_stream.h) until STOP, so there is no capture job. The
+ * per-colour LED headers and LED:ALL collapse into LED <index>,<value>;
+ * LED:SET/GET?, BTN? and the pop-style CAN:RECV?/COUNt? stay as undescribed
+ * aliases. */
+static const usbscpi_param_desc_t led_params[] = {
+    USBSCPI_PARAM("led", "u32", true),
+    USBSCPI_PARAM("value", "bool", true),
 };
-static const usbscpi_param_desc_t desc_led_get_params[] = {
-    { "index", "u32", true },
+static const usbscpi_param_desc_t led_q_params[] = {
+    USBSCPI_PARAM("led", "u32", true),
 };
-static const usbscpi_param_desc_t desc_led_val_params[] = {
-    { "value", "bool", true },
+static const usbscpi_param_desc_t gpio_set_params[] = {
+    USBSCPI_PARAM("pin", "u32", true),
+    USBSCPI_PARAM("value", "bool", true),
 };
-static const usbscpi_param_desc_t desc_led_toggle_params[] = {
-    { "index", "u32", true },
+static const usbscpi_param_desc_t pin_params[] = {
+    USBSCPI_PARAM("pin", "u32", true),
 };
-static const usbscpi_param_desc_t desc_gpio_set_params[] = {
-    { "pin",   "u32",  true },
-    { "value", "bool", true },
+static const usbscpi_param_desc_t can_bus_params[] = {
+    USBSCPI_PARAM("bus", "u32", true),
 };
-static const usbscpi_param_desc_t desc_gpio_get_params[] = {
-    { "pin", "u32", true },
+static const usbscpi_param_desc_t can_open_params[] = {
+    USBSCPI_PARAM("bus", "u32", true),
+    USBSCPI_PARAM("bitrate", "u32", true),
+};
+static const usbscpi_param_desc_t can_send_params[] = {
+    USBSCPI_PARAM("bus", "u32", true),
+    USBSCPI_PARAM("id", "u32", true),
+    USBSCPI_PARAM("data", "string", false),
 };
 
-static const usbscpi_param_desc_t desc_can_bus_params[] = {
-    { "bus", "u32", true, NULL, NULL },
-};
-static const usbscpi_param_desc_t desc_can_open_params[] = {
-    { "bus",     "u32", true, NULL, NULL },
-    { "bitrate", "u32", true, NULL, NULL },
-};
-static const usbscpi_param_desc_t desc_can_send_params[] = {
-    { "bus",  "u32",    true, NULL, NULL },
-    { "id",   "u32",    true, NULL, NULL },
-    { "data", "string", false, NULL, NULL },
-};
-
-static const usbscpi_command_desc_t desc_commands[] = {
-    { "LED:SET",      "command", "Set LED by index (0=green,1=orange,2=red,3=blue)",
-      desc_led_set_params,     2, "none" },
-    { "LED:GET?",     "query",   "Read LED state by index",
-      desc_led_get_params,     1, "u32"  },
-    { "LED:GREen",    "command", "Set green LED (PD12)",
-      desc_led_val_params,     1, "none" },
-    { "LED:GREen?",   "query",   "Read green LED state",
-      NULL, 0, "u32"  },
-    { "LED:ORAnge",   "command", "Set orange LED (PD13)",
-      desc_led_val_params,     1, "none" },
-    { "LED:ORAnge?",  "query",   "Read orange LED state",
-      NULL, 0, "u32"  },
-    { "LED:RED",      "command", "Set red LED (PD14)",
-      desc_led_val_params,     1, "none" },
-    { "LED:RED?",     "query",   "Read red LED state",
-      NULL, 0, "u32"  },
-    { "LED:BLUe",     "command", "Set blue LED (PD15)",
-      desc_led_val_params,     1, "none" },
-    { "LED:BLUe?",    "query",   "Read blue LED state",
-      NULL, 0, "u32"  },
-    { "LED:ALL",      "command", "Set all LEDs on or off",
-      desc_led_val_params,     1, "none" },
-    { "LED:ALL?",     "query",   "Read all LED states as bitmask (bit0=green..bit3=blue)",
-      NULL, 0, "u32"  },
-    { "LED:TOGgle",   "command", "Toggle LED by index",
-      desc_led_toggle_params,  1, "none" },
-    { "BTN?",         "query",   "Read user button (PA0), 1=pressed",
-      NULL, 0, "u32"  },
-    { "GPIO:SET",     "command", "Set GPIOA pin output level",
-      desc_gpio_set_params,    2, "none" },
-    { "GPIO:GET?",    "query",   "Read GPIOA pin input level",
-      desc_gpio_get_params,    1, "u32"  },
-    { "CAN:OPEN",     "command", "Start CAN bus 1 (PD0/PD1) or 2 (PB12/PB13) at 125k/250k/500k/1M",
-      desc_can_open_params,    2, "none" },
-    { "CAN:SEND",     "command", "Send one frame; id > 0x7FF is extended, data is hex",
-      desc_can_send_params,    3, "none" },
-    { "CAN:RECV?",    "query",   "Pop one frame: bus,id,ext,rtr,len,data (empty if none)",
-      NULL, 0, "string" },
-    { "CAN:COUNt?",   "query",   "Received frames waiting",
-      NULL, 0, "u32"  },
-    { "CAN:STATe?",   "query",   "open,tec,rec,busoff,rx_dropped",
-      desc_can_bus_params,     1, "string" },
-};
+#define STM_COMMANDS(CMD, ALIAS)                                                          \
+    CMD("LED",   cmd_led_set, "command", "Set LED by index (0=green,1=orange,2=red,3=blue)", \
+        USBSCPI_PARAMS(led_params), "none")                                               \
+    CMD("LED?",  cmd_led_get, "query",   "Read LED state by index",                       \
+        USBSCPI_PARAMS(led_q_params), "u32")                                              \
+    CMD("LED:TOGgle", cmd_led_toggle, "command", "Toggle LED by index",                   \
+        USBSCPI_PARAMS(led_q_params), "none")                                             \
+    CMD("BUTTon?", cmd_btn, "query", "Read the user button (PA0), 1=pressed",             \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("GPIO",  cmd_gpio_set, "command", "Set a GPIOA pin output level",                 \
+        USBSCPI_PARAMS(gpio_set_params), "none")                                          \
+    CMD("GPIO?", cmd_gpio_get, "query",   "Read a GPIOA pin input level",                 \
+        USBSCPI_PARAMS(pin_params), "u32")                                                \
+    CMD("CAN:OPEN", cmd_can_open, "command",                                              \
+        "Start CAN bus 1 (PD0/PD1) or 2 (PB12/PB13) at 125k/250k/500k/1M",                \
+        USBSCPI_PARAMS(can_open_params), "none")                                          \
+    CMD("CAN:SEND", cmd_can_send, "command", "Send one frame; id > 0x7FF is extended, data is hex", \
+        USBSCPI_PARAMS(can_send_params), "none")                                          \
+    CMD("CAN:STATe?", cmd_can_state, "query", "open,tec,rec,busoff,rx_dropped",           \
+        USBSCPI_PARAMS(can_bus_params), "string")                                         \
+    CAN_STREAM_COMMANDS(CMD)                                                              \
+    ALIAS("LED:SET",    cmd_led_set)                                                      \
+    ALIAS("LED:GET?",   cmd_led_get)                                                      \
+    ALIAS("BTN?",       cmd_btn)                                                          \
+    ALIAS("CAN:RECV?",  cmd_can_recv)                                                     \
+    ALIAS("CAN:COUNt?", cmd_can_count)
+USBSCPI_DEFINE_COMMANDS(stm, STM_COMMANDS);
 
 static const usbscpi_descriptor_t s_descriptor = {
-    .commands       = desc_commands,
-    .command_count  = sizeof(desc_commands) / sizeof(desc_commands[0]),
-    .workflows      = NULL,
-    .workflow_count = 0,
-};
-
-static const scpi_command_t demo_commands[] = {
-    /* Numeric LED control (index 0-3: green, orange, red, blue) */
-    { "LED:SET",     cmd_led_set,        0 },
-    { "LED:GET?",    cmd_led_get,        0 },
-
-    /* Named LED control — tag encodes led_pins[] index */
-    { "LED:GREen",   cmd_led_named_set,  0 },  /* PD12 */
-    { "LED:GREen?",  cmd_led_named_get,  0 },
-    { "LED:ORAnge",  cmd_led_named_set,  1 },  /* PD13 */
-    { "LED:ORAnge?", cmd_led_named_get,  1 },
-    { "LED:RED",     cmd_led_named_set,  2 },  /* PD14 */
-    { "LED:RED?",    cmd_led_named_get,  2 },
-    { "LED:BLUe",    cmd_led_named_set,  3 },  /* PD15 */
-    { "LED:BLUe?",   cmd_led_named_get,  3 },
-
-    /* Bulk LED control */
-    { "LED:ALL",     cmd_led_all_set,    0 },
-    { "LED:ALL?",    cmd_led_all_get,    0 },
-    { "LED:TOGgle",  cmd_led_toggle,     0 },
-
-    { "BTN?",        cmd_btn,            0 },
-    { "GPIO:SET",    cmd_gpio_set,       0 },
-    { "GPIO:GET?",   cmd_gpio_get,       0 },
-
-    { "CAN:OPEN",    cmd_can_open,       0 },
-    { "CAN:SEND",    cmd_can_send,       0 },
-    { "CAN:RECV?",   cmd_can_recv,       0 },
-    { "CAN:COUNt?",  cmd_can_count,      0 },
-    { "CAN:STATe?",  cmd_can_state,      0 },
-    SCPI_CMD_LIST_END
+    .commands = stm_desc_commands,
+    .command_count = USBSCPI_COUNT(stm_desc_commands),
 };
 
 /* ---------- TinyUSB USBTMC callbacks the application must provide ----------
@@ -543,12 +470,20 @@ static void board_init(void) {
     gpio_set_af(GPIOB, GPIO_AF9, GPIO12 | GPIO13);
 
     usbscpi_ring_init(&s_can_ring, s_can_ring_mem, sizeof(s_can_ring_mem));
+    /* Below SysTick (priority 0), which timestamps frames in these ISRs. */
+    nvic_set_priority(NVIC_CAN1_RX0_IRQ, 1u << 4);
+    nvic_set_priority(NVIC_CAN2_RX0_IRQ, 1u << 4);
+    nvic_set_priority(NVIC_OTG_FS_IRQ, 1u << 4);
+    can_stream_init();
     nvic_enable_irq(NVIC_CAN1_RX0_IRQ);
     nvic_enable_irq(NVIC_CAN2_RX0_IRQ);
 
     /* Enable USB OTG FS interrupt */
     nvic_enable_irq(NVIC_OTG_FS_IRQ);
 }
+
+/* Unplugged or reset by the host: the next host starts from an idle stream. */
+void tud_umount_cb(void) { can_stream_reset(); }
 
 /* ---------- Main ---------- */
 int main(void) {
@@ -575,10 +510,11 @@ int main(void) {
 
     usbscpi_t *dev = usbscpi_init(s_storage, sizeof(s_storage), &cfg);
     usbscpi_tinyusb_bind(dev);
-    usbscpi_register(dev, demo_commands);
+    usbscpi_register(dev, stm_scpi_commands);
 
     while (1) {
         tud_task();
         usbscpi_task(dev);
+        can_stream_pump();
     }
 }

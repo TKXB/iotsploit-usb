@@ -143,81 +143,75 @@ static scpi_result_t cmd_ble_inject(scpi_t *ctx) {
     return SCPI_RES_OK;
 }
 
-static const scpi_command_t ble_commands[] = {
-    { "BLE:SNIFf",          cmd_ble_sniff,         0 },
-    { "BLE:SNIFf:STOP",     cmd_ble_sniff_stop,    0 },
-    { "BLE:SNIFf:DONE?",    cmd_ble_sniff_done,    0 },
-    { "BLE:SNIFf:COUNt?",   cmd_ble_sniff_count,   0 },
-    { "BLE:SNIFf:PACKet?",  cmd_ble_sniff_packet,  0 },
-    { "BLE:SNIFf:DROPped?", cmd_ble_sniff_dropped, 0 },
-    { "BLE:CHANnel",        cmd_ble_channel_set,   0 },
-    { "BLE:CHANnel?",       cmd_ble_channel_get,   0 },
-    { "BLE:INJect",         cmd_ble_inject,        0 },
-    SCPI_CMD_LIST_END
+/* BLE:SNIFf is a job (.agents/standards/scpi-commands.md): STARt, then STATe?
+ * reports one word, mapping ble_sniff_is_active(). The channel stays a
+ * parameter of STARt, as before. */
+static scpi_result_t cmd_ble_sniff(scpi_t *ctx);
+static bool s_sniff_started;
+
+static scpi_result_t cmd_ble_sniff_start_job(scpi_t *ctx) {
+    scpi_result_t r = cmd_ble_sniff(ctx);
+    if (r == SCPI_RES_OK) s_sniff_started = true;
+    return r;
+}
+
+static scpi_result_t cmd_ble_sniff_state(scpi_t *ctx) {
+    SCPI_ResultMnemonic(ctx, !s_sniff_started ? "IDLE" : ble_sniff_is_active() ? "RUNNING" : "DONE");
+    return SCPI_RES_OK;
+}
+
+static const usbscpi_param_desc_t sniff_start_params[] = {
+    USBSCPI_PARAM("duration", "u32", false),
+    USBSCPI_PARAM("channel", "u32", false),
+};
+static const usbscpi_param_desc_t sniff_fetch_params[] = {
+    USBSCPI_PARAM_PICK("index", "BLE:SNIFf:COUNt?", "BLE:SNIFf:FETCh?"),
+};
+static const usbscpi_param_desc_t channel_params[] = {
+    USBSCPI_PARAM("channel", "u32", true),
+};
+static const usbscpi_param_desc_t inject_params[] = {
+    USBSCPI_PARAM("data", "string", true),
 };
 
-/* ---------- Descriptor metadata (SYSTem:HELP:DESCription?) ---------- */
-
-static const usbscpi_param_desc_t desc_sniff_params[] = {
-    { "secs", "u32", false },
-    { "channel", "u32", false },
-};
-static const usbscpi_param_desc_t desc_packet_params[] = {
-    { "index", "u32", true },
-};
-static const usbscpi_param_desc_t desc_channel_params[] = {
-    { "channel", "u32", true },
-};
-static const usbscpi_param_desc_t desc_inject_params[] = {
-    { "hex", "string", true },
-};
-
-static const usbscpi_command_desc_t desc_commands[] = {
-    { "BLE:SNIFf",          "command", "Start a timed BLE advertising capture window (secs, optional channel 37/38/39)",
-      desc_sniff_params, 2, NULL },
-    { "BLE:SNIFf:STOP",     "command", "Stop the capture window early",
-      NULL, 0, NULL },
-    { "BLE:SNIFf:DONE?",    "query",   "1 = window finished, 0 = still capturing",
-      NULL, 0, "bool" },
-    { "BLE:SNIFf:COUNt?",   "query",   "Number of buffered advertising PDUs",
-      NULL, 0, "u32" },
-    { "BLE:SNIFf:PACKet?",  "query",   "Get captured PDU by index (timestamp_us,channel,rssi,length,pdu_hex)",
-      desc_packet_params, 1, "string" },
-    { "BLE:SNIFf:DROPped?", "query",   "PDUs dropped due to a full capture ring",
-      NULL, 0, "u32" },
-    { "BLE:CHANnel",        "command", "Select advertising channel (37, 38, or 39)",
-      desc_channel_params, 1, NULL },
-    { "BLE:CHANnel?",       "query",   "Current advertising channel",
-      NULL, 0, "u32" },
-    { "BLE:INJect",         "command", "Transmit a raw advertising PDU given as a hex string",
-      desc_inject_params, 1, NULL },
-};
+/* ALIAS entries are the names from before the command standard. */
+#define BUTTERFLY_COMMANDS(CMD, ALIAS)                                                    \
+    CMD("BLE:SNIFf:STARt",   cmd_ble_sniff_start_job, "command",                          \
+        "Capture advertising PDUs for N seconds (optional channel 37/38/39)",             \
+        USBSCPI_PARAMS(sniff_start_params), "none")                                       \
+    CMD("BLE:SNIFf:STOP",    cmd_ble_sniff_stop,  "command", "Stop the capture early",    \
+        USBSCPI_NO_PARAMS, "none")                                                        \
+    CMD("BLE:SNIFf:STATe?",  cmd_ble_sniff_state, "query", "IDLE, RUNNING or DONE",       \
+        USBSCPI_NO_PARAMS, "string")                                                      \
+    CMD("BLE:SNIFf:COUNt?",  cmd_ble_sniff_count, "query", "Buffered advertising PDUs",   \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("BLE:SNIFf:FETCh?",  cmd_ble_sniff_packet, "query",                               \
+        "Captured PDU by index (time_us,channel,rssi,length,pdu_hex)",                    \
+        USBSCPI_PARAMS(sniff_fetch_params), "string")                                     \
+    CMD("BLE:SNIFf:DROPped?", cmd_ble_sniff_dropped, "query", "PDUs dropped to a full ring", \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("BLE:CHANnel",       cmd_ble_channel_set, "command", "Select advertising channel (37/38/39)", \
+        USBSCPI_PARAMS(channel_params), "none")                                           \
+    CMD("BLE:CHANnel?",      cmd_ble_channel_get, "query", "Current advertising channel", \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("BLE:INJect",        cmd_ble_inject,     "command", "Transmit a raw advertising PDU (hex)", \
+        USBSCPI_PARAMS(inject_params), "none")                                            \
+    ALIAS("BLE:SNIFf",       cmd_ble_sniff)                                               \
+    ALIAS("BLE:SNIFf:DONE?", cmd_ble_sniff_done)                                          \
+    ALIAS("BLE:SNIFf:PACKet?", cmd_ble_sniff_packet)
+USBSCPI_DEFINE_COMMANDS(butterfly, BUTTERFLY_COMMANDS);
 
 static const usbscpi_workflow_desc_t desc_workflows[] = {
-    {
-        .name = "ble-sniff",
-        .type = "trigger_poll_fetch",
-        .summary = "Capture BLE advertising packets for a timed window",
-        .trigger_cmd = "BLE:SNIFf",
-        .done_query = "BLE:SNIFf:DONE?",
-        .done_value = "1",
-        .count_query = "BLE:SNIFf:COUNt?",
-        .fetch_query = "BLE:SNIFf:PACKet?",
-        .state_query = NULL,
-        .success_value = NULL,
-        .failed_values = NULL,
-        .failed_value_count = 0,
-        .fields = "timestamp:u32,channel:u32,rssi:i32,length:u32,pdu:string",
-        .timeout_ms = 30000,
-        .poll_ms = 500,
-    },
+    { USBSCPI_WF_ACQUIRE("ble-sniff", "BLE:SNIFf",
+                         "Capture BLE advertising packets for a timed window",
+                         "time:u32:us,channel:u32,rssi:i32:dbm,length:u32,pdu:string", 30000) },
 };
 
 static const usbscpi_descriptor_t s_descriptor = {
-    .commands = desc_commands,
-    .command_count = sizeof(desc_commands) / sizeof(desc_commands[0]),
+    .commands = butterfly_desc_commands,
+    .command_count = USBSCPI_COUNT(butterfly_desc_commands),
     .workflows = desc_workflows,
-    .workflow_count = sizeof(desc_workflows) / sizeof(desc_workflows[0]),
+    .workflow_count = USBSCPI_COUNT(desc_workflows),
 };
 
 /* ---------- TinyUSB USBTMC required callbacks ---------- */
@@ -325,7 +319,7 @@ int main(void) {
 
     usbscpi_t *dev = usbscpi_init(s_storage, sizeof(s_storage), &cfg);
     usbscpi_tinyusb_bind(dev);
-    usbscpi_register(dev, ble_commands);
+    usbscpi_register(dev, butterfly_scpi_commands);
 
     /* 4. Main loop: pump USB + drain the capture window. */
     while (1) {

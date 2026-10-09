@@ -102,92 +102,121 @@ static scpi_result_t cmd_ble_sec(scpi_t *ctx) {
     return SCPI_RES_OK;
 }
 
-/* ---------- Descriptor metadata (SYSTem:HELP:DESCription?) ---------- */
+/* ---------- BLE:PERiph job (.agents/standards/scpi-commands.md) ----------
+ * STARt advertises; once a central connects, the job pairs on that link. The
+ * pairing state machine (ble_spp_security.h) is unchanged: STATe? maps it to
+ * the standard words and starts pairing on the first poll after a connect, so
+ * the whole flow needs no other command. */
+static bool s_periph_running;
+static bool s_periph_pair_started;
+static bool s_periph_failure_reported;
 
-static const usbscpi_param_desc_t desc_ble_pair_passkey_params[] = {
-    { "key", "string", true },
+static scpi_result_t cmd_periph_start(scpi_t *ctx) {
+    (void)ctx;
+    ESP_LOGI(TAG, "BLE:PERiph:STARt");
+    /* A central that is already connected (the old ble-security flow) is
+     * paired directly; otherwise advertise and wait for one. */
+    if (ble_spp_conn_state() != BLE_SPP_CONNECTED && ble_spp_adv_start() != 0) {
+        return SCPI_RES_ERR;
+    }
+    s_periph_running = true;
+    s_periph_pair_started = false;
+    s_periph_failure_reported = false;
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_periph_stop(scpi_t *ctx) {
+    (void)ctx;
+    s_periph_running = false;
+    return ble_spp_adv_stop() == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
+}
+
+static const char *periph_state_word(void) {
+    if (!s_periph_running) return "IDLE";
+    if (ble_spp_conn_state() != BLE_SPP_CONNECTED) return "RUNNING";
+    if (!s_periph_pair_started) {
+        s_periph_pair_started = true;
+        if (ble_spp_pair_start() != 0) return "FAILED";
+        return "RUNNING";
+    }
+    switch (ble_spp_pair_state()) {
+    case BLE_SPP_PAIR_INPUT_NEEDED:  return "PASSKEY";
+    case BLE_SPP_PAIR_NUMCMP_NEEDED: return "CONFIRM";
+    case BLE_SPP_PAIR_DISPLAY_KEY:   return "DISPLAY";
+    case BLE_SPP_PAIR_DONE:          return "DONE";
+    case BLE_SPP_PAIR_FAILED:        return "FAILED";
+    default:                         return "RUNNING";
+    }
+}
+
+static scpi_result_t cmd_periph_state(scpi_t *ctx) {
+    const char *word = periph_state_word();
+    if (strcmp(word, "FAILED") == 0 && !s_periph_failure_reported) {
+        s_periph_failure_reported = true;
+        ESP_LOGW(TAG, "peripheral pairing failed, status %d", ble_spp_last_status());
+        usbscpi_queue_error(ctx, SCPI_ERROR_EXECUTION_ERROR);
+    }
+    SCPI_ResultMnemonic(ctx, word);
+    return SCPI_RES_OK;
+}
+
+/* ---------- Commands: declared once, described for hosts ---------- */
+
+static const usbscpi_param_desc_t key_params[] = {
+    USBSCPI_PARAM("key", "u32", true),
 };
-static const usbscpi_param_desc_t desc_ble_pair_confirm_params[] = {
-    { "accept", "bool", false },
+static const usbscpi_param_desc_t accept_params[] = {
+    USBSCPI_PARAM("accept", "bool", false),
 };
 
-static const usbscpi_command_desc_t desc_commands[] = {
-    { "BLE:ADV:STARt",       "command", "Start BLE SPP advertising",
-      NULL, 0, NULL },
-    { "BLE:ADV:STOP",        "command", "Stop BLE SPP advertising",
-      NULL, 0, NULL },
-    { "BLE:CONNect:STATe?",  "query",   "0=idle 1=connected",
-      NULL, 0, "u32" },
-    { "BLE:CONNect:STATus?", "query",   "Last GAP status/reason code",
-      NULL, 0, "u32" },
-    { "BLE:PAIR",            "command", "Initiate pairing/security on the active connection",
-      NULL, 0, NULL },
-    { "BLE:PAIR:STATe?",     "query",   "0=idle 1=in-progress 2=passkey-needed 3=numcmp-needed 4=done 5=failed 6=display-key",
-      NULL, 0, "u32" },
-    { "BLE:PAIR:PASSKey",    "command", "Enter the 6-digit passkey shown on the peer",
-      desc_ble_pair_passkey_params, 1, NULL },
-    { "BLE:PAIR:PASSKey?",   "query",   "Get the passkey to enter on the peer",
-      NULL, 0, "u32" },
-    { "BLE:PAIR:NUMCmp?",    "query",   "Get the numeric comparison value",
-      NULL, 0, "u32" },
-    { "BLE:PAIR:CONFirm",    "command", "Confirm (1) or reject (0) numeric comparison",
-      desc_ble_pair_confirm_params, 1, NULL },
-    { "BLE:SEC?",            "query",   "Security info: mac,level,encrypted,authenticated,bonded,key_size",
-      NULL, 0, "string" },
+/* ALIAS entries are the names from before the command standard. */
+#define SPP_COMMANDS(CMD, ALIAS)                                                         \
+    CMD("BLE:PERiph:STARt",  cmd_periph_start, "command",                               \
+        "Advertise, then pair with the central that connects", USBSCPI_NO_PARAMS, "none") \
+    CMD("BLE:PERiph:STOP",   cmd_periph_stop,  "command", "Stop advertising",            \
+        USBSCPI_NO_PARAMS, "none")                                                       \
+    CMD("BLE:PERiph:STATe?", cmd_periph_state, "query",                                 \
+        "IDLE, RUNNING, PASSKEY, CONFIRM, DISPLAY, DONE or FAILED", USBSCPI_NO_PARAMS, "string") \
+    CMD("BLE:PAIR:PASSKey",  cmd_ble_pair_passkey, "command", "Enter the passkey shown on the peer", \
+        USBSCPI_PARAMS(key_params), "none")                                              \
+    CMD("BLE:PAIR:PASSKey?", cmd_ble_pair_passkey_q, "query", "Passkey to enter on the peer", \
+        USBSCPI_NO_PARAMS, "u32")                                                        \
+    CMD("BLE:PAIR:NUMCmp?",  cmd_ble_numcmp, "query", "Number to compare with the peer", \
+        USBSCPI_NO_PARAMS, "u32")                                                        \
+    CMD("BLE:PAIR:CONFirm",  cmd_ble_confirm, "command", "Accept (1) or reject (0) the number", \
+        USBSCPI_PARAMS(accept_params), "none")                                           \
+    CMD("BLE:SEC?",          cmd_ble_sec, "query", "mac,level,encrypted,authenticated,bonded,key_size", \
+        USBSCPI_NO_PARAMS, "string")                                                     \
+    ALIAS("BLE:ADV:STARt",       cmd_ble_adv_start)                                      \
+    ALIAS("BLE:ADV:STOP",        cmd_ble_adv_stop)                                       \
+    ALIAS("BLE:CONNect:STATe?",  cmd_ble_conn_state)                                     \
+    ALIAS("BLE:CONNect:STATus?", cmd_ble_conn_status)                                    \
+    ALIAS("BLE:PAIR",            cmd_ble_pair)                                           \
+    ALIAS("BLE:PAIR:STATe?",     cmd_ble_pair_state)
+USBSCPI_DEFINE_COMMANDS(spp, SPP_COMMANDS);
+
+static const usbscpi_prompt_desc_t periph_prompts[] = {
+    USBSCPI_PROMPT_PASSKEY("BLE:PAIR:PASSKey"),
+    USBSCPI_PROMPT_CONFIRM("BLE:PAIR:CONFirm", "BLE:PAIR:NUMCmp?"),
+    USBSCPI_PROMPT_DISPLAY("BLE:PAIR:PASSKey?"),
 };
+static const char *const periph_old_names[] = { "ble-security" };
 
-static const char *const desc_ble_pair_failed[] = { "5" };
-
-/* Interactive prompts for the ble-security workflow, keyed by BLE:PAIR:STATe?:
- *   2 passkey-needed  -> user types the passkey the peer shows
- *   3 numcmp-needed   -> user compares BLE:PAIR:NUMCmp? and accepts/rejects
- *   6 display-key     -> device shows BLE:PAIR:PASSKey? for the user to enter on the peer */
-static const usbscpi_prompt_desc_t desc_ble_pair_prompts[] = {
-    { "2", "passkey", "BLE:PAIR:PASSKey", NULL },
-    { "3", "confirm", "BLE:PAIR:CONFirm", "BLE:PAIR:NUMCmp?" },
-    { "6", "display", NULL,               "BLE:PAIR:PASSKey?" },
-};
-
-static const usbscpi_workflow_desc_t desc_workflows[] = {
-    {
-        .name = "ble-security",
-        .type = "trigger_poll_interactive",
-        .summary = "Pair with the connected central and report the security level",
-        .trigger_cmd = "BLE:PAIR",
-        .state_query = "BLE:PAIR:STATe?",
-        .success_value = "4",
-        .failed_values = desc_ble_pair_failed,
-        .failed_value_count = 1,
-        .prompts = desc_ble_pair_prompts,
-        .prompt_count = sizeof(desc_ble_pair_prompts) / sizeof(desc_ble_pair_prompts[0]),
-        .result_query = "BLE:SEC?",
-        .result_fields = "mac:mac,level:u32,encrypted:bool,authenticated:bool,bonded:bool,key_size:u32",
-        .timeout_ms = 30000,
-        .poll_ms = 200,
-    },
+static const usbscpi_workflow_desc_t spp_workflows[] = {
+    { USBSCPI_WF_INTERACTIVE("ble-peripheral", "BLE:PERiph",
+                             "Advertise, pair with the central that connects, report security",
+                             120000),
+      USBSCPI_WF_PROMPTS(periph_prompts),
+      USBSCPI_WF_RESULT("BLE:SEC?",
+                        "mac:mac,level:u32,encrypted:bool,authenticated:bool,bonded:bool,key_size:u32"),
+      USBSCPI_WF_RENAMED_FROM(periph_old_names) },
 };
 
 static const usbscpi_descriptor_t s_descriptor = {
-    .commands = desc_commands,
-    .command_count = sizeof(desc_commands) / sizeof(desc_commands[0]),
-    .workflows = desc_workflows,
-    .workflow_count = sizeof(desc_workflows) / sizeof(desc_workflows[0]),
-};
-
-static const scpi_command_t demo_commands[] = {
-    { "BLE:ADV:STARt",       cmd_ble_adv_start,      0 },
-    { "BLE:ADV:STOP",        cmd_ble_adv_stop,       0 },
-    { "BLE:CONNect:STATe?",  cmd_ble_conn_state,     0 },
-    { "BLE:CONNect:STATus?", cmd_ble_conn_status,    0 },
-    { "BLE:PAIR",            cmd_ble_pair,           0 },
-    { "BLE:PAIR:STATe?",     cmd_ble_pair_state,     0 },
-    { "BLE:PAIR:PASSKey",    cmd_ble_pair_passkey,   0 },
-    { "BLE:PAIR:PASSKey?",   cmd_ble_pair_passkey_q, 0 },
-    { "BLE:PAIR:NUMCmp?",    cmd_ble_numcmp,         0 },
-    { "BLE:PAIR:CONFirm",    cmd_ble_confirm,        0 },
-    { "BLE:SEC?",            cmd_ble_sec,            0 },
-    SCPI_CMD_LIST_END
-    /* *IDN? / SYST:CAP? / SYST:HELP:HEAD? / SYST:ERR? are provided by core */
+    .commands = spp_desc_commands,
+    .command_count = USBSCPI_COUNT(spp_desc_commands),
+    .workflows = spp_workflows,
+    .workflow_count = USBSCPI_COUNT(spp_workflows),
 };
 
 /* ---------- TinyUSB USBTMC required callbacks (glue does not provide these) ---------- */
@@ -369,7 +398,7 @@ void app_main(void) {
 
     usbscpi_t *dev = usbscpi_init(s_storage, sizeof(s_storage), &cfg);
     usbscpi_tinyusb_bind(dev);          /* glue takes over the IN/OUT path */
-    usbscpi_register(dev, demo_commands);
+    usbscpi_register(dev, spp_scpi_commands);
 
     xTaskCreate(usb_task, "usb", 6144, dev, 5, NULL);
     /* Bring up BLE after USB is running so enumeration is not blocked. */

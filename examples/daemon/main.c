@@ -67,30 +67,64 @@ static scpi_result_t cmd_gpio_get(scpi_t *scpi) {
     return SCPI_RES_OK;
 }
 
-/* A trigger_poll_fetch workflow needs a trigger that completes asynchronously;
- * this one "finishes" one second after it is started. */
-static scpi_result_t cmd_scan(scpi_t *scpi) {
+/* DEMO:SCAN is a job (see .agents/standards/scpi-commands.md). It finishes
+ * after two ticks of time(), i.e. between one and two seconds after it starts:
+ * one tick could pass a millisecond after STARt. The workflow genuinely has to
+ * poll, and RUNNING is always observable right after STARt. */
+static int s_scan_running;
+
+static void scan_update(void) {
+    if (s_scan_running && time(NULL) - s_scan_started >= 2) {
+        s_scan_running = 0;
+        s_scan_done = 1;
+        s_scan_count = DEMO_SCAN_MAX;
+    }
+}
+
+static scpi_result_t cmd_scan_start(scpi_t *scpi) {
     (void)scpi;
     s_scan_done = 0;
-    s_scan_count = DEMO_SCAN_MAX;
+    s_scan_count = 0;
+    s_scan_running = 1;
     s_scan_started = time(NULL);
     return SCPI_RES_OK;
 }
 
+static scpi_result_t cmd_scan_stop(scpi_t *scpi) {
+    (void)scpi;
+    scan_update();
+    s_scan_running = 0;
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_scan_state(scpi_t *scpi) {
+    scan_update();
+    const char *state = s_scan_running ? "RUNNING" : s_scan_done ? "DONE" : "IDLE";
+    SCPI_ResultMnemonic(scpi, state);
+    return SCPI_RES_OK;
+}
+
+/* Old DEMO:SCAN:DONE?: 1 once the scan has finished. */
 static scpi_result_t cmd_scan_done(scpi_t *scpi) {
-    if (!s_scan_done && time(NULL) - s_scan_started >= 1) {
-        s_scan_done = 1;
-    }
+    scan_update();
     SCPI_ResultUInt32(scpi, (uint32_t)s_scan_done);
     return SCPI_RES_OK;
 }
 
 static scpi_result_t cmd_scan_count(scpi_t *scpi) {
+    scan_update();
     SCPI_ResultUInt32(scpi, (uint32_t)s_scan_count);
     return SCPI_RES_OK;
 }
 
-static scpi_result_t cmd_scan_get(scpi_t *scpi) {
+static scpi_result_t cmd_scan_clear(scpi_t *scpi) {
+    (void)scpi;
+    s_scan_done = 0;
+    s_scan_count = 0;
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_scan_fetch(scpi_t *scpi) {
     uint32_t index = 0;
     if (!SCPI_ParamUInt32(scpi, &index, TRUE)) {
         return SCPI_RES_ERR;
@@ -124,73 +158,61 @@ static scpi_result_t cmd_data_read(scpi_t *scpi) {
     return SCPI_RES_OK;
 }
 
-static const scpi_command_t demo_commands[] = {
-    { "GPIO:SET",         cmd_gpio_set,   0 },
-    { "GPIO:GET?",        cmd_gpio_get,   0 },
-    { "DEMO:SCAN",        cmd_scan,       0 },
-    { "DEMO:SCAN:DONE?",  cmd_scan_done,  0 },
-    { "DEMO:SCAN:COUNt?", cmd_scan_count, 0 },
-    { "DEMO:SCAN?",       cmd_scan_get,   0 },
-    { "DEMO:DATA?",       cmd_data_read,  0 },
-    SCPI_CMD_LIST_END
+/* ---------- commands and descriptor (SYSTem:HELP:DESCription?) ---------- */
+
+static const usbscpi_param_desc_t gpio_set_params[] = {
+    USBSCPI_PARAM("pin", "u32", true),
+    USBSCPI_PARAM("value", "bool", true),
+};
+static const usbscpi_param_desc_t gpio_get_params[] = {
+    USBSCPI_PARAM("pin", "u32", true),
+};
+static const usbscpi_param_desc_t scan_fetch_params[] = {
+    USBSCPI_PARAM_PICK("index", "DEMO:SCAN:COUNt?", "DEMO:SCAN:FETCh?"),
+};
+static const usbscpi_param_desc_t data_read_params[] = {
+    USBSCPI_PARAM("length", "u32", true),
 };
 
-/* ---------- descriptor (SYSTem:HELP:DESCription?) ---------- */
+/* The ALIAS entries are the names used before the command standard; they keep
+ * older hosts working and are not described. */
+#define DEMO_COMMANDS(CMD, ALIAS)                                                        \
+    CMD("GPIO",              cmd_gpio_set,   "command", "Set a GPIO output level",      \
+        USBSCPI_PARAMS(gpio_set_params), "none")                                        \
+    CMD("GPIO?",             cmd_gpio_get,   "query",   "Read a GPIO level",            \
+        USBSCPI_PARAMS(gpio_get_params), "u32")                                         \
+    CMD("DEMO:SCAN:STARt",   cmd_scan_start, "command", "Start the demo scan (1 s)",    \
+        USBSCPI_NO_PARAMS, "none")                                                      \
+    CMD("DEMO:SCAN:STOP",    cmd_scan_stop,  "command", "Stop the demo scan",           \
+        USBSCPI_NO_PARAMS, "none")                                                      \
+    CMD("DEMO:SCAN:STATe?",  cmd_scan_state, "query",   "IDLE, RUNNING or DONE",        \
+        USBSCPI_NO_PARAMS, "string")                                                    \
+    CMD("DEMO:SCAN:COUNt?",  cmd_scan_count, "query",   "Number of demo results",       \
+        USBSCPI_NO_PARAMS, "u32")                                                       \
+    CMD("DEMO:SCAN:FETCh?",  cmd_scan_fetch, "query",   "Demo result by index",         \
+        USBSCPI_PARAMS(scan_fetch_params), "string")                                    \
+    CMD("DEMO:SCAN:CLEar",   cmd_scan_clear, "command", "Forget the demo results",      \
+        USBSCPI_NO_PARAMS, "none")                                                      \
+    CMD("DEMO:DATA?",        cmd_data_read,  "block",   "Read N bytes as a binary block", \
+        USBSCPI_PARAMS(data_read_params), "block")                                      \
+    ALIAS("GPIO:SET",        cmd_gpio_set)                                              \
+    ALIAS("GPIO:GET?",       cmd_gpio_get)                                              \
+    ALIAS("DEMO:SCAN",       cmd_scan_start)                                            \
+    ALIAS("DEMO:SCAN:DONE?", cmd_scan_done)                                             \
+    ALIAS("DEMO:SCAN?",      cmd_scan_fetch)
+USBSCPI_DEFINE_COMMANDS(demo, DEMO_COMMANDS);
 
-/* Designated initializers: the trailing options_*_query fields are optional
- * (see usbscpi_param_desc_t) and deliberately left NULL here. */
-static const usbscpi_param_desc_t desc_gpio_set_params[] = {
-    { .name = "pin",   .type = "u32",  .required = true },
-    { .name = "level", .type = "bool", .required = true },
-};
-static const usbscpi_param_desc_t desc_gpio_get_params[] = {
-    { .name = "pin", .type = "u32", .required = true },
-};
-static const usbscpi_param_desc_t desc_scan_get_params[] = {
-    { .name = "index", .type = "u32", .required = true },
-};
-static const usbscpi_param_desc_t desc_data_read_params[] = {
-    { .name = "length", .type = "u32", .required = true },
-};
-
-static const usbscpi_command_desc_t desc_commands[] = {
-    { "GPIO:SET",         "command", "Set GPIO output level",
-      desc_gpio_set_params, 2, "none" },
-    { "GPIO:GET?",        "query",   "Read GPIO level",
-      desc_gpio_get_params, 1, "u32" },
-    { "DEMO:SCAN",        "command", "Start the demo scan",
-      NULL, 0, NULL },
-    { "DEMO:SCAN:DONE?",  "query",   "1 = scan finished",
-      NULL, 0, "bool" },
-    { "DEMO:SCAN:COUNt?", "query",   "Number of demo results",
-      NULL, 0, "u32" },
-    { "DEMO:SCAN?",       "query",   "Get one demo result by index",
-      desc_scan_get_params, 1, "string" },
-    { "DEMO:DATA?",       "query",   "Read N bytes as a definite-length block",
-      desc_data_read_params, 1, "block" },
-};
-
-static const usbscpi_workflow_desc_t desc_workflows[] = {
-    {
-        .name = "demo-scan",
-        .type = "trigger_poll_fetch",
-        .summary = "Run the demo scan and fetch every row",
-        .trigger_cmd = "DEMO:SCAN",
-        .done_query = "DEMO:SCAN:DONE?",
-        .done_value = "1",
-        .count_query = "DEMO:SCAN:COUNt?",
-        .fetch_query = "DEMO:SCAN?",
-        .fields = "ssid:string,rssi:i32:dbm,channel:u32,authmode:string,bssid:mac",
-        .timeout_ms = 10000,
-        .poll_ms = 250,
-    },
+static const usbscpi_workflow_desc_t demo_workflows[] = {
+    { USBSCPI_WF_ACQUIRE("demo-scan", "DEMO:SCAN", "Run the demo scan and fetch every row",
+                         "ssid:string,rssi:i32:dbm,channel:u32,authmode:string,bssid:mac",
+                         10000) },
 };
 
 static const usbscpi_descriptor_t s_descriptor = {
-    .commands = desc_commands,
-    .command_count = sizeof(desc_commands) / sizeof(desc_commands[0]),
-    .workflows = desc_workflows,
-    .workflow_count = sizeof(desc_workflows) / sizeof(desc_workflows[0]),
+    .commands = demo_desc_commands,
+    .command_count = USBSCPI_COUNT(demo_desc_commands),
+    .workflows = demo_workflows,
+    .workflow_count = USBSCPI_COUNT(demo_workflows),
 };
 
 /* ---------- entry point ---------- */
@@ -225,7 +247,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "usbscpi_init failed\n");
         return 1;
     }
-    if (usbscpi_register(dev, demo_commands) != USBSCPI_OK) {
+    if (usbscpi_register(dev, demo_scpi_commands) != USBSCPI_OK) {
         fprintf(stderr, "usbscpi_register failed\n");
         return 1;
     }

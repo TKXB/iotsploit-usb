@@ -13,10 +13,15 @@ script and OpenOCD config are used from that directory, not copied.
 |---|---|---|---|
 | 0 | vendor (0xFF), gs_usb | bulk IN 0x81, OUT 0x02 | `gs_usb` |
 | 1 | USBTMC / USB488 | bulk OUT 0x03, IN 0x83 | `usbtmc` |
+| 2 | vendor (0xFF), subclass 0x49, protocol 0x53: CAN stream | bulk IN 0x82 (OUT 0x01 unused) | none (claimed by the host) |
 
 gs_usb must be interface 0 with those endpoints: Linux sends its control
 requests with wIndex 0, and kernels without endpoint discovery hard-code 0x81
-and 0x02. VID:PID is 1209:0001, as in the plain example.
+and 0x02. The CAN stream (see the plain example's README, *Capturing*)
+captures buses opened by SCPI. It refuses control requests addressed to it, so the
+`gs_usb` driver, bound by class 0xFF, does not probe it as a third CAN device,
+and the host picks it by its subclass/protocol rather than taking gs_usb's
+interface. VID:PID is 1209:0001, as in the plain example.
 
 ## Build and Flash
 

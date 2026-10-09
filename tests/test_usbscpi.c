@@ -594,6 +594,158 @@ static void test_descriptor_unsupported(void) {
     assert(strstr(f.tx, "0,\"No error\"") == NULL);
 }
 
+/* ---- One command list, two tables ---- */
+
+static const usbscpi_param_desc_t macro_gpio_params[] = {
+    USBSCPI_PARAM("pin", "u32", true),
+    USBSCPI_PARAM("value", "bool", true),
+};
+static const usbscpi_param_desc_t macro_fetch_params[] = {
+    USBSCPI_PARAM_PICK("index", "SCAN:COUNt?", "SCAN:FETCh?"),
+};
+
+#define MACRO_COMMANDS(CMD, ALIAS)                                                 \
+    CMD("GPIO", custom_gpio_set, "command", "Set GPIO output level",              \
+        USBSCPI_PARAMS(macro_gpio_params), "none")                                \
+    CMD("SCAN:COUNt?", custom_cmd, "query", "Results", USBSCPI_NO_PARAMS, "u32")  \
+    CMD("SCAN:FETCh?", custom_cmd, "query", "Result by index",                    \
+        USBSCPI_PARAMS(macro_fetch_params), "string")                             \
+    ALIAS("GPIO:SET", custom_gpio_set)
+USBSCPI_DEFINE_COMMANDS(macro, MACRO_COMMANDS);
+
+static void test_command_list_macro(void) {
+    /* Every described command is callable, and only the alias is undescribed. */
+    size_t n_scpi = 0;
+    while (macro_scpi_commands[n_scpi].pattern) n_scpi++;
+    assert(n_scpi == 4);
+    assert(USBSCPI_COUNT(macro_desc_commands) == 3);
+    for (size_t i = 0; i < USBSCPI_COUNT(macro_desc_commands); i++) {
+        assert(strcmp(macro_desc_commands[i].pattern, macro_scpi_commands[i].pattern) == 0);
+    }
+    assert(strcmp(macro_scpi_commands[3].pattern, "GPIO:SET") == 0);
+    assert(macro_desc_commands[0].param_count == 2);
+    assert(strcmp(macro_desc_commands[0].params[1].name, "value") == 0);
+    assert(macro_desc_commands[1].params == NULL && macro_desc_commands[1].param_count == 0);
+    assert(strcmp(macro_desc_commands[2].params[0].options_fetch_query, "SCAN:FETCh?") == 0);
+
+    /* The alias reaches the same handler as the described header. */
+    fixture_t f;
+    uint8_t storage[2048];
+    char line[96];
+    usbscpi_t *dev = make_device(&f, storage, sizeof(storage), line, sizeof(line));
+    assert(usbscpi_register(dev, macro_scpi_commands) == 0);
+    assert(usbscpi_on_rx(dev, "GPIO 3,1\n", 9, true) == USBSCPI_OK);
+    assert(gpio_pin == 3 && gpio_val == 1);
+    assert(usbscpi_on_rx(dev, "GPIO:SET 4,0\n", 13, true) == USBSCPI_OK);
+    assert(gpio_pin == 4 && gpio_val == 0);
+}
+
+/* ---- Workflow macros and renamed workflows ---- */
+
+static const usbscpi_prompt_desc_t macro_pair_prompts[] = {
+    USBSCPI_PROMPT_PASSKEY("BLE:PAIR:PASSKey"),
+    USBSCPI_PROMPT_CONFIRM("BLE:PAIR:CONFirm", "BLE:PAIR:NUMCmp?"),
+    USBSCPI_PROMPT_DISPLAY("BLE:PAIR:PASSKey?"),
+};
+static const char *const macro_connect_old_names[] = { "ble-connect-pair", "ble-auto" };
+
+static const usbscpi_workflow_desc_t macro_workflows[] = {
+    { USBSCPI_WF_ACQUIRE("wifi-scan", "WLAN:SCAN", "Scan for Wi-Fi access points",
+                         "ssid:string,rssi:i32:dbm", 15000) },
+    { USBSCPI_WF_INTERACTIVE("ble-connect", "BLE:CONNect", "Connect and pair", 45000),
+      USBSCPI_WF_PROMPTS(macro_pair_prompts),
+      USBSCPI_WF_RESULT("BLE:SEC?", "mac:mac,level:u32"),
+      USBSCPI_WF_RENAMED_FROM(macro_connect_old_names) },
+};
+
+static const usbscpi_descriptor_t macro_descriptor = {
+    .commands = macro_desc_commands,
+    .command_count = USBSCPI_COUNT(macro_desc_commands),
+    .workflows = macro_workflows,
+    .workflow_count = USBSCPI_COUNT(macro_workflows),
+};
+
+/* The line that starts with `prefix`, copied into `out`. */
+static int find_line(const char *text, const char *prefix, char *out, size_t out_len) {
+    const char *p = strstr(text, prefix);
+    if (!p) return 0;
+    const char *end = strchr(p, '\n');
+    size_t n = end ? (size_t)(end - p) : strlen(p);
+    if (n >= out_len) return 0;
+    memcpy(out, p, n);
+    out[n] = '\0';
+    return 1;
+}
+
+static void test_workflow_macros_and_renames(void) {
+    fixture_t f;
+    uint8_t storage[2048];
+    char line[96];
+    uint8_t io_buf[2048];
+    usbscpi_config_t cfg = {
+        .usb_tx = tx_cb, .user = &f,
+        .line_buf = line, .line_buf_len = sizeof(line),
+        .max_block_len = 4096, .idn = "Test,USBSCPI,SN1,0.1.0",
+        .io_buf = io_buf, .io_buf_len = sizeof(io_buf),
+        .descriptor = &macro_descriptor,
+    };
+    memset(&f, 0, sizeof(f));
+    usbscpi_t *dev = usbscpi_init(storage, sizeof(storage), &cfg);
+    assert(dev);
+    assert(usbscpi_on_rx(dev, "SYST:HELP:DESC?\n", 16, true) == USBSCPI_OK);
+    assert(f.tx[0] == '#');
+
+    char wf[512];
+    assert(find_line(f.tx, "WF wifi-scan ", wf, sizeof(wf)));
+    assert(strstr(wf, "type=trigger_poll_fetch"));
+    assert(strstr(wf, "trigger=WLAN:SCAN:STARt "));
+    assert(strstr(wf, "done=WLAN:SCAN:STATe?:DONE "));
+    assert(strstr(wf, "count=WLAN:SCAN:COUNt? "));
+    assert(strstr(wf, "fetch=WLAN:SCAN:FETCh?#index "));
+    assert(strstr(wf, "failed=FAILED "));
+    assert(strstr(wf, "timeout_ms=15000 poll_ms=250"));
+
+    char cur[512];
+    assert(find_line(f.tx, "WF ble-connect ", cur, sizeof(cur)));
+    assert(strstr(cur, "trigger=BLE:CONNect:STARt "));
+    assert(strstr(cur, "state=BLE:CONNect:STATe? success=DONE failed=FAILED "));
+    assert(strstr(cur, "prompt=PASSKEY|passkey|BLE:PAIR:PASSKey "));
+    assert(strstr(cur, "prompt=CONFIRM|confirm|BLE:PAIR:CONFirm|BLE:PAIR:NUMCmp? "));
+    assert(strstr(cur, "prompt=DISPLAY|display||BLE:PAIR:PASSKey? "));
+    assert(strstr(cur, "result=BLE:SEC? result_fields=mac:mac,level:u32 "));
+    assert(strstr(cur, "renamed=") == NULL);
+
+    /* Each old name is the same line plus renamed=<current name>. */
+    char old[512];
+    assert(find_line(f.tx, "WF ble-connect-pair ", old, sizeof(old)));
+    assert(strncmp(old, "WF ble-connect-pair renamed=ble-connect ", 40) == 0);
+    assert(strcmp(old + 40, cur + strlen("WF ble-connect ")) == 0);
+    assert(find_line(f.tx, "WF ble-auto renamed=ble-connect ", old, sizeof(old)));
+}
+
+static scpi_result_t job_state_failed(scpi_t *ctx) {
+    usbscpi_queue_error(ctx, SCPI_ERROR_EXECUTION_ERROR);
+    SCPI_ResultMnemonic(ctx, "FAILED");
+    return SCPI_RES_OK;
+}
+
+static const scpi_command_t job_commands[] = {
+    { "JOB:STATe?", job_state_failed, 0 },
+    SCPI_CMD_LIST_END
+};
+
+static void test_queue_error_keeps_the_reply(void) {
+    fixture_t f;
+    uint8_t storage[2048];
+    char line[96];
+    usbscpi_t *dev = make_device(&f, storage, sizeof(storage), line, sizeof(line));
+    assert(usbscpi_register(dev, job_commands) == 0);
+    /* The state still arrives as its own line, and the reason follows. */
+    const char *q = "JOB:STATe?;:SYST:ERR?;:SYST:ERR?\n";
+    assert(usbscpi_on_rx(dev, q, strlen(q), true) == USBSCPI_OK);
+    assert(strcmp(f.tx, "FAILED\n-200,\"Execution error\"\n0,\"No error\"\n") == 0);
+}
+
 static void test_ring_buffer(void) {
     uint8_t backing[8];
     uint8_t out[8];
@@ -617,6 +769,9 @@ int main(void) {
     test_data_read_clamps_before_consuming();
     test_descriptor_query();
     test_descriptor_unsupported();
+    test_command_list_macro();
+    test_workflow_macros_and_renames();
+    test_queue_error_keeps_the_reply();
     test_ring_buffer();
     puts("usbscpi tests passed");
     return 0;

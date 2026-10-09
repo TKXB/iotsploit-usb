@@ -33,4 +33,6 @@ owner; do not copy it into a board.
 
 A command a host must discover goes in the descriptor as well as the SCPI
 command table; hosts discover commands and workflows through
-`SYSTem:HELP:DESCription?`.
+`SYSTem:HELP:DESCription?`. Declare commands once with
+`USBSCPI_DEFINE_COMMANDS` so the two tables cannot drift, and name them as
+[`scpi-commands.md`](scpi-commands.md) describes.
