@@ -63,11 +63,27 @@ pub fn run_workflow<T: Transport>(
                     println!("  result: {r}");
                 }
             } else {
-                println!("workflow `{name}` failed (state={})", result.final_state);
+                return Err(job_failed(session, name, &result.final_state));
             }
         }
     }
     Ok(())
+}
+
+/// A workflow ended in a failure state. The device explains why in its error
+/// queue, so the reasons go into the error instead of a bare state value.
+fn job_failed<T: Transport>(session: &mut ScpiSession<T>, name: &str, state: &str) -> Error {
+    let reasons: Vec<String> = session
+        .drain_errors()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| format!("{} {}", e.code, e.message))
+        .collect();
+    if reasons.is_empty() {
+        Error::Device(format!("workflow `{name}` failed (state {state})"))
+    } else {
+        Error::Device(format!("workflow `{name}` failed (state {state}): {}", reasons.join("; ")))
+    }
 }
 
 /// Confirm a workflow trigger was accepted.
@@ -124,6 +140,9 @@ pub fn run_trigger_poll_fetch<T: Transport>(
         let resp = session.query(done_query)?;
         if resp.trim() == done_value {
             break;
+        }
+        if wf.failed_values.iter().any(|f| f == resp.trim()) {
+            return Err(job_failed(session, &wf.name, resp.trim()));
         }
         if Instant::now() >= deadline {
             return Err(Error::Timeout);
@@ -457,6 +476,44 @@ mod tests {
         let result = run_trigger_poll_interactive(&mut s, wf, &[]).unwrap();
         assert!(!result.success);
         assert!(result.result.is_none());
+    }
+
+    #[test]
+    fn acquire_job_stops_on_failed_with_the_device_reason() {
+        const JOB: &str = "DEV name=t\nWF wifi-scan type=trigger_poll_fetch trigger=WLAN:SCAN:STARt done=WLAN:SCAN:STATe?:DONE count=WLAN:SCAN:COUNt? fetch=WLAN:SCAN:FETCh?#index failed=FAILED timeout_ms=60000 poll_ms=1";
+        let mut s = session(&[
+            b"0,\"No error\"\n".to_vec(),                // trigger accepted
+            b"RUNNING\n".to_vec(),
+            b"FAILED\n".to_vec(),
+            b"-200,\"Radio busy\"\n".to_vec(),           // the reason
+            b"0,\"No error\"\n".to_vec(),
+        ]);
+        let p = descriptor::parse_str(JOB).unwrap();
+        let err = run_workflow(&mut s, &p, "wifi-scan", &[]).unwrap_err().to_string();
+        assert!(err.contains("workflow `wifi-scan` failed (state FAILED): -200 Radio busy"), "{err}");
+    }
+
+    #[test]
+    fn interactive_failure_is_an_error_for_the_caller() {
+        const JOB: &str = "DEV name=t\nWF ble-connect type=trigger_poll_interactive trigger=BLE:CONNect:STARt state=BLE:CONNect:STATe? success=DONE failed=FAILED timeout_ms=5000 poll_ms=1";
+        let mut s = session(&[
+            b"0,\"No error\"\n".to_vec(),
+            b"FAILED\n".to_vec(),
+            b"0,\"No error\"\n".to_vec(),                // no reason queued
+        ]);
+        let p = descriptor::parse_str(JOB).unwrap();
+        let err = run_workflow(&mut s, &p, "ble-connect", &["0".into()]).unwrap_err().to_string();
+        assert!(err.ends_with("workflow `ble-connect` failed (state FAILED)"), "{err}");
+    }
+
+    #[test]
+    fn renamed_workflow_keeps_its_old_name_runnable() {
+        const RENAMED: &str = "DEV name=t\nWF ble-connect type=trigger_poll_interactive trigger=BLE:CONNect:STARt state=BLE:CONNect:STATe? success=DONE\nWF ble-connect-pair renamed=ble-connect type=trigger_poll_interactive trigger=BLE:CONNect:STARt state=BLE:CONNect:STATe? success=DONE";
+        let p = descriptor::parse_str(RENAMED).unwrap();
+        assert_eq!(p.workflow("ble-connect").unwrap().renamed_to, None);
+        let old = p.workflow("ble-connect-pair").unwrap();
+        assert_eq!(old.renamed_to.as_deref(), Some("ble-connect"));
+        assert_eq!(old.trigger_cmd, "BLE:CONNect:STARt");
     }
 
     #[test]

@@ -243,6 +243,50 @@ static int lr_printf(char *buf, size_t *len, size_t cap, const char *fmt, ...) {
     return 0;
 }
 
+const char *const usbscpi_failed_state[1] = { "FAILED" };
+
+/* One WF line for `wf`, written under `name`. A non-NULL `renamed` marks it
+ * as an old name and carries the current one. Returns -1 on overflow. */
+static int emit_workflow(const usbscpi_workflow_desc_t *wf, const char *name,
+                         const char *renamed, char *buf, size_t *len,
+                         size_t buf_len) {
+    if (lr_printf(buf, len, buf_len, "WF %s", name) < 0) return -1;
+    if (renamed && lr_printf(buf, len, buf_len, " renamed=%s", renamed) < 0) return -1;
+    if (wf->type && lr_printf(buf, len, buf_len, " type=%s", wf->type) < 0) return -1;
+    if (wf->summary && lr_printf(buf, len, buf_len, " summary=\"%s\"", wf->summary) < 0) return -1;
+    if (wf->trigger_cmd && lr_printf(buf, len, buf_len, " trigger=%s", wf->trigger_cmd) < 0) return -1;
+    if (wf->done_query) {
+        if (lr_printf(buf, len, buf_len, " done=%s:%s",
+                wf->done_query,
+                wf->done_value ? wf->done_value : "") < 0) return -1;
+    }
+    if (wf->count_query && lr_printf(buf, len, buf_len, " count=%s", wf->count_query) < 0) return -1;
+    if (wf->fetch_query) {
+        if (lr_printf(buf, len, buf_len, " fetch=%s#index", wf->fetch_query) < 0) return -1;
+    }
+    if (wf->fields && lr_printf(buf, len, buf_len, " fields=%s", wf->fields) < 0) return -1;
+    if (wf->state_query && lr_printf(buf, len, buf_len, " state=%s", wf->state_query) < 0) return -1;
+    if (wf->success_value && lr_printf(buf, len, buf_len, " success=%s", wf->success_value) < 0) return -1;
+    for (size_t k = 0; k < wf->failed_value_count; k++) {
+        if (lr_printf(buf, len, buf_len, " failed=%s",
+                wf->failed_values[k] ? wf->failed_values[k] : "") < 0) return -1;
+    }
+    for (size_t k = 0; k < wf->prompt_count; k++) {
+        const usbscpi_prompt_desc_t *pr = &wf->prompts[k];
+        if (lr_printf(buf, len, buf_len, " prompt=%s|%s|%s",
+                pr->state ? pr->state : "",
+                pr->kind ? pr->kind : "",
+                pr->send_cmd ? pr->send_cmd : "") < 0) return -1;
+        if (pr->value_query &&
+            lr_printf(buf, len, buf_len, "|%s", pr->value_query) < 0) return -1;
+    }
+    if (wf->result_query && lr_printf(buf, len, buf_len, " result=%s", wf->result_query) < 0) return -1;
+    if (wf->result_fields && lr_printf(buf, len, buf_len, " result_fields=%s", wf->result_fields) < 0) return -1;
+    if (lr_printf(buf, len, buf_len, " timeout_ms=%u poll_ms=%u\n",
+            wf->timeout_ms, wf->poll_ms) < 0) return -1;
+    return 0;
+}
+
 /* Emit the descriptor as line-record text into buf. Returns bytes written,
  * or 0 on overflow. No heap allocation — just sequential snprintf calls,
  * one CMD/WF/DEV line per record. */
@@ -280,42 +324,14 @@ static size_t emit_descriptor(const usbscpi_descriptor_t *desc,
         if (lr_printf(buf, &len, buf_len, "\n") < 0) return 0;
     }
 
-    /* WF lines */
+    /* WF lines: each workflow, then a copy under each of its old names. */
     for (size_t i = 0; desc && i < desc->workflow_count; i++) {
         const usbscpi_workflow_desc_t *wf = &desc->workflows[i];
-        if (lr_printf(buf, &len, buf_len, "WF %s", wf->name) < 0) return 0;
-        if (wf->type && lr_printf(buf, &len, buf_len, " type=%s", wf->type) < 0) return 0;
-        if (wf->summary && lr_printf(buf, &len, buf_len, " summary=\"%s\"", wf->summary) < 0) return 0;
-        if (wf->trigger_cmd && lr_printf(buf, &len, buf_len, " trigger=%s", wf->trigger_cmd) < 0) return 0;
-        if (wf->done_query) {
-            if (lr_printf(buf, &len, buf_len, " done=%s:%s",
-                    wf->done_query,
-                    wf->done_value ? wf->done_value : "") < 0) return 0;
+        if (emit_workflow(wf, wf->name, NULL, buf, &len, buf_len) < 0) return 0;
+        for (size_t k = 0; k < wf->renamed_from_count; k++) {
+            if (emit_workflow(wf, wf->renamed_from[k], wf->name, buf, &len, buf_len) < 0)
+                return 0;
         }
-        if (wf->count_query && lr_printf(buf, &len, buf_len, " count=%s", wf->count_query) < 0) return 0;
-        if (wf->fetch_query) {
-            if (lr_printf(buf, &len, buf_len, " fetch=%s#index", wf->fetch_query) < 0) return 0;
-        }
-        if (wf->fields && lr_printf(buf, &len, buf_len, " fields=%s", wf->fields) < 0) return 0;
-        if (wf->state_query && lr_printf(buf, &len, buf_len, " state=%s", wf->state_query) < 0) return 0;
-        if (wf->success_value && lr_printf(buf, &len, buf_len, " success=%s", wf->success_value) < 0) return 0;
-        for (size_t k = 0; k < wf->failed_value_count; k++) {
-            if (lr_printf(buf, &len, buf_len, " failed=%s",
-                    wf->failed_values[k] ? wf->failed_values[k] : "") < 0) return 0;
-        }
-        for (size_t k = 0; k < wf->prompt_count; k++) {
-            const usbscpi_prompt_desc_t *pr = &wf->prompts[k];
-            if (lr_printf(buf, &len, buf_len, " prompt=%s|%s|%s",
-                    pr->state ? pr->state : "",
-                    pr->kind ? pr->kind : "",
-                    pr->send_cmd ? pr->send_cmd : "") < 0) return 0;
-            if (pr->value_query &&
-                lr_printf(buf, &len, buf_len, "|%s", pr->value_query) < 0) return 0;
-        }
-        if (wf->result_query && lr_printf(buf, &len, buf_len, " result=%s", wf->result_query) < 0) return 0;
-        if (wf->result_fields && lr_printf(buf, &len, buf_len, " result_fields=%s", wf->result_fields) < 0) return 0;
-        if (lr_printf(buf, &len, buf_len, " timeout_ms=%u poll_ms=%u\n",
-                wf->timeout_ms, wf->poll_ms) < 0) return 0;
     }
 
     return len;

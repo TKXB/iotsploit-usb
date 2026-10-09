@@ -49,8 +49,8 @@ The same parameter has the same name and type on every board. The three
 `:STATus?` queries (raw GAP/SMP codes) are removed in favour of the error queue.
 Old names stay as aliases for one release.
 
-Workflows, 12 → 9; a name means the same behaviour and result fields on every
-board:
+Workflows, 12 → 10 (nine, plus the new `can-capture`); a name means the same
+behaviour and result fields on every board:
 
 | Today | Proposed |
 |---|---|
@@ -58,9 +58,24 @@ board:
 | `ble-connect`, `ble-pair`, `ble-connect-pair`, `ble-auto` | `ble-connect` (picks from last scan or scans first; pairs unless `--no-pair`; `--name` filter; reports security) |
 | `ble-peripheral` (nrf52840), `ble-security` (esp32s3-spp-security) | `ble-peripheral` |
 | `wifi-scan`, `ble-sniff`, `demo-scan` | unchanged names, job pattern |
+| none (CAN boards) | `can-capture` |
 
-Open question: the three CAN boards have no workflow; decide whether
-`can-capture` adds anything beyond `stream`.
+Decided: the CAN boards get a `can-capture` workflow (12 → 10 workflows in
+total). `stream` stays for continuous capture over TCP; `can-capture` is the
+bounded, works-on-every-transport version:
+
+```text
+CAN:CAPTure:STARt <duration>[,<bus>]   clear, then capture for <duration> s;
+                                       bus omitted = every open bus
+CAN:CAPTure:STATe?                     IDLE | RUNNING | DONE | FAILED
+CAN:CAPTure:COUNt?                     frames captured
+CAN:CAPTure:FETCh? <n>                 time_us,bus,id,ext,rtr,len,data
+CAN:CAPTure:STOP / :CLEar
+```
+
+Fields `time:u64:us,bus:u32,id:hex,ext:bool,rtr:bool,len:u32,data:hex`,
+the same on `can`, `stm32f4disco` and `stm32f4disco-socketcan`. A full capture
+buffer ends the window early with `DONE`.
 
 Firmware, 3 steps: declare each command once (X-macro emits both the libscpi
 table and the descriptor), `tools/fw <board> flash`, `tools/fw <board> check`.
@@ -156,11 +171,10 @@ transport tests passes `tools/testing/test-c-full.sh`; every host step passes
 
 ### Phase 2: One vocabulary (old names kept as aliases)
 
-1. **Decide the open question**: does CAN get a `can-capture` workflow or is
-   `stream` enough.
+1. **Decided**: CAN gets `can-capture` (see the workflow table above).
 2. **Command standard.** `.agents/standards/scpi-commands.md`: the three
-   patterns, the state words (`IDLE RUNNING DONE FAILED CONNECTING CONNECTED
-   PAIRING PASSKEY CONFIRM DISPLAY ADVERTISING`), one parameter dictionary
+   patterns, the job states (`IDLE RUNNING DONE FAILED`, plus `PASSKEY CONFIRM
+   DISPLAY` while a job waits on the user), one parameter dictionary
    (`pin value index duration channel key accept bus id data bitrate filter`),
    and `fields=` required on every `FETCh?`.
 3. **One command list.** `USBSCPI_DEFINE_COMMANDS` X-macro and `P_*` param
@@ -169,18 +183,21 @@ transport tests passes `tools/testing/test-c-full.sh`; every host step passes
    same headers.
 4. **Workflow macros.** `USBSCPI_WF_ACQUIRE(name, prefix, summary, fields)`
    derives `:STARt`, `:STATe?`=`DONE`, `:COUNt?`, `:FETCh?`;
-   `USBSCPI_WF_INTERACTIVE(...)` takes named states and prompts. No host
-   engine change: it already compares trimmed strings.
-5. **Workflow renames in the descriptor.** Add a `deprecated=<new-name>` key so
-   the host can print "renamed to …" for one release.
+   `USBSCPI_WF_INTERACTIVE(...)` takes named states and prompts. The host
+   engine already compares trimmed strings; it gains one change: a fetch
+   workflow stops on `FAILED` instead of waiting for the timeout.
+5. **Workflow renames in the descriptor.** A workflow lists its old names
+   (`renamed_from`); the core emits the full WF line again under each old name
+   with `renamed=<new-name>`. Older hosts ignore the key and keep working; the
+   new host prints "renamed to …".
 6. **Migrate boards, one commit each**, in this order: `daemon` (covered by
    the TCP smoke test), `esp32s3`, `nrf52840`, `butterfly-nrf52840`,
    `esp32s3-spp-security`, `stm32f4disco`, `stm32f4disco-socketcan`, `can`,
    `pico2`. Each: X-macro list, three patterns, named states, dictionary
    parameter names, old headers as hidden aliases (in the libscpi table, not
    the descriptor), `:STATus?` removed (reasons go to `SYST:ERR?`).
-7. **Consolidate workflows** to the nine in the table above, on the
-   boards that have them.
+7. **Consolidate workflows** to the ten in the table above (nine plus
+   `can-capture`), on the boards that have them.
 8. **`run`.** No name lists workflows; named params (`--duration 8`) from the
    descriptor; progress on stderr; Ctrl-C sends the job's `:STOP`; results as
    a table from `fields=`; an index param with an options source shows a

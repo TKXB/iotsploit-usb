@@ -124,6 +124,9 @@ pub struct WorkflowDesc {
     pub fields: Vec<ResultColumn>,
     /// Column schema for the optional `result=` query (`result_fields=`).
     pub result_fields: Vec<ResultColumn>,
+    /// Set on an old name kept for compatibility (`renamed=`): the workflow's
+    /// current name. The rest of the record is a full copy of that workflow.
+    pub renamed_to: Option<String>,
     // Timing
     pub timeout_ms: u64,
     pub poll_ms: u64,
@@ -148,6 +151,7 @@ impl Default for WorkflowDesc {
             result_query: None,
             fields: Vec::new(),
             result_fields: Vec::new(),
+            renamed_to: None,
             timeout_ms: 15_000,
             poll_ms: 250,
         }
@@ -544,6 +548,7 @@ fn parse_wf(name: &str, kv: &[(String, String)]) -> WorkflowDesc {
             }
             "timeout_ms" => wf.timeout_ms = value.parse().unwrap_or(15_000),
             "poll_ms" => wf.poll_ms = value.parse().unwrap_or(250),
+            "renamed" => wf.renamed_to = Some(value.clone()),
             _ => {} // unknown key, skip
         }
     }

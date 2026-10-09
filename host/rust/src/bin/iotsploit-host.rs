@@ -646,10 +646,12 @@ fn print_help_overview(p: &Profile) {
             println!("  {u:<w$}  {summary}");
         }
     }
-    if !p.workflows.is_empty() {
+    // Old names kept for compatibility are not advertised.
+    let current: Vec<&descriptor::WorkflowDesc> = p.workflows.iter().filter(|w| w.renamed_to.is_none()).collect();
+    if !current.is_empty() {
         println!("\nWORKFLOWS (run with: iotsploit-host workflow <name>)");
-        let w = p.workflows.iter().map(|wf| wf.name.len()).max().unwrap_or(0);
-        for wf in &p.workflows {
+        let w = current.iter().map(|wf| wf.name.len()).max().unwrap_or(0);
+        for wf in current {
             println!("  {:<w$}  {}", wf.name, wf.summary);
         }
     }
@@ -680,7 +682,12 @@ fn print_command_help(c: &descriptor::CommandDesc) {
 }
 
 fn print_workflow_help(p: &Profile, w: &descriptor::WorkflowDesc) {
-    println!("{}", w.name);
+    if let Some(new) = &w.renamed_to {
+        renamed(&w.name, new);
+    }
+    // An old name documents the current one.
+    let name = w.renamed_to.as_deref().unwrap_or(&w.name);
+    println!("{name}");
     if !w.summary.is_empty() {
         println!("  {}", w.summary);
     }
@@ -691,7 +698,7 @@ fn print_workflow_help(p: &Profile, w: &descriptor::WorkflowDesc) {
         .iter()
         .map(|p| if p.required { format!("<{}>", p.name) } else { format!("[{}]", p.name) })
         .collect();
-    println!("\n  usage: iotsploit-host workflow {}", [w.name.clone()].into_iter().chain(args).collect::<Vec<_>>().join(" "));
+    println!("\n  usage: iotsploit-host workflow {}", [name.to_string()].into_iter().chain(args).collect::<Vec<_>>().join(" "));
     for prm in &params {
         let req = if prm.required { "required" } else { "optional" };
         println!("    {}  {}  {req}", prm.name, prm.param_type);
@@ -747,9 +754,16 @@ fn cmd_workflow(cli: &Cli) -> CliResult {
         code: EXIT_DEVICE,
         msg: "this device does not describe workflows; update its firmware".into(),
     })?;
-    if profile.workflow(name).is_none() {
-        let names: Vec<String> = profile.workflows.iter().map(|w| w.name.clone()).collect();
-        return Err(not_found(name, "workflow", &names));
+    match profile.workflow(name) {
+        None => {
+            let names: Vec<String> = profile.workflows.iter().map(|w| w.name.clone()).collect();
+            return Err(not_found(name, "workflow", &names));
+        }
+        Some(w) => {
+            if let Some(new) = &w.renamed_to {
+                renamed(name, new);
+            }
+        }
     }
     iotsploit_host::workflow::run_workflow(&mut s, &profile, name, &cli.args[1..])?;
     Ok(())

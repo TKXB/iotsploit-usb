@@ -95,6 +95,11 @@ static const scpi_command_t app_cmds[] = {
 usbscpi_register(scpi, app_cmds);
 ```
 
+To make commands discoverable by hosts, declare them once with
+`USBSCPI_DEFINE_COMMANDS` instead: it generates this table and the matching
+descriptor table (see `include/usbscpi/usbscpi.h`). Command naming follows
+[`.agents/standards/scpi-commands.md`](.agents/standards/scpi-commands.md).
+
 ## Binary Data Contract
 
 The MVP wire format is intentionally frozen:
