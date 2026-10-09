@@ -667,6 +667,13 @@ void usbscpi_clear(usbscpi_t *ctx) {
     unlock_ctx(ctx);
 }
 
+void usbscpi_queue_error(scpi_t *scpi, int16_t err) {
+    if (!scpi) return;
+    bool failed = scpi->cmd_error;
+    SCPI_ErrorPush(scpi, err);
+    scpi->cmd_error = failed;
+}
+
 scpi_t *usbscpi_scpi(usbscpi_t *ctx) {
     return ctx ? &ctx->scpi : NULL;
 }

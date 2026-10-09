@@ -25,9 +25,12 @@ apply (a job with no results has no `:COUNt?`, `:FETCh?` or `:CLEar`):
 | `<SUB>:FETCh? <index>` | Result `<index>`, 0-based, as comma-separated fields. |
 | `<SUB>:CLEar` | Forget the results. |
 
-`FAILED` always comes with an entry in the error queue saying why (for example
-`-200,"Connection failed: peer timed out"`). There are no `:STATus?` queries
-returning raw stack codes.
+`FAILED` always comes with an entry in the error queue, queued once per
+attempt with `usbscpi_queue_error()` from the `:STATe?` handler (pushing it any
+other way fails the query and drops its reply terminator). It is a standard
+SCPI error such as `-200,"Execution error"`; device-specific error text is
+compiled out, so the stack's own code goes to the device log. There are no
+`:STATus?` queries returning raw stack codes.
 
 ## Spelling
 

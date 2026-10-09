@@ -241,6 +241,12 @@ void usbscpi_task(usbscpi_t *ctx);
 void usbscpi_clear(usbscpi_t *ctx);
 scpi_t *usbscpi_scpi(usbscpi_t *ctx);
 
+/* Queue an error without failing the command that is running. libscpi treats
+ * an error pushed during a command as that command failing and drops its reply
+ * terminator, so a job's STATe? query uses this to explain FAILED while still
+ * answering normally. */
+void usbscpi_queue_error(scpi_t *scpi, int16_t err);
+
 #ifdef __cplusplus
 }
 #endif

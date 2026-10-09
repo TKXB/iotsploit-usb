@@ -723,6 +723,29 @@ static void test_workflow_macros_and_renames(void) {
     assert(find_line(f.tx, "WF ble-auto renamed=ble-connect ", old, sizeof(old)));
 }
 
+static scpi_result_t job_state_failed(scpi_t *ctx) {
+    usbscpi_queue_error(ctx, SCPI_ERROR_EXECUTION_ERROR);
+    SCPI_ResultMnemonic(ctx, "FAILED");
+    return SCPI_RES_OK;
+}
+
+static const scpi_command_t job_commands[] = {
+    { "JOB:STATe?", job_state_failed, 0 },
+    SCPI_CMD_LIST_END
+};
+
+static void test_queue_error_keeps_the_reply(void) {
+    fixture_t f;
+    uint8_t storage[2048];
+    char line[96];
+    usbscpi_t *dev = make_device(&f, storage, sizeof(storage), line, sizeof(line));
+    assert(usbscpi_register(dev, job_commands) == 0);
+    /* The state still arrives as its own line, and the reason follows. */
+    const char *q = "JOB:STATe?;:SYST:ERR?;:SYST:ERR?\n";
+    assert(usbscpi_on_rx(dev, q, strlen(q), true) == USBSCPI_OK);
+    assert(strcmp(f.tx, "FAILED\n-200,\"Execution error\"\n0,\"No error\"\n") == 0);
+}
+
 static void test_ring_buffer(void) {
     uint8_t backing[8];
     uint8_t out[8];
@@ -748,6 +771,7 @@ int main(void) {
     test_descriptor_unsupported();
     test_command_list_macro();
     test_workflow_macros_and_renames();
+    test_queue_error_keeps_the_reply();
     test_ring_buffer();
     puts("usbscpi tests passed");
     return 0;
