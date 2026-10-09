@@ -39,7 +39,7 @@ COMMANDS:
                           one command or workflow
     send <command>        Send one SCPI command; print the reply or the error
     workflow <name> [..]  Run a workflow the device describes
-    stream [count]        Read records from the device's data plane (TCP)
+    stream [count]        Read records from the device's data plane (TCP or USB)
     repl                  Interactive prompt; each line is sent like `send`
     errors                Read and clear the device's error queue
 
@@ -553,7 +553,7 @@ fn cmd_info(cli: &Cli) -> CliResult {
     }
     match desc {
         Some(p) => {
-            let stream = p.commands.iter().any(|c| scpi_matches(&c.pattern, "SYST:STR:PORT?"));
+            let stream = p.commands.iter().any(|c| scpi_matches(&c.pattern, "SYST:STR:FORM?"));
             println!(
                 "commands   {}   workflows {}   stream {}",
                 p.commands.len(),
@@ -822,6 +822,43 @@ fn cmd_repl(cli: &Cli) -> CliResult {
     }
 }
 
+/// Where records come from: a second TCP socket, or REC frames on the USB
+/// vendor pipe.
+#[cfg(feature = "tcp")]
+enum RecordSource {
+    Tcp(iotsploit_host::dataplane::DataPlane),
+    #[cfg(feature = "raw-usb")]
+    Usb(iotsploit_host::usbtmc_raw::UsbRecordStream),
+}
+
+#[cfg(feature = "tcp")]
+impl RecordSource {
+    /// The next record; `Err(Timeout)` is a quiet source, `Ok(None)` the end.
+    fn next(&mut self) -> iotsploit_host::Result<Option<Vec<u8>>> {
+        match self {
+            RecordSource::Tcp(dp) => dp.next_record(),
+            #[cfg(feature = "raw-usb")]
+            RecordSource::Usb(u) => u.next_record().map(Some),
+        }
+    }
+}
+
+/// Open the USB vendor pipe and turn framing on. Only the raw USB backend
+/// knows which physical device the session is on.
+#[cfg(feature = "tcp")]
+#[allow(unused_variables)]
+fn usb_source(s: &mut ScpiSession<Backend>, stride: usize, timeout: Duration) -> std::result::Result<RecordSource, Fail> {
+    #[cfg(feature = "raw-usb")]
+    if let Backend::Raw(t) = s.transport() {
+        let reader = t.log_reader()?;
+        s.write("SYSTem:STReam:FRAMing 1")?;
+        return Ok(RecordSource::Usb(iotsploit_host::usbtmc_raw::UsbRecordStream::new(
+            reader, stride, timeout,
+        )));
+    }
+    Err(usage("stream over USB needs the raw USB backend: pick the device from `devices`"))
+}
+
 #[cfg(feature = "tcp")]
 fn cmd_stream(cli: &Cli) -> CliResult {
     use iotsploit_host::dataplane::{self, DataPlane, GapTracker};
@@ -830,22 +867,37 @@ fn cmd_stream(cli: &Cli) -> CliResult {
     // The control plane is the single source of truth for where the data
     // plane is and what it emits; nothing here is hardcoded.
     let (mut s, address) = open(cli)?;
-    let host = match address.strip_prefix("tcp://") {
-        Some(hp) => hp.rsplit_once(':').map_or(hp, |(h, _)| h).to_string(),
-        None => return Err(usage("stream needs a network device: -d tcp://<host>")),
-    };
     let (port, fmt) = match dataplane::discover(&mut s)? {
         Some(v) => v,
         None => {
-            eprintln!("device has no data plane (SYSTem:STReam:PORT? returned 0)");
+            eprintln!("device has no data plane (no SYSTem:STReam:FORMat?)");
             return Ok(());
         }
     };
-    eprintln!("stream: port {port}, v{} stride {}", fmt.version, fmt.stride);
+    let timeout = Duration::from_millis(cli.timeout_ms);
+    let mut source = match address.strip_prefix("tcp://") {
+        Some(hp) => {
+            if port == 0 {
+                return Err(usage("this device streams over USB only; connect it by USB"));
+            }
+            let host = hp.rsplit_once(':').map_or(hp, |(h, _)| h).to_string();
+            eprintln!("stream: tcp port {port}, v{} stride {}", fmt.version, fmt.stride);
+            RecordSource::Tcp(DataPlane::connect((host.as_str(), port), fmt.stride, timeout)?)
+        }
+        None => {
+            eprintln!("stream: usb vendor pipe, v{} stride {}", fmt.version, fmt.stride);
+            usb_source(&mut s, fmt.stride, timeout)?
+        }
+    };
     eprintln!("fields: {}", fmt.fields);
 
-    let mut dp = DataPlane::connect((host.as_str(), port), fmt.stride, Duration::from_millis(cli.timeout_ms))?;
-    s.write("SYSTem:STReam:STARt")?;
+    // Checked, so a refused start (CAN:OPEN a bus first) is reported rather
+    // than waited on forever.
+    let c = s.send_checked("SYSTem:STReam:STARt")?;
+    if report_errors(&mut s, "SYSTem:STReam:STARt", &c) {
+        let _ = s.write("SYSTem:STReam:FRAMing 0");
+        return Err(Fail { code: EXIT_DEVICE, msg: String::new() });
+    }
 
     // `dropped` is a u64 at a schema-declared offset. Locate it rather
     // than assuming, so a different source still reports gaps.
@@ -856,7 +908,18 @@ fn cmd_stream(cli: &Cli) -> CliResult {
     // downstream as a reason to stop, not an error.
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    while let Some(rec) = dp.next_record()? {
+    loop {
+        let rec = match source.next() {
+            Ok(Some(rec)) => rec,
+            Ok(None) => break,
+            // A quiet bus is not an error: keep listening until the count is
+            // reached or the user interrupts.
+            Err(Error::Timeout) => continue,
+            Err(e) => {
+                let _ = s.write("SYSTem:STReam:STOP");
+                return Err(e.into());
+            }
+        };
         if let Some(g) = gaps.as_mut() {
             let lost = g.observe(&rec);
             if lost > 0 {
@@ -872,6 +935,9 @@ fn cmd_stream(cli: &Cli) -> CliResult {
         }
     }
     let _ = s.write("SYSTem:STReam:STOP");
+    if !matches!(source, RecordSource::Tcp(_)) {
+        let _ = s.write("SYSTem:STReam:FRAMing 0");
+    }
     eprintln!("{n} records, {} lost", gaps.as_ref().map(|g| g.total_lost()).unwrap_or(0));
     Ok(())
 }

@@ -33,6 +33,10 @@
 #include "usbscpi/usbscpi.h"
 #include "usbscpi_tinyusb.h"
 
+/* Vendor instance 0 is gs_usb (interface 0); the CAN stream is instance 1. */
+#define CAN_STREAM_VENDOR 1
+#include "can_stream.h"
+
 const char *board_serial(void); /* usb_descriptors.c */
 
 /* ---------- SystemCoreClock (consumed by dwc2_stm32.h) ---------- */
@@ -41,7 +45,9 @@ uint32_t SystemCoreClock = 168000000u;
 /* ---------- Static buffers (no dynamic allocation) ---------- */
 static uint8_t s_storage[2048];
 static char    s_line[96];
-static uint8_t s_io[2048];
+/* Also holds the SYSTem:HELP:DESCription? reply, about 2 KB with the stream
+ * commands, so it has room to spare. */
+static uint8_t s_io[4096];
 
 /* ---------- USB TX callback via TinyUSB glue ---------- */
 static int usb_tx(void *user, const uint8_t *data, size_t len, bool eom) {
@@ -135,9 +141,10 @@ static scpi_result_t cmd_gpio_get(scpi_t *ctx) {
  * Each controller has one owner: SCPI (CAN:OPEN) or the Linux gs_usb driver
  * (SocketCAN, interface MODE start). Bus numbers on the SCPI side are 1 and 2;
  * gs_usb channels are 0 and 1. The RX0 ISRs queue each frame into its owner's
- * ring: CAN:RECV? drains one, gs_poll() the other. Both ISRs run at the same
- * NVIC priority, so they never preempt each other and each ring keeps a single
- * producer at a time. */
+ * ring: gs_poll() drains SocketCAN's; SCPI's go to the stream (can_stream.h)
+ * while SYSTem:STReam is running, and otherwise to the ring CAN:RECV? drains.
+ * Both ISRs run at the same NVIC priority, so they never preempt each other and
+ * each ring keeps a single producer at a time. */
 
 enum { CAN_OWNER_NONE, CAN_OWNER_SCPI, CAN_OWNER_GS };
 
@@ -214,6 +221,10 @@ static void can_rx_drain(uint8_t bus) {
         if (rec.len > sizeof(rec.data)) rec.len = sizeof(rec.data);  /* DLC 9-15 = 8 bytes */
         if (s_can_owner[bus - 1u] == CAN_OWNER_GS) {
             gs_rx_queue(&rec);
+            continue;
+        }
+        if (can_stream_running()) {
+            can_stream_push(bus, rec.id, ext, rtr, rec.len, rec.data);
             continue;
         }
         /* Whole records only: a partial one would misalign every later read. */
@@ -360,86 +371,17 @@ static scpi_result_t cmd_can_state(scpi_t *ctx) {
 
 /* ---------- SCPI command descriptor (enables SYSTem:HELP:DESCription?) ---------- */
 
-/* CAN:CAPTure job (.agents/standards/scpi-commands.md): a snapshot of received
- * frames for random-access FETCh?. The RX ISR keeps filling s_can_ring; the job
- * drains that ring into s_cap here in SCPI-task context, so there is no new ISR
- * state. STOP-bounded (no millisecond clock on this board): capture runs until
- * STOP or the snapshot fills. */
-#define CAN_CAP_MAX 128u
-static can_frame_rec_t s_cap[CAN_CAP_MAX];
-static size_t s_cap_n;
-static bool   s_cap_running;
-static bool   s_cap_started;
-
-static void can_cap_drain(void) {
-    while (s_cap_running && s_cap_n < CAN_CAP_MAX &&
-           usbscpi_ring_count(&s_can_ring) >= sizeof(can_frame_rec_t)) {
-        usbscpi_ring_read(&s_can_ring, (uint8_t *)&s_cap[s_cap_n], sizeof(can_frame_rec_t));
-        s_cap_n++;
-    }
-    if (s_cap_n >= CAN_CAP_MAX) s_cap_running = false;  /* snapshot full -> DONE */
-}
-
-static scpi_result_t cmd_can_cap_start(scpi_t *ctx) {
-    (void)ctx;
-    uint8_t drop[sizeof(can_frame_rec_t)];
-    while (usbscpi_ring_count(&s_can_ring) >= sizeof(drop))   /* start from empty */
-        usbscpi_ring_read(&s_can_ring, drop, sizeof(drop));
-    s_cap_n = 0;
-    s_cap_running = true;
-    s_cap_started = true;
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_can_cap_stop(scpi_t *ctx) {
-    (void)ctx;
-    can_cap_drain();
-    s_cap_running = false;
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_can_cap_state(scpi_t *ctx) {
-    can_cap_drain();
-    SCPI_ResultMnemonic(ctx, !s_cap_started ? "IDLE" : s_cap_running ? "RUNNING" : "DONE");
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_can_cap_count(scpi_t *ctx) {
-    can_cap_drain();
-    SCPI_ResultUInt32(ctx, (uint32_t)s_cap_n);
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_can_cap_fetch(scpi_t *ctx) {
-    uint32_t idx = 0;
-    if (SCPI_ParamUInt32(ctx, &idx, TRUE) != TRUE) return SCPI_RES_ERR;
-    can_cap_drain();
-    if (idx >= s_cap_n) {
-        SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
-        return SCPI_RES_ERR;
-    }
-    const can_frame_rec_t *r = &s_cap[idx];
-    char line[64];
-    int n = snprintf(line, sizeof(line), "%u,0x%lX,%u,%u,%u,",
-                     r->bus, (unsigned long)r->id, r->ext, r->rtr, r->len);
-    for (uint8_t i = 0; !r->rtr && i < r->len; i++) {
-        n += snprintf(line + n, sizeof(line) - (size_t)n, "%02X", r->data[i]);
-    }
-    SCPI_ResultCharacters(ctx, line, (size_t)n);
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_can_cap_clear(scpi_t *ctx) {
-    (void)ctx;
-    s_cap_n = 0;
-    s_cap_started = false;
-    return SCPI_RES_OK;
+/* SYSTem:STReam:STARt needs a bus to listen on. */
+static bool can_stream_any_bus_open(void) {
+    return s_can_owner[0] == CAN_OWNER_SCPI || s_can_owner[1] == CAN_OWNER_SCPI;
 }
 
 /* Commands declared once (.agents/standards/scpi-commands.md). LED and GPIO are
- * settings; CAN:OPEN/SEND are actions; CAN:CAPTure is a job. The per-colour LED
- * headers and LED:ALL collapse into LED <index>,<value>; LED:SET/GET?, BTN? and
- * the pop-style CAN:RECV?/COUNt? stay as undescribed aliases. */
+ * settings; CAN:OPEN/SEND are actions; received frames stream through
+ * SYSTem:STReam (can_stream.h) until STOP, so there is no capture job. The
+ * per-colour LED headers and LED:ALL collapse into LED <index>,<value>;
+ * LED:SET/GET?, BTN? and the pop-style CAN:RECV?/COUNt? stay as undescribed
+ * aliases. */
 static const usbscpi_param_desc_t led_params[] = {
     USBSCPI_PARAM("led", "u32", true),
     USBSCPI_PARAM("value", "bool", true),
@@ -466,9 +408,6 @@ static const usbscpi_param_desc_t can_send_params[] = {
     USBSCPI_PARAM("id", "u32", true),
     USBSCPI_PARAM("data", "string", false),
 };
-static const usbscpi_param_desc_t cap_fetch_params[] = {
-    USBSCPI_PARAM_PICK("index", "CAN:CAPTure:COUNt?", "CAN:CAPTure:FETCh?"),
-};
 
 #define STM_COMMANDS(CMD, ALIAS)                                                          \
     CMD("LED",   cmd_led_set, "command", "Set LED by index (0=green,1=orange,2=red,3=blue)", \
@@ -490,19 +429,7 @@ static const usbscpi_param_desc_t cap_fetch_params[] = {
         USBSCPI_PARAMS(can_send_params), "none")                                          \
     CMD("CAN:STATe?", cmd_can_state, "query", "owner(0 closed,1 SCPI,2 SocketCAN),tec,rec,busoff,rx_dropped",           \
         USBSCPI_PARAMS(can_bus_params), "string")                                         \
-    CMD("CAN:CAPTure:STARt", cmd_can_cap_start, "command",                                \
-        "Clear, then capture received frames until STOP or the buffer fills",             \
-        USBSCPI_NO_PARAMS, "none")                                                        \
-    CMD("CAN:CAPTure:STOP",  cmd_can_cap_stop,  "command", "Stop capturing",              \
-        USBSCPI_NO_PARAMS, "none")                                                        \
-    CMD("CAN:CAPTure:STATe?", cmd_can_cap_state, "query", "IDLE, RUNNING or DONE",        \
-        USBSCPI_NO_PARAMS, "string")                                                      \
-    CMD("CAN:CAPTure:COUNt?", cmd_can_cap_count, "query", "Frames captured",              \
-        USBSCPI_NO_PARAMS, "u32")                                                         \
-    CMD("CAN:CAPTure:FETCh?", cmd_can_cap_fetch, "query", "Captured frame by index",      \
-        USBSCPI_PARAMS(cap_fetch_params), "string")                                       \
-    CMD("CAN:CAPTure:CLEar", cmd_can_cap_clear, "command", "Forget captured frames",      \
-        USBSCPI_NO_PARAMS, "none")                                                        \
+    CAN_STREAM_COMMANDS(CMD)                                                              \
     ALIAS("LED:SET",    cmd_led_set)                                                      \
     ALIAS("LED:GET?",   cmd_led_get)                                                      \
     ALIAS("BTN?",       cmd_btn)                                                          \
@@ -510,16 +437,9 @@ static const usbscpi_param_desc_t cap_fetch_params[] = {
     ALIAS("CAN:COUNt?", cmd_can_count)
 USBSCPI_DEFINE_COMMANDS(stm, STM_COMMANDS);
 
-static const usbscpi_workflow_desc_t stm_workflows[] = {
-    { USBSCPI_WF_ACQUIRE("can-capture", "CAN:CAPTure", "Capture received CAN frames",
-                         "bus:u32,id:hex,ext:bool,rtr:bool,len:u32,data:hex", 60000) },
-};
-
 static const usbscpi_descriptor_t s_descriptor = {
     .commands = stm_desc_commands,
     .command_count = USBSCPI_COUNT(stm_desc_commands),
-    .workflows = stm_workflows,
-    .workflow_count = USBSCPI_COUNT(stm_workflows),
 };
 
 /* ---------- TinyUSB USBTMC callbacks the application must provide ----------
@@ -644,6 +564,9 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
     uint16_t ch = req->wValue;
 
     if (req->bmRequestType_bit.recipient != TUSB_REQ_RCPT_INTERFACE) return false;
+    /* gs_usb is interface 0. Refusing the stream interface keeps the gs_usb
+     * driver, bound by class 0xFF, from probing it as a third CAN device. */
+    if (tu_u16_low(req->wIndex) != 0u) return false;
 
     if (stage == CONTROL_STAGE_SETUP) {
         switch (req->bRequest) {
@@ -826,12 +749,20 @@ static void board_init(void) {
 
     usbscpi_ring_init(&s_can_ring, s_can_ring_mem, sizeof(s_can_ring_mem));
     usbscpi_ring_init(&s_gs_ring, s_gs_ring_mem, sizeof(s_gs_ring_mem));
+    /* Below SysTick (priority 0), which timestamps frames in these ISRs. */
+    nvic_set_priority(NVIC_CAN1_RX0_IRQ, 1u << 4);
+    nvic_set_priority(NVIC_CAN2_RX0_IRQ, 1u << 4);
+    nvic_set_priority(NVIC_OTG_FS_IRQ, 1u << 4);
+    can_stream_init();
     nvic_enable_irq(NVIC_CAN1_RX0_IRQ);
     nvic_enable_irq(NVIC_CAN2_RX0_IRQ);
 
     /* Enable USB OTG FS interrupt */
     nvic_enable_irq(NVIC_OTG_FS_IRQ);
 }
+
+/* Unplugged or reset by the host: the next host starts from an idle stream. */
+void tud_umount_cb(void) { can_stream_reset(); }
 
 /* ---------- Main ---------- */
 int main(void) {
@@ -863,6 +794,7 @@ int main(void) {
     while (1) {
         tud_task();
         usbscpi_task(dev);
+        can_stream_pump();
         gs_poll();
     }
 }

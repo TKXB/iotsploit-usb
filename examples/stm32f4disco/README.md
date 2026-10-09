@@ -151,10 +151,10 @@ print(os.read(d, 4096).decode().strip())
 sudo iotsploit-host send "*IDN?"
 # IoTSploit,STM32F4-Disco,<chip serial>,0.1.0
 
-sudo iotsploit-host send "LED:GREen 1"
-sudo iotsploit-host send "LED:ALL 1"
+sudo iotsploit-host send "LED 0,1"        # green on
+sudo iotsploit-host send "LED? 0"
 sudo iotsploit-host send "LED:TOGgle 2"
-sudo iotsploit-host send "BTN?"
+sudo iotsploit-host send "BUTTon?"
 ```
 
 ## SCPI Commands
@@ -164,27 +164,32 @@ sudo iotsploit-host send "BTN?"
 | `*IDN?` | string | Device identity |
 | `*RST` | — | Reset SCPI state |
 | `*CLS` | — | Clear error queue |
-| `LED:SET <n> <val>` | — | Set LED n (0-3) to val (0/1) |
-| `LED:GET? <n>` | u32 | Read LED n state |
-| `LED:GREen <val>` | — | Set green LED (PD12) |
-| `LED:GREen?` | u32 | Read green LED state |
-| `LED:ORAnge <val>` | — | Set orange LED (PD13) |
-| `LED:ORAnge?` | u32 | Read orange LED state |
-| `LED:RED <val>` | — | Set red LED (PD14) |
-| `LED:RED?` | u32 | Read red LED state |
-| `LED:BLUe <val>` | — | Set blue LED (PD15) |
-| `LED:BLUe?` | u32 | Read blue LED state |
-| `LED:ALL <val>` | — | Set all LEDs (0=off, 1=on) |
-| `LED:ALL?` | u32 | Read all LEDs as bitmask (bit0=green..bit3=blue) |
-| `LED:TOGgle <n>` | — | Toggle LED n (0-3) |
-| `BTN?` | u32 | Read user button (PA0), 1=pressed |
-| `GPIO:SET <pin> <val>` | — | Set GPIOA pin (0-15) |
-| `GPIO:GET? <pin>` | u32 | Read GPIOA pin (0-15) |
+| `LED <n>,<val>` | — | Set LED n (0 green, 1 orange, 2 red, 3 blue) to val (0/1) |
+| `LED? <n>` | u32 | Read LED n |
+| `LED:TOGgle <n>` | — | Toggle LED n |
+| `BUTTon?` | u32 | Read the user button (PA0), 1=pressed |
+| `GPIO <pin>,<val>` | — | Set GPIOA pin (0-15) |
+| `GPIO? <pin>` | u32 | Read GPIOA pin (0-15) |
 | `CAN:OPEN <bus>,<bitrate>` | — | Start bus 1 or 2 at 125000/250000/500000/1000000 bit/s, accept all IDs |
 | `CAN:SEND <bus>,<id>,"<hex>"` | — | Send one frame (0-8 data bytes); id > 0x7FF is sent as 29-bit extended |
-| `CAN:RECV?` | string | Pop the oldest received frame: `bus,id,ext,rtr,len,data`; empty if none |
-| `CAN:COUNt?` | u32 | Received frames waiting |
 | `CAN:STATe? <bus>` | string | `open,tec,rec,busoff,rx_dropped` |
+| `SYSTem:STReam:STARt` | — | Stream received frames until STOP; refused unless a bus is open |
+| `SYSTem:STReam:STOP` | — | Stop; frames already queued are still sent |
+| `SYSTem:STReam:STATe?` | string | `running,attached` |
+| `SYSTem:STReam:COUNt?` | u64 | Frames captured since STARt |
+| `SYSTem:STReam:DROPped?` | u64 | Frames lost to a full buffer since STARt |
+| `SYSTem:STReam:FORMat?` | string | `ver=1,stride=32,fields=...` |
+| `SYSTem:STReam:FRAMing <0/1>` | — | Frame the vendor pipe; the host sends this |
+
+`LED:SET`, `LED:GET?`, `BTN?`, `CAN:RECV?` and `CAN:COUNt?` still work as
+undescribed aliases for one release.
+
+## USB Layout
+
+| Interface | Class | Endpoints | Host driver |
+|---|---|---|---|
+| 0 | USBTMC / USB488 | bulk OUT 0x01, IN 0x81 | `usbtmc` or raw |
+| 1 | vendor (0xFF), subclass 0x49, protocol 0x53: CAN stream | bulk IN 0x82 (OUT 0x02 unused) | none (claimed by the host) |
 
 ## CAN
 
@@ -195,20 +200,60 @@ at both ends. CAN2 shares filter banks with CAN1, so the CAN1 clock is always
 enabled; bus 1 uses filter bank 0 and bus 2 uses bank 14.
 
 Bit timing is fixed at 14 time quanta (1 + 11 + 2, sample point 85.7 %) from
-the 42 MHz APB1 clock. Received frames from both buses share a 64-frame queue
-filled by the RX0 interrupts; frames arriving while it is full are counted in
-`rx_dropped`. `CAN:OPEN` fails with an execution error when the controller
-cannot leave init mode, which usually means no transceiver is connected.
+the 42 MHz APB1 clock. `CAN:OPEN` fails with an execution error when the
+controller cannot leave init mode, which usually means no transceiver is
+connected.
+
+### Capturing
+
+SCPI sets the bus up and starts and stops the capture; the frames themselves
+stream over the CAN stream interface, one 32-byte record each
+(`can_stream.h`), until you stop. There is no frame limit and nothing to poll.
 
 ```bash
 sudo iotsploit-host send "CAN:OPEN 1,500000"
-sudo iotsploit-host send "CAN:OPEN 2,500000"
+sudo iotsploit-host stream          # FRAMing 1 + STARt; Ctrl-C or a count ends it
+sudo iotsploit-host stream 100      # stop after 100 frames
 sudo iotsploit-host send 'CAN:SEND 1,#H123,"DEADBEEF"'
-sudo iotsploit-host send "CAN:RECV?"      # 2,0x123,0,0,4,DEADBEEF if CAN1 and CAN2 share a bus
-sudo iotsploit-host send "CAN:STATe? 1"   # 1,0,0,0,0
 ```
 
+`stream` prints one hex record per line and reports gaps from the in-band
+`dropped` counter. Ctrl-C leaves the capture running; send
+`SYSTem:STReam:STOP` (or reconnect: an unplug resets it). In the GUI, open the
+Data Plane tab: Start / Stop drive the capture and Record writes the decoded
+frames to a CSV file.
+
+Record fields: `ts_us` (µs since boot, taken in the RX interrupt), `dropped`
+(frames lost to a full 256-record buffer since STARt, at capture), `can_id`,
+`len`, `flags` (bit 0 extended, bit 1 RTR), `bus` (1 or 2), `data` (8 bytes,
+`len` valid). Without the stream running, received frames go to a 64-frame
+queue that the `CAN:RECV?` alias pops.
+
 Quote the data: unquoted hex that starts with a digit parses as a number.
+
+### Hardware Checklist
+
+Not yet run on hardware. Two boards (or CAN1 wired to CAN2 through two
+transceivers) and a second sender such as `cansend` on a USB-CAN adapter:
+
+1. **Contents.** `CAN:OPEN 1,500000`, start in the GUI, send standard
+   (`#H123`), extended (`#H1ABCDEF0`), zero-length and 8-byte frames. Each row
+   shows the same `can_id`, `len`, `flags` and `data`.
+2. **Ordering.** Send 1000 frames with an incrementing payload
+   (`cangen -I 100 -D i -n 1000`); the recorded CSV has them in order, `ts_us`
+   rising.
+3. **Drops.** Flood at 1 Mbit/s (`cangen -g 0`) for 10 s. Either the lost count
+   stays 0, or `SYSTem:STReam:DROPped?` equals the GUI's lost count and the CSV
+   shows the jump in `dropped` where it happened.
+4. **Quiet bus.** Start with nothing on the bus for a minute: no timeout, no
+   error; frames sent afterwards appear.
+5. **Stop / restart.** Stop, send frames (they must not appear), Start again:
+   counts restart from 0 and new frames appear. Repeat ten times.
+6. **USB recovery.** Unplug during a capture: the GUI reports the stream
+   closed. Replug and reconnect: `SYSTem:STReam:STATe?` is `0,0`, and Start
+   works without resetting the board.
+7. **SocketCAN board.** With `can0` up through gs_usb, streaming bus 2 must
+   not take `can0` down, and `ip -details link show can0` stays `ERROR-ACTIVE`.
 
 ## Source Files
 
@@ -216,6 +261,8 @@ Quote the data: unquoted hex that starts with a digit parses as a number.
 |---|---|
 | `main.c` | Board init (clocks, GPIO, USB), SCPI command callbacks, main loop |
 | `usb_descriptors.c` | USB device/config/string descriptors |
+| `can_stream.h` | CAN stream: record, ring, SysTick timestamps, `SYSTem:STReam:*` (shared with the SocketCAN board) |
+| `can_stream_itf.h` | The stream interface's USB descriptor |
 | `tusb_config.h` | TinyUSB compile-time configuration |
 | `stm32f4xx.h` | CMSIS compatibility shim for TinyUSB's DWC2 driver |
 | `linker.ld` | Linker script (1 MB flash, 128 KB SRAM) |

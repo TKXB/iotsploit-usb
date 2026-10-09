@@ -49,8 +49,8 @@ The same parameter has the same name and type on every board. The three
 `:STATus?` queries (raw GAP/SMP codes) are removed in favour of the error queue.
 Old names stay as aliases for one release.
 
-Workflows, 12 → 10 (nine, plus the new `can-capture`); a name means the same
-behaviour and result fields on every board:
+Workflows, 12 → 9; a name means the same behaviour and result fields on every
+board:
 
 | Today | Proposed |
 |---|---|
@@ -58,24 +58,17 @@ behaviour and result fields on every board:
 | `ble-connect`, `ble-pair`, `ble-connect-pair`, `ble-auto` | `ble-connect` (picks from last scan or scans first; pairs unless `--no-pair`; `--name` filter; reports security) |
 | `ble-peripheral` (nrf52840), `ble-security` (esp32s3-spp-security) | `ble-peripheral` |
 | `wifi-scan`, `ble-sniff`, `demo-scan` | unchanged names, job pattern |
-| none (CAN boards) | `can-capture` |
+| none (CAN boards) | a stream, not a workflow (below) |
 
-Decided: the CAN boards get a `can-capture` workflow (12 → 10 workflows in
-total). `stream` stays for continuous capture over TCP; `can-capture` is the
-bounded, works-on-every-transport version:
-
-```text
-CAN:CAPTure:STARt <duration>[,<bus>]   clear, then capture for <duration> s;
-                                       bus omitted = every open bus
-CAN:CAPTure:STATe?                     IDLE | RUNNING | DONE | FAILED
-CAN:CAPTure:COUNt?                     frames captured
-CAN:CAPTure:FETCh? <n>                 time_us,bus,id,ext,rtr,len,data
-CAN:CAPTure:STOP / :CLEar
-```
-
-Fields `time:u64:us,bus:u32,id:hex,ext:bool,rtr:bool,len:u32,data:hex`,
-the same on `can`, `stm32f4disco` and `stm32f4disco-socketcan`. A full capture
-buffer ends the window early with `DONE`.
+Decided (revised after hardware testing): CAN capture is a **stream**. The
+first cut was a `can-capture` job (start → poll → fetch) over a 128-frame
+snapshot; on a real STM32F4 it reached `DONE` only after 128 frames or an
+explicit `STOP`, so a quiet bus or a short capture timed out in the GUI, which
+had no Stop. Every CAN board now captures the same way: SCPI configures the bus
+(`CAN:OPEN`) and starts/stops (`SYSTem:STReam:STARt` / `:STOP`); frames arrive
+as data-plane records (TCP on `can`, the USB vendor pipe on the STM32 boards)
+until the user stops. No snapshot limit, nothing to poll. See *Streams* in
+`.agents/standards/scpi-commands.md`.
 
 Firmware, 3 steps: declare each command once (X-macro emits both the libscpi
 table and the descriptor), `tools/fw <board> flash`, `tools/fw <board> check`.
@@ -161,18 +154,25 @@ by name" from one workflow needs a host-side name->index step the engine does
 not have yet, and `--name` is deferred rather than faked. `ble-connect` lists
 `ble-auto` and `ble-connect-pair` as its `renamed_from`.
 
-**Phase 2 note (CAN capture).** `can-capture` lands on the two STM32 boards
-as a job (`CAN:CAPTure:STARt/STOP/STATe?/COUNt?/FETCh?/CLEar`) over a snapshot
-drained from the existing RX ring in SCPI-task context, so there is no new ISR
-state; it is STOP-bounded because the boards have no millisecond clock, and its
-fetch row is `bus,id,ext,rtr,len,data` (the board keeps no timestamp). The Linux
-`can` board stays stream-only: it already captures continuously over its TCP
-data plane (`stream`), which carries `ts_us`, so it gets no `CAN:CAPTure` job —
-the same board that has a stream and no scan job on the ESP32-S3 side. Net
-workflows: 10 (nine BLE/Wi-Fi/sniff/demo plus `can-capture`). The STM32
-`can-capture` path is built here but not flashed; the stm32 LED per-colour and
-`LED:ALL` demo headers collapse into `LED <index>,<value>` per the standard,
-with `LED:SET`/`LED:GET?`/`BTN?`/`CAN:RECV?`/`CAN:COUNt?` kept as aliases.
+**Phase 2 note (CAN capture).** Replaced the STM32 `can-capture` job with the
+data plane (see the revised decision above). `examples/stm32f4disco/can_stream.h`
+(shared by both STM32 boards): the RX ISR timestamps each frame (SysTick, µs)
+into a 256-record ring while `SYSTem:STReam` runs, and the main loop sends one
+32-byte record per frame as a REC frame on a vendor bulk-IN endpoint, the
+ESP32-S3's envelope. Schema
+`ts_us:u64:us,dropped:u64,can_id:u32:hex,len:u8,flags:u8,bus:u8,rsv:u8,data:bytes8`
+(the Linux `can` board's names, classic-CAN sized). The stream interface is
+vendor class with subclass/protocol `0x49`/`0x53`: on the SocketCAN board it
+sits beside gs_usb (EP IN 0x82 / OUT 0x01), and the host would otherwise have
+claimed gs_usb's interface. Host: `dataplane::discover` reports a USB-only data
+plane as port 0, `framing::FrameDecoder` and `UsbRecordStream` read it, the log
+reader keeps eight bulk-IN transfers in flight (a timed-out read no longer
+cancels one), and `stream` works over USB. GUI: Start/Stop and Record (CSV)
+in the Data Plane tab, with received/lost counts. Built here, not flashed:
+the hardware checklist is in `examples/stm32f4disco/README.md`. The stm32 LED
+per-colour and `LED:ALL` demo headers collapse into `LED <index>,<value>` per
+the standard, with `LED:SET`/`LED:GET?`/`BTN?`/`CAN:RECV?`/`CAN:COUNt?` kept as
+aliases.
 
 **Phase 1 outcome.**
 
@@ -192,7 +192,7 @@ with `LED:SET`/`LED:GET?`/`BTN?`/`CAN:RECV?`/`CAN:COUNt?` kept as aliases.
 
 ### Phase 2: One vocabulary (old names kept as aliases)
 
-1. **Decided**: CAN gets `can-capture` (see the workflow table above).
+1. **Decided**: CAN capture is a stream (see the workflow table above).
 2. **Command standard.** `.agents/standards/scpi-commands.md`: the three
    patterns, the job states (`IDLE RUNNING DONE FAILED`, plus `PASSKEY CONFIRM
    DISPLAY` while a job waits on the user), one parameter dictionary
@@ -217,8 +217,8 @@ with `LED:SET`/`LED:GET?`/`BTN?`/`CAN:RECV?`/`CAN:COUNt?` kept as aliases.
    `pico2`. Each: X-macro list, three patterns, named states, dictionary
    parameter names, old headers as hidden aliases (in the libscpi table, not
    the descriptor), `:STATus?` removed (reasons go to `SYST:ERR?`).
-7. **Consolidate workflows** to the ten in the table above (nine plus
-   `can-capture`), on the boards that have them.
+7. **Consolidate workflows** to the nine in the table above, on the boards
+   that have them; CAN capture is a stream.
 8. **`run`.** No name lists workflows; named params (`--duration 8`) from the
    descriptor; progress on stderr; Ctrl-C sends the job's `:STOP`; results as
    a table from `fields=`; an index param with an options source shows a

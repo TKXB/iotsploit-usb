@@ -59,6 +59,7 @@ TINYUSB_SRCS := \
   $(TINYUSB_ROOT)/src/common/tusb_fifo.c \
   $(TINYUSB_ROOT)/src/device/usbd.c \
   $(TINYUSB_ROOT)/src/class/usbtmc/usbtmc_device.c \
+  $(TINYUSB_ROOT)/src/class/vendor/vendor_device.c \
   $(TINYUSB_ROOT)/src/portable/synopsys/dwc2/dcd_dwc2.c \
   $(TINYUSB_ROOT)/src/portable/synopsys/dwc2/dwc2_common.c
 
@@ -75,6 +76,7 @@ VPATH := \
   $(TINYUSB_ROOT)/src/common \
   $(TINYUSB_ROOT)/src/device \
   $(TINYUSB_ROOT)/src/class/usbtmc \
+  $(TINYUSB_ROOT)/src/class/vendor \
   $(TINYUSB_ROOT)/src/portable/synopsys/dwc2
 
 # Object files: flatten to _build/<basename>.o (no name collisions in this project)

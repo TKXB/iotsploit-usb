@@ -15,11 +15,12 @@
 #![cfg(feature = "raw-usb")]
 
 use std::future::Future;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use async_io::Timer;
 use futures_lite::FutureExt;
-use nusb::transfer::{Direction, EndpointType, RequestBuffer};
+use nusb::transfer::{Direction, EndpointType, Queue, RequestBuffer};
 use nusb::{Device, Interface};
 
 use crate::{transport::Transport, Error, Result};
@@ -37,6 +38,18 @@ const USB_SUBCLASS_USBTMC: u8 = 0x03;
 
 // USB interface class for the vendor-specific device-log interface (EP bulk-IN).
 const USB_CLASS_VENDOR: u8 = 0xFF;
+
+/// Subclass and protocol (`'I'`, `'S'`) that mark a vendor interface as the
+/// iotsploit stream/log pipe. A device with more than one vendor interface —
+/// the STM32F4 SocketCAN board also has gs_usb — sets them so the host claims
+/// the right one; a device with only one may leave them 0.
+pub const STREAM_ITF_SUBCLASS: u8 = 0x49;
+pub const STREAM_ITF_PROTOCOL: u8 = 0x53;
+
+/// Bulk-IN transfers kept in flight by [`UsbtmcLogReader`]. One at a time
+/// caps a full-speed pipe at a packet or so per frame; several let the host
+/// controller take every packet the device has ready.
+const LOG_READS_IN_FLIGHT: usize = 8;
 
 /// A USB device with a USBTMC interface, as seen at enumeration (unopened).
 #[derive(Debug, Clone)]
@@ -73,6 +86,8 @@ pub fn list_usbtmc() -> Vec<UsbtmcInfo> {
 
 /// Raw USBTMC transport backed by `nusb`.
 pub struct UsbtmcRaw {
+    // Kept so the vendor pipe of the same device can be opened later.
+    device: Device,
     // The claimed interface keeps the underlying device alive; dropping it
     // releases the interface (no manual Drop impl needed).
     interface: Interface,
@@ -207,6 +222,7 @@ impl UsbtmcRaw {
         let _ = interface.clear_halt(ep_in);
 
         Ok(Self {
+            device,
             interface,
             ep_out,
             ep_in,
@@ -220,6 +236,12 @@ impl UsbtmcRaw {
     pub fn with_timeout(mut self, ms: u64) -> Self {
         self.timeout = Duration::from_millis(ms);
         self
+    }
+
+    /// Open the vendor log/stream pipe of this same device, beside the
+    /// USBTMC session (each claims its own interface).
+    pub fn log_reader(&self) -> Result<UsbtmcLogReader> {
+        UsbtmcLogReader::from_device(self.device.clone())
     }
 
     /// Next bTag counter (wraps 1..=255).
@@ -429,8 +451,10 @@ fn map_transfer_err(e: nusb::transfer::TransferError) -> Error {
 /// level classification are left to the caller.
 pub struct UsbtmcLogReader {
     // Claimed vendor interface; dropping it releases the claim.
-    interface: Interface,
-    ep_in: u8,
+    _interface: Interface,
+    // Bulk-IN transfers in flight. A read that times out leaves them queued,
+    // so data arriving just after the timeout is not lost to a cancel.
+    queue: Mutex<Queue<RequestBuffer>>,
     max_packet_in: usize,
     timeout: Duration,
 }
@@ -460,35 +484,30 @@ impl UsbtmcLogReader {
             .active_configuration()
             .map_err(|e| Error::Device(format!("no active USB configuration: {e}")))?;
 
-        let mut iface_num = None;
-        let mut ep_in = None;
-        let mut max_in = 64usize;
-
+        // The marked stream interface if there is one, else the first vendor
+        // interface with a bulk-IN endpoint. Never guess past a marked one:
+        // on the SocketCAN board the other vendor interface is gs_usb, and
+        // claiming it would detach the kernel's CAN driver.
+        let mut chosen = None;
         for alt in config.interface_alt_settings() {
             if alt.class() != USB_CLASS_VENDOR {
                 continue;
             }
-            // Take the first vendor interface that exposes a bulk-IN endpoint.
-            let mut found_in = None;
-            for ep in alt.endpoints() {
-                if ep.transfer_type() == EndpointType::Bulk && ep.direction() == Direction::In {
-                    found_in = Some(ep.address());
-                    max_in = (ep.max_packet_size() as usize).max(64);
-                    break;
-                }
-            }
-            if let Some(addr) = found_in {
-                iface_num = Some(alt.interface_number());
-                ep_in = Some(addr);
+            let bulk_in = alt.endpoints().find(|ep| {
+                ep.transfer_type() == EndpointType::Bulk && ep.direction() == Direction::In
+            });
+            let Some(ep) = bulk_in else { continue };
+            let found = (alt.interface_number(), ep.address(), ep.max_packet_size());
+            if alt.subclass() == STREAM_ITF_SUBCLASS && alt.protocol() == STREAM_ITF_PROTOCOL {
+                chosen = Some(found);
                 break;
             }
+            chosen = chosen.or(Some(found));
         }
-
-        let iface_num = iface_num.ok_or_else(|| {
+        let (iface_num, ep_in, max_in) = chosen.ok_or_else(|| {
             Error::Device("device has no vendor log interface (class 0xFF with bulk-IN)".into())
         })?;
-        let ep_in = ep_in
-            .ok_or_else(|| Error::Device("vendor log interface has no bulk-IN endpoint".into()))?;
+        let max_in = max_in.max(64);
 
         // The vendor interface has no kernel driver on Linux, but use the
         // portable detach-and-claim anyway (a no-op detach where nothing is
@@ -506,9 +525,10 @@ impl UsbtmcLogReader {
         // stops delivering (verified on ESP32-S3). Claiming the interface with
         // a freshly opened handle already starts from a clean toggle.
 
+        let queue = interface.bulk_in_queue(ep_in);
         Ok(Self {
-            interface,
-            ep_in,
+            _interface: interface,
+            queue: Mutex::new(queue),
             max_packet_in: max_in,
             timeout: Duration::from_secs(1),
         })
@@ -526,16 +546,69 @@ impl UsbtmcLogReader {
     /// before the timeout (the caller should keep polling).
     pub fn read(&self) -> Result<Vec<u8>> {
         let cap = self.max_packet_in.max(64);
-        match block_on_timeout(
-            self.interface.bulk_in(self.ep_in, RequestBuffer::new(cap)),
-            self.timeout,
-        ) {
+        let mut queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        while queue.pending() < LOG_READS_IN_FLIGHT {
+            queue.submit(RequestBuffer::new(cap));
+        }
+        match block_on_timeout(queue.next_complete(), self.timeout) {
             Ok(comp) => {
                 comp.status.map_err(map_transfer_err)?;
                 Ok(comp.data)
             }
             Err(Error::Timeout) => Ok(Vec::new()),
             Err(e) => Err(e),
+        }
+    }
+}
+
+/// Records from the vendor pipe of a device with `SYSTem:STReam:FRAMing 1`.
+///
+/// The USB counterpart of [`crate::dataplane::DataPlane`]: the same
+/// `next_record` contract, but the records arrive as REC frames multiplexed
+/// with log text on the vendor bulk-IN endpoint ([`crate::framing`]). Log
+/// frames are dropped here; a caller that wants both reads the pipe itself.
+/// Turning framing on and starting the capture stay on the SCPI session.
+pub struct UsbRecordStream {
+    reader: UsbtmcLogReader,
+    decoder: crate::framing::FrameDecoder,
+    stride: usize,
+}
+
+impl UsbRecordStream {
+    /// `stride` comes from the device's `SYSTem:STReam:FORMat?`.
+    pub fn new(reader: UsbtmcLogReader, stride: usize, timeout: Duration) -> Self {
+        Self {
+            reader: reader.with_timeout(timeout.as_millis() as u64),
+            decoder: crate::framing::FrameDecoder::new(),
+            stride,
+        }
+    }
+
+    /// The next record, or `Err(Timeout)` when none arrived within the
+    /// timeout. A record whose length is not the stride is an error: the
+    /// device and the format it advertised disagree.
+    pub fn next_record(&mut self) -> Result<Vec<u8>> {
+        loop {
+            while let Some(frame) = self.decoder.next_frame() {
+                if let crate::framing::Frame::Rec(rec) = frame {
+                    if rec.len() != self.stride {
+                        return Err(Error::Scpi {
+                            cmd: "data plane".into(),
+                            msg: format!(
+                                "{}-byte record, but the device advertised stride {}",
+                                rec.len(),
+                                self.stride
+                            ),
+                        });
+                    }
+                    return Ok(rec);
+                }
+            }
+            let chunk = self.reader.read()?;
+            if chunk.is_empty() {
+                return Err(Error::Timeout);
+            }
+            self.decoder.push(&chunk);
         }
     }
 }

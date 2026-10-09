@@ -49,7 +49,7 @@ iotsploit-host workflow wifi-scan # run a multi-step job
   a mistyped name, and the exit status says it failed.
 - Run multi-step **workflows** (`trigger → poll → fetch`, or interactive ones
   such as BLE pairing) that the device describes.
-- Read a device's continuous data stream over TCP (`stream`).
+- Read a device's continuous data stream (`stream`): over TCP, or over the USB vendor pipe on USB-only boards.
 - Drive everything from one-liners or an interactive prompt.
 
 It is **device-independent**: the same binary works for the nRF52840,
@@ -195,7 +195,7 @@ iotsploit-host [-d <device>] <command> [args]
 | `help [name]` | Every command and workflow the device describes; with a name, its parameters, types and summary. Names may be long or short form, in any case (`help gpio:set`). |
 | `send <command>` | Send one SCPI command. Prints a text reply, writes a binary block to stdout (or `-o <file>`), prints `ok` on stderr for a command with no reply, or prints the device's error. |
 | `workflow <name> [params]` | Run a workflow the device describes (`help <name>` shows its parameters). |
-| `stream [count]` | Read records from the device's data plane (TCP devices). |
+| `stream [count]` | Start the capture and print records from the data plane (TCP socket or USB vendor pipe) until `count` or Ctrl-C. |
 | `repl` | Interactive prompt; each line is sent like `send`. |
 | `errors` | Read and clear the device's error queue. |
 
@@ -326,6 +326,10 @@ your shell ──► iotsploit-host (Rust) ──► Transport trait
     `--features raw-usb`). Used on Windows/macOS and optionally on Linux.
   - `tcp.rs`: raw SCPI over TCP, restoring message boundaries from the stream.
 - **Discover** (`discover.rs`): the `-d` address syntax and the `devices` list.
+- **Data plane** (`dataplane.rs`, `framing.rs`): finds the record stream
+  (`SYSTem:STReam:FORMat?`, port 0 = USB only), reads it from a TCP socket, or
+  decodes REC frames from the USB vendor pipe (`UsbRecordStream` in
+  `usbtmc_raw.rs`), and tracks the in-band `dropped` counter.
 - **Session** (`session.rs`): appends the SCPI `\n` terminator, trims trailing
   CR/LF from text, never decodes binary blocks as text, and runs a command
   together with its error check (`send_checked`).

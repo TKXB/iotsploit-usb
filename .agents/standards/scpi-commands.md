@@ -11,7 +11,8 @@ Every command is one of these.
 | --- | --- | --- |
 | Setting | Write with a value, read the same header with `?`. A read-only value has only the `?` form. | `GPIO 2,1` / `GPIO? 2`, `BLE:CHANnel 37` / `BLE:CHANnel?`, `BLE:SEC?` |
 | Action | Does one thing now. No reply; a failure goes to the error queue. | `CAN:SEND 1,#H123,DEADBEEF`, `BLE:DISConnect`, `BLE:PAIR:PASSKey 123456` |
-| Job | Anything that runs over time. Always the six commands below. | `BLE:SCAN:*`, `WLAN:SCAN:*`, `CAN:CAPTure:*`, `BLE:CONNect:*` |
+| Job | Anything that runs over time and ends with a bounded result. Always the six commands below. | `BLE:SCAN:*`, `WLAN:SCAN:*`, `BLE:CONNect:*` |
+| Stream | A continuous source the user stops: CAN traffic, RSSI samples. `SYSTem:STReam:*`, records on the data plane. | `SYSTem:STReam:STARt` / `:STOP` |
 
 A job `<SUB>` has exactly these commands; leave out only the ones that cannot
 apply (a job with no results has no `:COUNt?`, `:FETCh?` or `:CLEar`):
@@ -36,7 +37,7 @@ compiled out, so the stack's own code goes to the device log. There are no
 
 - Headers use SCPI long form with the short form in capitals: `STARt`,
   `STATe?`, `COUNt?`, `FETCh?`, `CLEar`. Never `START` or `RESult?`.
-- A subsystem is a noun (`BLE:SCAN`, `CAN:CAPTure`); the six job words and a
+- A subsystem is a noun (`BLE:SCAN`, `WLAN:SCAN`); the six job words and a
   setting's own name are the only verbs.
 - One header per thing. Per-instance headers (`LED:RED`, `LED:GREen`, …) become
   a parameter (`LED red,1`).
@@ -75,10 +76,33 @@ order. A field with the same meaning has the same name everywhere: `addr`
 (mac), `rssi` (i32, dBm), `name`, `ssid`, `bssid`, `channel`, `time` (u64, µs),
 `id`, `data`.
 
+## Streams
+
+A source with no natural end is a stream, not a job: a job's results must fit
+the device's memory and the host must poll for `DONE`, so a quiet source never
+finishes and a busy one overflows. A stream runs until the user stops it and
+sends every record as it happens.
+
+| Command | Meaning |
+| --- | --- |
+| `SYSTem:STReam:STARt` | Begin; zero `COUNt?` and `DROPped?`. Refused (error queue) when nothing could arrive, e.g. no CAN bus open. |
+| `SYSTem:STReam:STOP` | End. Records already queued are still delivered. |
+| `SYSTem:STReam:STATe?` | `<running>,<attached>` (0/1 each). |
+| `SYSTem:STReam:COUNt?` / `:DROPped?` | Records produced / lost to a full buffer since `STARt` (u64). |
+| `SYSTem:STReam:FORMat?` | `ver=<n>,stride=<bytes>,fields=<schema>`; the same `fields=` grammar as workflows. |
+| `SYSTem:STReam:PORT?` | TCP data-plane port. Absent on a USB-only board. |
+| `SYSTem:STReam:FRAMing <0/1>` | The host turns on the USB vendor-pipe envelope (`[u8 type][u8 0][u16 len]`, type 2 = one record). |
+
+Every record is `stride` bytes, little-endian, and carries a u64 `dropped`
+field: the producer's loss count at capture, so a host reports gaps where they
+happened. Name fields as in Results below (`ts_us`, `can_id`, `data`, ...).
+A board with more than one vendor interface marks its stream interface with
+subclass `0x49`, protocol `0x53`.
+
 ## Workflows
 
 - A workflow is named `<subsystem>-<verb>` (`ble-scan`, `wifi-scan`,
-  `can-capture`). The same name means the same behaviour, parameters and result
+  `ble-connect`). The same name means the same behaviour, parameters and result
   fields on every board.
 - A job becomes a workflow with `USBSCPI_WF_ACQUIRE` (start, poll, fetch) or
   `USBSCPI_WF_INTERACTIVE` (start, poll, answer prompts) in

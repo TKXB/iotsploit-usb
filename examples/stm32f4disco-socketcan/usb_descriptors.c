@@ -2,6 +2,7 @@
 
 #include "tusb.h"
 #include "usbscpi/usbscpi.h"
+#include "can_stream_itf.h"
 
 /* ------------------------------------------------------------------
  * USB Device Descriptor
@@ -28,14 +29,16 @@ uint8_t const *tud_descriptor_device_cb(void) {
 }
 
 /* ------------------------------------------------------------------
- * USB Configuration Descriptor: gs_usb (SocketCAN) + USBTMC
+ * USB Configuration Descriptor: gs_usb (SocketCAN) + USBTMC + CAN stream
  * gs_usb must be interface 0 with bulk IN 0x81 / OUT 0x02: Linux sends its
  * control requests with wIndex 0, and kernels before endpoint discovery
- * hard-code those two endpoint numbers.
+ * hard-code those two endpoint numbers. The CAN stream (can_stream.h) takes
+ * the remaining endpoints: OTG FS has four per direction, EP0 included.
  * ------------------------------------------------------------------ */
 enum {
     ITF_NUM_GS_USB = 0,
     ITF_NUM_USBTMC,
+    ITF_NUM_STREAM,
     ITF_NUM_TOTAL
 };
 
@@ -43,9 +46,12 @@ enum {
 #define GS_USB_EP_OUT 0x02
 #define USBTMC_EP_OUT 0x03
 #define USBTMC_EP_IN  0x83
+#define STREAM_EP_OUT 0x01  /* unused: the host never writes the stream */
+#define STREAM_EP_IN  0x82
 
 #define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_VENDOR_DESC_LEN + \
-                          TUD_USBTMC_IF_DESCRIPTOR_LEN + TUD_USBTMC_BULK_DESCRIPTORS_LEN)
+                          TUD_USBTMC_IF_DESCRIPTOR_LEN + TUD_USBTMC_BULK_DESCRIPTORS_LEN + \
+                          CAN_STREAM_DESC_LEN)
 
 uint8_t const desc_configuration[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN,
@@ -53,6 +59,7 @@ uint8_t const desc_configuration[] = {
     TUD_VENDOR_DESCRIPTOR(ITF_NUM_GS_USB, 4, GS_USB_EP_OUT, GS_USB_EP_IN, 64),
     TUD_USBTMC_IF_DESCRIPTOR(ITF_NUM_USBTMC, 2, 0, TUD_USBTMC_PROTOCOL_USB488),
     TUD_USBTMC_BULK_DESCRIPTORS(USBTMC_EP_OUT, USBTMC_EP_IN, 64),
+    CAN_STREAM_DESCRIPTOR(ITF_NUM_STREAM, 5, STREAM_EP_OUT, STREAM_EP_IN, 64),
 };
 
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
@@ -89,6 +96,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t language_id) {
     case 2: str = "STM32F4-Disco SocketCAN"; break;
     case 3: str = board_serial();         break;
     case 4: str = "gs_usb CAN";           break;
+    case 5: str = "IoTSploit CAN stream"; break;
     default: return NULL;
     }
 

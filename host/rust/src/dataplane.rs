@@ -71,32 +71,34 @@ impl StreamFormat {
 
 /// Ask the device where its data plane is and what it emits.
 ///
-/// Returns `None` when the device advertises port 0, which is how a build
-/// without a data plane says so, or when it does not implement
-/// `SYSTem:STReam:PORT?` at all.
+/// Returns the TCP port and the record format. A device that streams over its
+/// USB vendor pipe only (STM32F4 boards) has no `SYSTem:STReam:PORT?`, and a
+/// network build without a data plane answers port 0; both come back as port
+/// 0 with the format, so the caller picks the transport. `None` means the
+/// device has no data plane at all: no `SYSTem:STReam:FORMat?`, or port 0 and
+/// nothing else.
 ///
-/// The header is checked before it is asked. A device without it (butterfly
-/// nRF52840) answers the query with an empty reply and queues -113 "Undefined
-/// header" — and a stale error there is read back by the next command that
-/// verifies itself via `SYSTem:ERRor?`, which then reports *its own* command as
-/// rejected. Probing on connect must leave nothing behind.
+/// Headers are checked before they are asked. A device without them
+/// (butterfly nRF52840) answers the query with an empty reply and queues -113
+/// "Undefined header" — and a stale error there is read back by the next
+/// command that verifies itself via `SYSTem:ERRor?`, which then reports *its
+/// own* command as rejected. Probing on connect must leave nothing behind.
 pub fn discover<T: Transport>(s: &mut ScpiSession<T>) -> Result<Option<(u16, StreamFormat)>> {
-    let has_port = fetch_headers(s, None)?
-        .iter()
-        .any(|h| h.eq_ignore_ascii_case("SYSTem:STReam:PORT?"));
-    if !has_port {
+    let headers = fetch_headers(s, None)?;
+    let has = |h: &str| headers.iter().any(|x| x.eq_ignore_ascii_case(h));
+    if !has("SYSTem:STReam:FORMat?") {
         return Ok(None);
     }
-    let port: u16 = s
-        .query("SYSTem:STReam:PORT?")?
-        .trim()
-        .parse()
-        .map_err(|_| Error::Scpi {
+    let port: u16 = if has("SYSTem:STReam:PORT?") {
+        s.query("SYSTem:STReam:PORT?")?.trim().parse().map_err(|_| Error::Scpi {
             cmd: "SYSTem:STReam:PORT?".into(),
             msg: "not a port number".into(),
-        })?;
-    if port == 0 {
-        return Ok(None);
+        })?
+    } else {
+        0
+    };
+    if port == 0 && !has("SYSTem:STReam:FRAMing") {
+        return Ok(None); // a network build with its data plane compiled out
     }
     let fmt = StreamFormat::parse(s.query("SYSTem:STReam:FORMat?")?.trim())?;
     Ok(Some((port, fmt)))
@@ -267,8 +269,21 @@ mod tests {
 
     #[test]
     fn discover_treats_port_zero_as_no_data_plane() {
-        let mut s = scripted(&["SYSTem:STReam:PORT?\n\n", "0\n"]);
+        let mut s = scripted(&["SYSTem:STReam:PORT?\nSYSTem:STReam:FORMat?\n\n", "0\n"]);
         assert_eq!(discover(&mut s).unwrap(), None);
+    }
+
+    #[test]
+    fn discover_finds_a_usb_only_data_plane() {
+        // STM32F4: no network, so no PORT?; records go over the vendor pipe.
+        let mut s = scripted(&[
+            "SYSTem:STReam:FORMat?\nSYSTem:STReam:FRAMing\n\n",
+            "ver=1,stride=32,fields=ts_us:u64:us\n",
+        ]);
+        let (port, fmt) = discover(&mut s).unwrap().unwrap();
+        assert_eq!(port, 0);
+        assert_eq!(fmt.stride, 32);
+        assert_eq!(s.transport().sent, ["SYST:HELP:HEAD?", "SYSTem:STReam:FORMat?"]);
     }
 
     #[test]
