@@ -153,6 +153,14 @@ transport tests passes `tools/testing/test-c-full.sh`; every host step passes
 12. **Phase gate.** C gate, `cargo test`, `tests/scpi_tcp_smoke.py`, and the
     per-OS smoke checklist on every available board.
 
+**Phase 2 note (nRF52840 ble-auto).** `ble-connect` is identical on the
+ESP32-S3 and nRF52840 (`BLE:CONNect:STARt <index>[,<pair>]`), so a host drives
+both the same way. The nRF's old `BLE:AUTO` (scan + name-filter + connect +
+pair) stays as a working, undescribed alias: driving "scan first, then connect
+by name" from one workflow needs a host-side name->index step the engine does
+not have yet, and `--name` is deferred rather than faked. `ble-connect` lists
+`ble-auto` and `ble-connect-pair` as its `renamed_from`.
+
 **Phase 1 outcome.**
 
 - Host: steps 1–6 as written. `send` checks errors in the same message
