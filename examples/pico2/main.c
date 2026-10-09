@@ -64,37 +64,35 @@ static scpi_result_t cmd_adc_read(scpi_t *ctx) {
     return SCPI_RES_OK;
 }
 
-static const scpi_command_t demo_commands[] = {
-    { "GPIO:SET",    cmd_gpio_set, 0 },
-    { "GPIO:GET?",   cmd_gpio_get, 0 },
-    { "ADC:READ?",   cmd_adc_read, 0 },
-    SCPI_CMD_LIST_END
+/* Settings (.agents/standards/scpi-commands.md): GPIO <pin>,<value> writes and
+ * GPIO? <pin> reads; ADC? <channel> reads. Declared once; the old names stay as
+ * undescribed aliases. */
+static const usbscpi_param_desc_t gpio_set_params[] = {
+    USBSCPI_PARAM("pin", "u32", true),
+    USBSCPI_PARAM("value", "bool", true),
+};
+static const usbscpi_param_desc_t pin_params[] = {
+    USBSCPI_PARAM("pin", "u32", true),
+};
+static const usbscpi_param_desc_t adc_params[] = {
+    USBSCPI_PARAM("channel", "u32", false),
 };
 
-/* Served by SYSTem:HELP:DESCription? so hosts can show help and check input. */
-static const usbscpi_param_desc_t desc_gpio_set_params[] = {
-    { "pin",     "u32",  true,  NULL, NULL },
-    { "value",   "bool", true,  NULL, NULL },
-};
-static const usbscpi_param_desc_t desc_gpio_get_params[] = {
-    { "pin",     "u32",  true,  NULL, NULL },
-};
-static const usbscpi_param_desc_t desc_adc_read_params[] = {
-    { "channel", "u32",  false, NULL, NULL },
-};
-
-static const usbscpi_command_desc_t desc_commands[] = {
-    { "GPIO:SET",  "command", "Set GPIO output level",
-      desc_gpio_set_params, 2, "none" },
-    { "GPIO:GET?", "query",   "Read GPIO input level",
-      desc_gpio_get_params, 1, "u32" },
-    { "ADC:READ?", "query",   "Read the ADC; channel defaults to 0",
-      desc_adc_read_params, 1, "u32" },
-};
+#define PICO_COMMANDS(CMD, ALIAS)                                             \
+    CMD("GPIO",  cmd_gpio_set, "command", "Set a GPIO output level",          \
+        USBSCPI_PARAMS(gpio_set_params), "none")                             \
+    CMD("GPIO?", cmd_gpio_get, "query",   "Read a GPIO input level",          \
+        USBSCPI_PARAMS(pin_params), "u32")                                   \
+    CMD("ADC?",  cmd_adc_read, "query",   "Read the ADC; channel defaults to 0", \
+        USBSCPI_PARAMS(adc_params), "u32")                                   \
+    ALIAS("GPIO:SET",  cmd_gpio_set)                                         \
+    ALIAS("GPIO:GET?", cmd_gpio_get)                                         \
+    ALIAS("ADC:READ?", cmd_adc_read)
+USBSCPI_DEFINE_COMMANDS(pico, PICO_COMMANDS);
 
 static const usbscpi_descriptor_t s_descriptor = {
-    .commands      = desc_commands,
-    .command_count = sizeof(desc_commands) / sizeof(desc_commands[0]),
+    .commands      = pico_desc_commands,
+    .command_count = USBSCPI_COUNT(pico_desc_commands),
 };
 
 /* ---------- TinyUSB USBTMC callbacks the application must provide ----------
@@ -175,7 +173,7 @@ int main(void) {
 
     usbscpi_t *dev = usbscpi_init(s_storage, sizeof(s_storage), &cfg);
     usbscpi_tinyusb_bind(dev);
-    usbscpi_register(dev, demo_commands);
+    usbscpi_register(dev, pico_scpi_commands);
 
     while (1) {
         tud_task();
