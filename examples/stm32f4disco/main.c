@@ -75,42 +75,6 @@ static scpi_result_t cmd_led_get(scpi_t *ctx) {
     return SCPI_RES_OK;
 }
 
-/* ---- Named LED commands (tag = led_pins[] index) ----
- * SCPI short-form mnemonics follow IEEE 488.2 convention:
- *   GREen (PD12), ORAnge (PD13), RED (PD14), BLUe (PD15) */
-static scpi_result_t cmd_led_named_set(scpi_t *ctx) {
-    uint32_t val;
-    if (SCPI_ParamUInt32(ctx, &val, TRUE) != TRUE) return SCPI_RES_ERR;
-    int32_t idx = SCPI_CmdTag(ctx);
-    if (val) gpio_set(GPIOD, led_pins[idx]);
-    else     gpio_clear(GPIOD, led_pins[idx]);
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_led_named_get(scpi_t *ctx) {
-    int32_t idx = SCPI_CmdTag(ctx);
-    SCPI_ResultUInt32(ctx, (gpio_get(GPIOD, led_pins[idx]) != 0) ? 1 : 0);
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_led_all_set(scpi_t *ctx) {
-    uint32_t val;
-    if (SCPI_ParamUInt32(ctx, &val, TRUE) != TRUE) return SCPI_RES_ERR;
-    if (val) gpio_set(GPIOD, GPIO12 | GPIO13 | GPIO14 | GPIO15);
-    else     gpio_clear(GPIOD, GPIO12 | GPIO13 | GPIO14 | GPIO15);
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_led_all_get(scpi_t *ctx) {
-    uint32_t state = 0;
-    if (gpio_get(GPIOD, GPIO12)) state |= (1u << 0);  /* green  */
-    if (gpio_get(GPIOD, GPIO13)) state |= (1u << 1);  /* orange */
-    if (gpio_get(GPIOD, GPIO14)) state |= (1u << 2);  /* red    */
-    if (gpio_get(GPIOD, GPIO15)) state |= (1u << 3);  /* blue   */
-    SCPI_ResultUInt32(ctx, state);
-    return SCPI_RES_OK;
-}
-
 static scpi_result_t cmd_led_toggle(scpi_t *ctx) {
     uint32_t idx;
     if (SCPI_ParamUInt32(ctx, &idx, TRUE) != TRUE) return SCPI_RES_ERR;
@@ -337,122 +301,166 @@ static scpi_result_t cmd_can_state(scpi_t *ctx) {
 
 /* ---------- SCPI command descriptor (enables SYSTem:HELP:DESCription?) ---------- */
 
-static const usbscpi_param_desc_t desc_led_set_params[] = {
-    { "index", "u32",  true },
-    { "value", "bool", true },
+/* CAN:CAPTure job (.agents/standards/scpi-commands.md): a snapshot of received
+ * frames for random-access FETCh?. The RX ISR keeps filling s_can_ring; the job
+ * drains that ring into s_cap here in SCPI-task context, so there is no new ISR
+ * state. STOP-bounded (no millisecond clock on this board): capture runs until
+ * STOP or the snapshot fills. */
+#define CAN_CAP_MAX 128u
+static can_frame_rec_t s_cap[CAN_CAP_MAX];
+static size_t s_cap_n;
+static bool   s_cap_running;
+static bool   s_cap_started;
+
+static void can_cap_drain(void) {
+    while (s_cap_running && s_cap_n < CAN_CAP_MAX &&
+           usbscpi_ring_count(&s_can_ring) >= sizeof(can_frame_rec_t)) {
+        usbscpi_ring_read(&s_can_ring, (uint8_t *)&s_cap[s_cap_n], sizeof(can_frame_rec_t));
+        s_cap_n++;
+    }
+    if (s_cap_n >= CAN_CAP_MAX) s_cap_running = false;  /* snapshot full -> DONE */
+}
+
+static scpi_result_t cmd_can_cap_start(scpi_t *ctx) {
+    (void)ctx;
+    uint8_t drop[sizeof(can_frame_rec_t)];
+    while (usbscpi_ring_count(&s_can_ring) >= sizeof(drop))   /* start from empty */
+        usbscpi_ring_read(&s_can_ring, drop, sizeof(drop));
+    s_cap_n = 0;
+    s_cap_running = true;
+    s_cap_started = true;
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_can_cap_stop(scpi_t *ctx) {
+    (void)ctx;
+    can_cap_drain();
+    s_cap_running = false;
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_can_cap_state(scpi_t *ctx) {
+    can_cap_drain();
+    SCPI_ResultMnemonic(ctx, !s_cap_started ? "IDLE" : s_cap_running ? "RUNNING" : "DONE");
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_can_cap_count(scpi_t *ctx) {
+    can_cap_drain();
+    SCPI_ResultUInt32(ctx, (uint32_t)s_cap_n);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_can_cap_fetch(scpi_t *ctx) {
+    uint32_t idx = 0;
+    if (SCPI_ParamUInt32(ctx, &idx, TRUE) != TRUE) return SCPI_RES_ERR;
+    can_cap_drain();
+    if (idx >= s_cap_n) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
+        return SCPI_RES_ERR;
+    }
+    const can_frame_rec_t *r = &s_cap[idx];
+    char line[64];
+    int n = snprintf(line, sizeof(line), "%u,0x%lX,%u,%u,%u,",
+                     r->bus, (unsigned long)r->id, r->ext, r->rtr, r->len);
+    for (uint8_t i = 0; !r->rtr && i < r->len; i++) {
+        n += snprintf(line + n, sizeof(line) - (size_t)n, "%02X", r->data[i]);
+    }
+    SCPI_ResultCharacters(ctx, line, (size_t)n);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_can_cap_clear(scpi_t *ctx) {
+    (void)ctx;
+    s_cap_n = 0;
+    s_cap_started = false;
+    return SCPI_RES_OK;
+}
+
+/* Commands declared once (.agents/standards/scpi-commands.md). LED and GPIO are
+ * settings; CAN:OPEN/SEND are actions; CAN:CAPTure is a job. The per-colour LED
+ * headers and LED:ALL collapse into LED <index>,<value>; LED:SET/GET?, BTN? and
+ * the pop-style CAN:RECV?/COUNt? stay as undescribed aliases. */
+static const usbscpi_param_desc_t led_params[] = {
+    USBSCPI_PARAM("led", "u32", true),
+    USBSCPI_PARAM("value", "bool", true),
 };
-static const usbscpi_param_desc_t desc_led_get_params[] = {
-    { "index", "u32", true },
+static const usbscpi_param_desc_t led_q_params[] = {
+    USBSCPI_PARAM("led", "u32", true),
 };
-static const usbscpi_param_desc_t desc_led_val_params[] = {
-    { "value", "bool", true },
+static const usbscpi_param_desc_t gpio_set_params[] = {
+    USBSCPI_PARAM("pin", "u32", true),
+    USBSCPI_PARAM("value", "bool", true),
 };
-static const usbscpi_param_desc_t desc_led_toggle_params[] = {
-    { "index", "u32", true },
+static const usbscpi_param_desc_t pin_params[] = {
+    USBSCPI_PARAM("pin", "u32", true),
 };
-static const usbscpi_param_desc_t desc_gpio_set_params[] = {
-    { "pin",   "u32",  true },
-    { "value", "bool", true },
+static const usbscpi_param_desc_t can_bus_params[] = {
+    USBSCPI_PARAM("bus", "u32", true),
 };
-static const usbscpi_param_desc_t desc_gpio_get_params[] = {
-    { "pin", "u32", true },
+static const usbscpi_param_desc_t can_open_params[] = {
+    USBSCPI_PARAM("bus", "u32", true),
+    USBSCPI_PARAM("bitrate", "u32", true),
+};
+static const usbscpi_param_desc_t can_send_params[] = {
+    USBSCPI_PARAM("bus", "u32", true),
+    USBSCPI_PARAM("id", "u32", true),
+    USBSCPI_PARAM("data", "string", false),
+};
+static const usbscpi_param_desc_t cap_fetch_params[] = {
+    USBSCPI_PARAM_PICK("index", "CAN:CAPTure:COUNt?", "CAN:CAPTure:FETCh?"),
 };
 
-static const usbscpi_param_desc_t desc_can_bus_params[] = {
-    { "bus", "u32", true, NULL, NULL },
-};
-static const usbscpi_param_desc_t desc_can_open_params[] = {
-    { "bus",     "u32", true, NULL, NULL },
-    { "bitrate", "u32", true, NULL, NULL },
-};
-static const usbscpi_param_desc_t desc_can_send_params[] = {
-    { "bus",  "u32",    true, NULL, NULL },
-    { "id",   "u32",    true, NULL, NULL },
-    { "data", "string", false, NULL, NULL },
-};
+#define STM_COMMANDS(CMD, ALIAS)                                                          \
+    CMD("LED",   cmd_led_set, "command", "Set LED by index (0=green,1=orange,2=red,3=blue)", \
+        USBSCPI_PARAMS(led_params), "none")                                               \
+    CMD("LED?",  cmd_led_get, "query",   "Read LED state by index",                       \
+        USBSCPI_PARAMS(led_q_params), "u32")                                              \
+    CMD("LED:TOGgle", cmd_led_toggle, "command", "Toggle LED by index",                   \
+        USBSCPI_PARAMS(led_q_params), "none")                                             \
+    CMD("BUTTon?", cmd_btn, "query", "Read the user button (PA0), 1=pressed",             \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("GPIO",  cmd_gpio_set, "command", "Set a GPIOA pin output level",                 \
+        USBSCPI_PARAMS(gpio_set_params), "none")                                          \
+    CMD("GPIO?", cmd_gpio_get, "query",   "Read a GPIOA pin input level",                 \
+        USBSCPI_PARAMS(pin_params), "u32")                                                \
+    CMD("CAN:OPEN", cmd_can_open, "command",                                              \
+        "Start CAN bus 1 (PD0/PD1) or 2 (PB12/PB13) at 125k/250k/500k/1M",                \
+        USBSCPI_PARAMS(can_open_params), "none")                                          \
+    CMD("CAN:SEND", cmd_can_send, "command", "Send one frame; id > 0x7FF is extended, data is hex", \
+        USBSCPI_PARAMS(can_send_params), "none")                                          \
+    CMD("CAN:STATe?", cmd_can_state, "query", "open,tec,rec,busoff,rx_dropped",           \
+        USBSCPI_PARAMS(can_bus_params), "string")                                         \
+    CMD("CAN:CAPTure:STARt", cmd_can_cap_start, "command",                                \
+        "Clear, then capture received frames until STOP or the buffer fills",             \
+        USBSCPI_NO_PARAMS, "none")                                                        \
+    CMD("CAN:CAPTure:STOP",  cmd_can_cap_stop,  "command", "Stop capturing",              \
+        USBSCPI_NO_PARAMS, "none")                                                        \
+    CMD("CAN:CAPTure:STATe?", cmd_can_cap_state, "query", "IDLE, RUNNING or DONE",        \
+        USBSCPI_NO_PARAMS, "string")                                                      \
+    CMD("CAN:CAPTure:COUNt?", cmd_can_cap_count, "query", "Frames captured",              \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("CAN:CAPTure:FETCh?", cmd_can_cap_fetch, "query", "Captured frame by index",      \
+        USBSCPI_PARAMS(cap_fetch_params), "string")                                       \
+    CMD("CAN:CAPTure:CLEar", cmd_can_cap_clear, "command", "Forget captured frames",      \
+        USBSCPI_NO_PARAMS, "none")                                                        \
+    ALIAS("LED:SET",    cmd_led_set)                                                      \
+    ALIAS("LED:GET?",   cmd_led_get)                                                      \
+    ALIAS("BTN?",       cmd_btn)                                                          \
+    ALIAS("CAN:RECV?",  cmd_can_recv)                                                     \
+    ALIAS("CAN:COUNt?", cmd_can_count)
+USBSCPI_DEFINE_COMMANDS(stm, STM_COMMANDS);
 
-static const usbscpi_command_desc_t desc_commands[] = {
-    { "LED:SET",      "command", "Set LED by index (0=green,1=orange,2=red,3=blue)",
-      desc_led_set_params,     2, "none" },
-    { "LED:GET?",     "query",   "Read LED state by index",
-      desc_led_get_params,     1, "u32"  },
-    { "LED:GREen",    "command", "Set green LED (PD12)",
-      desc_led_val_params,     1, "none" },
-    { "LED:GREen?",   "query",   "Read green LED state",
-      NULL, 0, "u32"  },
-    { "LED:ORAnge",   "command", "Set orange LED (PD13)",
-      desc_led_val_params,     1, "none" },
-    { "LED:ORAnge?",  "query",   "Read orange LED state",
-      NULL, 0, "u32"  },
-    { "LED:RED",      "command", "Set red LED (PD14)",
-      desc_led_val_params,     1, "none" },
-    { "LED:RED?",     "query",   "Read red LED state",
-      NULL, 0, "u32"  },
-    { "LED:BLUe",     "command", "Set blue LED (PD15)",
-      desc_led_val_params,     1, "none" },
-    { "LED:BLUe?",    "query",   "Read blue LED state",
-      NULL, 0, "u32"  },
-    { "LED:ALL",      "command", "Set all LEDs on or off",
-      desc_led_val_params,     1, "none" },
-    { "LED:ALL?",     "query",   "Read all LED states as bitmask (bit0=green..bit3=blue)",
-      NULL, 0, "u32"  },
-    { "LED:TOGgle",   "command", "Toggle LED by index",
-      desc_led_toggle_params,  1, "none" },
-    { "BTN?",         "query",   "Read user button (PA0), 1=pressed",
-      NULL, 0, "u32"  },
-    { "GPIO:SET",     "command", "Set GPIOA pin output level",
-      desc_gpio_set_params,    2, "none" },
-    { "GPIO:GET?",    "query",   "Read GPIOA pin input level",
-      desc_gpio_get_params,    1, "u32"  },
-    { "CAN:OPEN",     "command", "Start CAN bus 1 (PD0/PD1) or 2 (PB12/PB13) at 125k/250k/500k/1M",
-      desc_can_open_params,    2, "none" },
-    { "CAN:SEND",     "command", "Send one frame; id > 0x7FF is extended, data is hex",
-      desc_can_send_params,    3, "none" },
-    { "CAN:RECV?",    "query",   "Pop one frame: bus,id,ext,rtr,len,data (empty if none)",
-      NULL, 0, "string" },
-    { "CAN:COUNt?",   "query",   "Received frames waiting",
-      NULL, 0, "u32"  },
-    { "CAN:STATe?",   "query",   "open,tec,rec,busoff,rx_dropped",
-      desc_can_bus_params,     1, "string" },
+static const usbscpi_workflow_desc_t stm_workflows[] = {
+    { USBSCPI_WF_ACQUIRE("can-capture", "CAN:CAPTure", "Capture received CAN frames",
+                         "bus:u32,id:hex,ext:bool,rtr:bool,len:u32,data:hex", 60000) },
 };
 
 static const usbscpi_descriptor_t s_descriptor = {
-    .commands       = desc_commands,
-    .command_count  = sizeof(desc_commands) / sizeof(desc_commands[0]),
-    .workflows      = NULL,
-    .workflow_count = 0,
-};
-
-static const scpi_command_t demo_commands[] = {
-    /* Numeric LED control (index 0-3: green, orange, red, blue) */
-    { "LED:SET",     cmd_led_set,        0 },
-    { "LED:GET?",    cmd_led_get,        0 },
-
-    /* Named LED control — tag encodes led_pins[] index */
-    { "LED:GREen",   cmd_led_named_set,  0 },  /* PD12 */
-    { "LED:GREen?",  cmd_led_named_get,  0 },
-    { "LED:ORAnge",  cmd_led_named_set,  1 },  /* PD13 */
-    { "LED:ORAnge?", cmd_led_named_get,  1 },
-    { "LED:RED",     cmd_led_named_set,  2 },  /* PD14 */
-    { "LED:RED?",    cmd_led_named_get,  2 },
-    { "LED:BLUe",    cmd_led_named_set,  3 },  /* PD15 */
-    { "LED:BLUe?",   cmd_led_named_get,  3 },
-
-    /* Bulk LED control */
-    { "LED:ALL",     cmd_led_all_set,    0 },
-    { "LED:ALL?",    cmd_led_all_get,    0 },
-    { "LED:TOGgle",  cmd_led_toggle,     0 },
-
-    { "BTN?",        cmd_btn,            0 },
-    { "GPIO:SET",    cmd_gpio_set,       0 },
-    { "GPIO:GET?",   cmd_gpio_get,       0 },
-
-    { "CAN:OPEN",    cmd_can_open,       0 },
-    { "CAN:SEND",    cmd_can_send,       0 },
-    { "CAN:RECV?",   cmd_can_recv,       0 },
-    { "CAN:COUNt?",  cmd_can_count,      0 },
-    { "CAN:STATe?",  cmd_can_state,      0 },
-    SCPI_CMD_LIST_END
+    .commands = stm_desc_commands,
+    .command_count = USBSCPI_COUNT(stm_desc_commands),
+    .workflows = stm_workflows,
+    .workflow_count = USBSCPI_COUNT(stm_workflows),
 };
 
 /* ---------- TinyUSB USBTMC callbacks the application must provide ----------
@@ -575,7 +583,7 @@ int main(void) {
 
     usbscpi_t *dev = usbscpi_init(s_storage, sizeof(s_storage), &cfg);
     usbscpi_tinyusb_bind(dev);
-    usbscpi_register(dev, demo_commands);
+    usbscpi_register(dev, stm_scpi_commands);
 
     while (1) {
         tud_task();

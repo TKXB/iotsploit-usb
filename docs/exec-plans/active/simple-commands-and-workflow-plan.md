@@ -161,6 +161,19 @@ by name" from one workflow needs a host-side name->index step the engine does
 not have yet, and `--name` is deferred rather than faked. `ble-connect` lists
 `ble-auto` and `ble-connect-pair` as its `renamed_from`.
 
+**Phase 2 note (CAN capture).** `can-capture` lands on the two STM32 boards
+as a job (`CAN:CAPTure:STARt/STOP/STATe?/COUNt?/FETCh?/CLEar`) over a snapshot
+drained from the existing RX ring in SCPI-task context, so there is no new ISR
+state; it is STOP-bounded because the boards have no millisecond clock, and its
+fetch row is `bus,id,ext,rtr,len,data` (the board keeps no timestamp). The Linux
+`can` board stays stream-only: it already captures continuously over its TCP
+data plane (`stream`), which carries `ts_us`, so it gets no `CAN:CAPTure` job —
+the same board that has a stream and no scan job on the ESP32-S3 side. Net
+workflows: 10 (nine BLE/Wi-Fi/sniff/demo plus `can-capture`). The STM32
+`can-capture` path is built here but not flashed; the stm32 LED per-colour and
+`LED:ALL` demo headers collapse into `LED <index>,<value>` per the standard,
+with `LED:SET`/`LED:GET?`/`BTN?`/`CAN:RECV?`/`CAN:COUNt?` kept as aliases.
+
 **Phase 1 outcome.**
 
 - Host: steps 1–6 as written. `send` checks errors in the same message

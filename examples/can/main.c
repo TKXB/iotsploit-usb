@@ -370,54 +370,53 @@ static scpi_result_t cmd_can_state(scpi_t *scpi) {
     return SCPI_RES_OK;
 }
 
-static const scpi_command_t can_commands[] = {
-    { "CAN:OPEN",                 cmd_can_open,       0 },
-    { "CAN:CLOSe",                cmd_can_close,      0 },
-    { "CAN:FILTer:ADD",           cmd_can_filter_add, 0 },
-    { "CAN:SEND",                 cmd_can_send,       0 },
-    { "CAN:STATe?",               cmd_can_state,      0 },
-    { "SYSTem:STReam:PORT?",      cmd_stream_port,    0 },
-    { "SYSTem:STReam:STARt",      cmd_stream_start,   0 },
-    { "SYSTem:STReam:STOP",       cmd_stream_stop,    0 },
-    { "SYSTem:STReam:FORMat?",    cmd_stream_format,  0 },
-    { "SYSTem:STReam:DROPped?",   cmd_stream_dropped, 0 },
-    { "SYSTem:STReam:TORN?",      cmd_stream_torn,    0 },
-    { "SYSTem:STReam:COUNt?",     cmd_stream_count,   0 },
-    SCPI_CMD_LIST_END
+/* Declared once (.agents/standards/scpi-commands.md): CAN:OPEN/CLOSe/FILTer:ADD/
+ * SEND are actions; SYSTem:STReam:* drives the data plane. This board streams
+ * continuously, so it has no CAN:CAPTure job — `stream` is its capture path. */
+static const usbscpi_param_desc_t p_open[] = {
+    USBSCPI_PARAM("interface", "string", true),
 };
+static const usbscpi_param_desc_t p_filter[] = {
+    USBSCPI_PARAM("id", "u32", true),
+    USBSCPI_PARAM("mask", "u32", true),
+};
+static const usbscpi_param_desc_t p_send[] = {
+    USBSCPI_PARAM("id", "u32", true),
+    USBSCPI_PARAM("data", "string", true),
+};
+
+#define CAN_COMMANDS(CMD, ALIAS)                                                      \
+    CMD("CAN:OPEN",   cmd_can_open,   "command", "Bind a SocketCAN interface",        \
+        USBSCPI_PARAMS(p_open), "none")                                               \
+    CMD("CAN:CLOSe",  cmd_can_close,  "command", "Release the interface",             \
+        USBSCPI_NO_PARAMS, "none")                                                    \
+    CMD("CAN:FILTer:ADD", cmd_can_filter_add, "command", "Add a raw CAN filter",      \
+        USBSCPI_PARAMS(p_filter), "none")                                             \
+    CMD("CAN:SEND",   cmd_can_send,   "command", "Send one classic frame",            \
+        USBSCPI_PARAMS(p_send), "none")                                               \
+    CMD("CAN:STATe?", cmd_can_state,  "query",   "iface,open,running,attached",       \
+        USBSCPI_NO_PARAMS, "string")                                                  \
+    CMD("SYSTem:STReam:PORT?",    cmd_stream_port,    "query",   "Data-plane TCP port", \
+        USBSCPI_NO_PARAMS, "u32")                                                     \
+    CMD("SYSTem:STReam:STARt",    cmd_stream_start,   "command", "Begin filling the ring", \
+        USBSCPI_NO_PARAMS, "none")                                                    \
+    CMD("SYSTem:STReam:STOP",     cmd_stream_stop,    "command", "Stop filling the ring", \
+        USBSCPI_NO_PARAMS, "none")                                                    \
+    CMD("SYSTem:STReam:FORMat?",  cmd_stream_format,  "query",   "Record version, stride and schema", \
+        USBSCPI_NO_PARAMS, "string")                                                  \
+    CMD("SYSTem:STReam:DROPped?", cmd_stream_dropped, "query",   "Frames lost (ring + kernel)", \
+        USBSCPI_NO_PARAMS, "u32")                                                     \
+    CMD("SYSTem:STReam:TORN?",    cmd_stream_torn,    "query",   "Records discarded to realignment", \
+        USBSCPI_NO_PARAMS, "u32")                                                     \
+    CMD("SYSTem:STReam:COUNt?",   cmd_stream_count,   "query",   "Frames captured",   \
+        USBSCPI_NO_PARAMS, "u32")
+USBSCPI_DEFINE_COMMANDS(can, CAN_COMMANDS);
 
 /* ---------- descriptor ---------- */
 
-static const usbscpi_param_desc_t p_open[] = {
-    { .name = "interface", .type = "string", .required = true },
-};
-static const usbscpi_param_desc_t p_filter[] = {
-    { .name = "id",   .type = "u32", .required = true },
-    { .name = "mask", .type = "u32", .required = true },
-};
-static const usbscpi_param_desc_t p_send[] = {
-    { .name = "id",   .type = "u32",    .required = true },
-    { .name = "data", .type = "string", .required = true },
-};
-
-static const usbscpi_command_desc_t desc_commands[] = {
-    { "CAN:OPEN",               "command", "Bind a SocketCAN interface", p_open, 1, "none" },
-    { "CAN:CLOSe",              "command", "Release the interface", NULL, 0, "none" },
-    { "CAN:FILTer:ADD",         "command", "Add a raw CAN filter", p_filter, 2, "none" },
-    { "CAN:SEND",               "command", "Send one classic frame", p_send, 2, "none" },
-    { "CAN:STATe?",             "query",   "iface,open,running,attached", NULL, 0, "string" },
-    { "SYSTem:STReam:PORT?",    "query",   "Data-plane TCP port", NULL, 0, "u32" },
-    { "SYSTem:STReam:STARt",    "command", "Begin filling the ring", NULL, 0, "none" },
-    { "SYSTem:STReam:STOP",     "command", "Stop filling the ring", NULL, 0, "none" },
-    { "SYSTem:STReam:FORMat?",  "query",   "Record version, stride and schema", NULL, 0, "string" },
-    { "SYSTem:STReam:DROPped?", "query",   "Frames lost (ring + kernel)", NULL, 0, "u32" },
-    { "SYSTem:STReam:TORN?",    "query",   "Records discarded to realignment", NULL, 0, "u32" },
-    { "SYSTem:STReam:COUNt?",   "query",   "Frames captured", NULL, 0, "u32" },
-};
-
 static const usbscpi_descriptor_t s_descriptor = {
-    .commands = desc_commands,
-    .command_count = sizeof(desc_commands) / sizeof(desc_commands[0]),
+    .commands = can_desc_commands,
+    .command_count = USBSCPI_COUNT(can_desc_commands),
     .workflows = NULL,
     .workflow_count = 0,
 };
@@ -458,7 +457,7 @@ int main(int argc, char **argv) {
         .descriptor    = &s_descriptor,
     };
     usbscpi_t *dev = usbscpi_init(s_storage, sizeof(s_storage), &cfg);
-    if (!dev || usbscpi_register(dev, can_commands) != USBSCPI_OK) {
+    if (!dev || usbscpi_register(dev, can_scpi_commands) != USBSCPI_OK) {
         fprintf(stderr, "usbscpi init/register failed\n");
         return 1;
     }
