@@ -15,6 +15,42 @@
 
 #define USBTMC_STATUS_SUCCESS 0x01u
 
+/* Descriptor definitions used by the board identity regression test. */
+#define CFG_TUD_ENDPOINT0_SIZE 64
+#define TUSB_DESC_DEVICE 1
+#define TUSB_DESC_CONFIG 2
+#define TUSB_DESC_STRING 3
+#define TUSB_DESC_INTERFACE 4
+#define TUSB_DESC_ENDPOINT 5
+#define TUSB_CLASS_UNSPECIFIED 0
+#define TUSB_CLASS_VENDOR_SPECIFIC 0xFF
+#define TUSB_XFER_BULK 2
+#define TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP 0x20
+#define TUD_USBTMC_PROTOCOL_USB488 1
+#define U16_TO_U8S_LE(value) ((value) & 0xFF), (((value) >> 8) & 0xFF)
+#define TUD_CONFIG_DESC_LEN 9
+#define TUD_VENDOR_DESC_LEN 23
+#define TUD_USBTMC_IF_DESCRIPTOR_LEN 9
+#define TUD_USBTMC_BULK_DESCRIPTORS_LEN 14
+#define TUD_CONFIG_DESCRIPTOR(config, count, str, len, attr, power) \
+    9, TUSB_DESC_CONFIG, U16_TO_U8S_LE(len), count, config, str, attr, power / 2
+#define TUD_VENDOR_DESCRIPTOR(itf, str, out, in, size) \
+    9, TUSB_DESC_INTERFACE, itf, 0, 2, 0xFF, 0, 0, str, \
+    TUD_USBTMC_BULK_DESCRIPTORS(out, in, size)
+#define TUD_USBTMC_IF_DESCRIPTOR(itf, count, str, protocol) \
+    9, TUSB_DESC_INTERFACE, itf, 0, count, 0xFE, 3, protocol, str
+#define TUD_USBTMC_BULK_DESCRIPTORS(out, in, size) \
+    7, TUSB_DESC_ENDPOINT, out, TUSB_XFER_BULK, U16_TO_U8S_LE(size), 0, \
+    7, TUSB_DESC_ENDPOINT, in, TUSB_XFER_BULK, U16_TO_U8S_LE(size), 0
+
+typedef struct {
+    uint8_t bLength, bDescriptorType;
+    uint16_t bcdUSB;
+    uint8_t bDeviceClass, bDeviceSubClass, bDeviceProtocol, bMaxPacketSize0;
+    uint16_t idVendor, idProduct, bcdDevice;
+    uint8_t iManufacturer, iProduct, iSerialNumber, bNumConfigurations;
+} tusb_desc_device_t;
+
 typedef struct {
     struct { unsigned int EOM : 1; } bmTransferAttributes;
 } usbtmc_msg_request_dev_dep_out;

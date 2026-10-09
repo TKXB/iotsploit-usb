@@ -196,4 +196,15 @@ if(USBSCPI_BUILD_TESTS)
     )
     target_link_libraries(test_glue_tinyusb PRIVATE usbscpi)
     add_test(NAME test_glue_tinyusb COMMAND test_glue_tinyusb)
+
+    add_executable(test_stm32f4_socketcan_identity
+        tests/test_stm32f4_socketcan_identity.c
+        examples/stm32f4disco-socketcan/usb_descriptors.c
+    )
+    target_include_directories(test_stm32f4_socketcan_identity PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/stub
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/stm32f4disco
+    )
+    target_compile_options(test_stm32f4_socketcan_identity PRIVATE ${USBSCPI_WARNINGS})
+    add_test(NAME test_stm32f4_socketcan_identity COMMAND test_stm32f4_socketcan_identity)
 endif()

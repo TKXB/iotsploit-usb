@@ -20,6 +20,8 @@ interpreter; Python is required so transport coverage cannot silently vanish.
 
 - `test_usbscpi` — core unit tests.
 - `test_glue_tinyusb` — TinyUSB glue against `tests/stub/tusb.h`.
+- `test_stm32f4_socketcan_identity` — actual board identity/descriptor code with
+  a fake 96-bit UID; verifies programmer byte order and the full SCPI version.
 - `test_scpi_tcp_smoke` — the daemon over real sockets.
 - `test_stream_dataplane` — the stream glue driven by `stream_testgen`.
 - Linux only: `test_ring_concurrent` and `test_can_capture`.

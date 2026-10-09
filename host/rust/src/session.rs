@@ -129,12 +129,18 @@ impl<T: Transport> ScpiSession<T> {
     }
 
     /// Send a query and return the response as a string with trailing CR/LF
-    /// removed. The response is never decoded as lossy UTF-8; invalid UTF-8 is
-    /// an error (use [`Self::query_raw`] for arbitrary bytes).
+    /// outside a block payload removed. The response is never decoded as lossy
+    /// UTF-8; invalid UTF-8 is an error (use [`Self::query_raw`] for arbitrary bytes).
     pub fn query(&mut self, cmd: &str) -> Result<String> {
         let raw = self.query_raw(cmd)?;
         let mut end = raw.len();
-        while end > 0 && matches!(raw[end - 1], b'\n' | b'\r') {
+        let payload_end = if raw.first() == Some(&b'#') {
+            let payload = block::parse_block(&raw, self.max_block_len)?;
+            2 + usize::from(raw[1] - b'0') + payload.len()
+        } else {
+            0
+        };
+        while end > payload_end && matches!(raw[end - 1], b'\n' | b'\r') {
             end -= 1;
         }
         String::from_utf8(raw[..end].to_vec()).map_err(|e| Error::Scpi {
@@ -346,6 +352,22 @@ mod tests {
         let idn = s.query("*IDN?").unwrap();
         assert_eq!(idn, "IoTSploit,nRF52840,0001,0.1.0");
         assert_eq!(s.transport.last_write(), b"*IDN?\n");
+    }
+
+    #[test]
+    fn query_preserves_block_payload_line_endings() {
+        for payload in [b"DEV proto=1\n".as_slice(), b"DEV proto=1\r\n", b""] {
+            let expected = block::encode_block(payload);
+            let mut response = expected.clone();
+            response.extend_from_slice(b"\r\n");
+            let mut s = session_with(&[response]);
+            let result = s.query("SYSTem:HELP:DESCription?").unwrap();
+            assert_eq!(result.as_bytes(), expected);
+            assert_eq!(
+                block::parse_block(result.as_bytes(), 8192).unwrap(),
+                payload
+            );
+        }
     }
 
     #[test]

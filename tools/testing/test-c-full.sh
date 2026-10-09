@@ -25,7 +25,8 @@ import sys
 with open('test-inventory.json', encoding='utf-8') as inventory:
     registered = {test['name'] for test in json.load(inventory)['tests']}
 required = {'test_usbscpi', 'test_glue_tinyusb',
-            'test_scpi_tcp_smoke', 'test_stream_dataplane'}
+            'test_scpi_tcp_smoke', 'test_stream_dataplane',
+            'test_stm32f4_socketcan_identity'}
 if sys.platform.startswith('linux'):
     required.update({'test_ring_concurrent', 'test_can_capture'})
 missing = required - registered

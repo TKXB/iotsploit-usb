@@ -1,7 +1,7 @@
 #include <libopencm3/stm32/desig.h>
+#include <stdio.h>
 
 #include "tusb.h"
-#include "usbscpi/usbscpi.h"
 #include "can_stream_itf.h"
 
 /* ------------------------------------------------------------------
@@ -70,14 +70,25 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
 /* ------------------------------------------------------------------
  * USB String Descriptors
  * ------------------------------------------------------------------ */
-/* Chip-unique serial number, shared by the USB descriptor and *IDN? so two
- * identical boards can be told apart. */
+/* USB and *IDN? use UID bytes in address order, matching the SWD programmer. */
 const char *board_serial(void) {
     static char serial[25];
     if (serial[0] == '\0') {
-        desig_get_unique_id_as_string(serial, sizeof(serial));
+        const uint32_t words[] = { DESIG_UNIQUE_ID0, DESIG_UNIQUE_ID1, DESIG_UNIQUE_ID2 };
+        const uint8_t *uid = (const uint8_t *)words;
+        const char hex[] = "0123456789ABCDEF";
+        for (unsigned i = 0; i < sizeof(words); i++) {
+            serial[2 * i] = hex[uid[i] >> 4];
+            serial[2 * i + 1] = hex[uid[i] & 0x0F];
+        }
     }
     return serial;
+}
+
+const char *board_idn(void) {
+    static char idn[80];
+    snprintf(idn, sizeof(idn), "IoTSploit,STM32F4-Disco-SocketCAN,%s,0.1.0", board_serial());
+    return idn;
 }
 
 static uint16_t _desc_str[32];
