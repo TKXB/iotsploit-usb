@@ -9,6 +9,7 @@
 #include "esp_private/usb_phy.h"     /* usb_new_phy */
 #include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
+#include "soc/soc_caps.h"
 #include "tusb.h"
 #include "usbscpi/usbscpi.h"
 #include "usbscpi_tinyusb.h"
@@ -41,13 +42,26 @@ static uint8_t s_io[8192];
 
 /* ---------- ADC oneshot 句柄 ---------- */
 static adc_oneshot_unit_handle_t s_adc1;
+/* ADC1 channels configured so far, one bit each. A channel is configured the
+ * first time it is read; reading one that never was returns garbage. */
+static uint32_t s_adc1_configured;
+
+/* Configure ADC1 channel `ch` if it is not yet. 12 dB attenuation reads the
+ * full 0..~3.1 V range. Returns 0, or -1 for a channel ADC1 does not have. */
+static int adc_channel(uint32_t ch) {
+    if (ch >= SOC_ADC_CHANNEL_NUM(ADC_UNIT_1)) return -1;
+    if (s_adc1_configured & (1u << ch)) return 0;
+    adc_oneshot_chan_cfg_t c = { .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT };
+    if (adc_oneshot_config_channel(s_adc1, (adc_channel_t)ch, &c) != ESP_OK) return -1;
+    s_adc1_configured |= 1u << ch;
+    return 0;
+}
 
 static void adc_setup(void) {
     adc_oneshot_unit_init_cfg_t u = { .unit_id = ADC_UNIT_1 };
     adc_oneshot_new_unit(&u, &s_adc1);
-    adc_oneshot_chan_cfg_t c = { .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT };
     /* 预配置通道0(GPIO1 on esp32s3),DATA:READ? 用它 */
-    adc_oneshot_config_channel(s_adc1, ADC_CHANNEL_0, &c);
+    (void)adc_channel(0);
 }
 
 /* ---------- SCPI 发送回调:走 glue 缓冲 IN 路径 ---------- */
@@ -90,11 +104,20 @@ static scpi_result_t cmd_gpio_get(scpi_t *ctx) {
     return SCPI_RES_OK;
 }
 
+/* ADC? [channel]: raw count from ADC1 `channel` (default 0). On the ESP32-S3,
+ * ADC1 channel n is GPIO n+1. */
 static scpi_result_t cmd_adc_read(scpi_t *ctx) {
     uint32_t ch = 0;
     (void)SCPI_ParamUInt32(ctx, &ch, FALSE);
+    if (adc_channel(ch) != 0) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
+        return SCPI_RES_ERR;
+    }
     int raw = 0;
-    adc_oneshot_read(s_adc1, (adc_channel_t)ch, &raw);
+    if (adc_oneshot_read(s_adc1, (adc_channel_t)ch, &raw) != ESP_OK) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
     SCPI_ResultUInt32(ctx, (uint32_t)raw);
     return SCPI_RES_OK;
 }
@@ -476,7 +499,7 @@ static const usbscpi_param_desc_t framing_params[] = {
         USBSCPI_PARAMS(gpio_set_params), "none")                                          \
     CMD("GPIO?",             cmd_gpio_get,   "query",   "Read a GPIO input level",        \
         USBSCPI_PARAMS(pin_params), "u32")                                                \
-    CMD("ADC?",              cmd_adc_read,   "query",   "Read the ADC",                   \
+    CMD("ADC?",              cmd_adc_read,   "query",   "Raw ADC1 count; channel n is GPIO n+1", \
         USBSCPI_PARAMS(adc_params), "u32")                                                \
     CMD("WLAN:SCAN:STARt",   cmd_wlan_start, "command", "Scan for Wi-Fi access points (USB only)", \
         USBSCPI_NO_PARAMS, "none")                                                        \

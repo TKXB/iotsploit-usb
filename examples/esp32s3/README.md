@@ -55,6 +55,11 @@ print(d.query('ADC:READ? 0'))
 print(d.query_binary_values('DATA:READ? 64', datatype='B'))
 ```
 
+`ADC? <channel>` reads any ADC1 channel, 0 to 9; on the ESP32-S3, channel `n`
+is GPIO `n+1`. A channel is configured (12 dB attenuation, about 0 to 3.1 V) the
+first time it is read. Any other channel number is refused with
+`-222,"Data out of range"`. The reply is the raw count.
+
 ## Wi-Fi / BLE Scan (USBTMC SCPI)
 
 Both scanners use the same async pattern: trigger, poll `:DONE?`, then fetch
