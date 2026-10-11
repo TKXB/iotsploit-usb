@@ -78,7 +78,10 @@ static void deadline_handler(void *arg) {
     (void)arg;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     if (s_deadline && esp_timer_get_time() >= s_deadline) {
-        disconnect_for(s_phase == STA_DHCP ? "DHCP_TIMEOUT" : "TIMEOUT");
+        const char *result = "TIMEOUT";
+        if (s_phase == STA_DHCP) result = "DHCP_TIMEOUT";
+        else if (s_result.reason == WIFI_REASON_NO_AP_FOUND) result = "AP_NOT_FOUND";
+        disconnect_for(result);
     }
     xSemaphoreGive(s_mutex);
 }
@@ -120,6 +123,17 @@ static void sta_event_handler(void *arg, esp_event_base_t base,
             begin_connect();
         } else if (s_phase == STA_CONNECTING || s_phase == STA_DHCP) {
             s_result.reason = e->reason;
+            if (s_phase == STA_CONNECTING && e->reason == WIFI_REASON_NO_AP_FOUND &&
+                esp_timer_get_time() < s_deadline) {
+                /* Retry this credential within its original association deadline. */
+                esp_err_t err = esp_wifi_connect();
+                if (err != ESP_OK) {
+                    s_result.reason = err;
+                    finish("ERROR");
+                }
+                xSemaphoreGive(s_mutex);
+                return;
+            }
             const char *result = "DISCONNECTED";
             if (e->reason == WIFI_REASON_NO_AP_FOUND) result = "AP_NOT_FOUND";
             else if (e->reason == WIFI_REASON_AUTH_EXPIRE ||

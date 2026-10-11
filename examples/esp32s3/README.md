@@ -85,7 +85,11 @@ represents `a"b`. Empty password supports an open AP through SCPI; the list UI
 ignores empty lines. Enterprise Wi-Fi credentials and 64-character raw PSKs
 are outside this interface.
 
-Association and DHCP each have a 15-second deadline. Results contain
+Association and DHCP each have a 15-second deadline. During association,
+`NO_AP_FOUND` retries the same credential within the original deadline.
+Retries do not reset that deadline or consume another host password. An AP
+that remains unavailable returns `AP_NOT_FOUND`, so the list pauses.
+Stop cancels an AP retry immediately. Results contain
 `result,ip,reason`: `AUTH_FAILED`, `TIMEOUT`, `AP_NOT_FOUND`, `DHCP_TIMEOUT`,
 `DISCONNECTED`, `ERROR`, `STOPPED`, or `CONNECTED`. `reason` preserves the
 ESP-IDF disconnect reason (or API error). An authentication/handshake failure
@@ -276,3 +280,18 @@ Firmware 1.2.1 was also tested with the AP control interface sending a
 deauthentication frame with reason 39 while the board awaited DHCP. The board
 returned `TIMEOUT,"",39`, preserving the reason and allowing the next
 credential attempt instead of pausing as a generic disconnect.
+
+Firmware 1.2.2 AP retry validation on the same board:
+
+- With the test AP initially off, the original credential remained running
+  after four seconds and connected after the AP was activated.
+- Stop during AP discovery retries completed in about 0.1 seconds.
+- An AP that stayed absent returned `AP_NOT_FOUND,"",201` after about
+  15.3 seconds, preserving the list pause behavior.
+- Wrong-password rejection, subsequent connection with DHCP and TCP SCPI,
+  cancellation followed by connection, and result clearing passed.
+
+After the Device Control GUI released its USB session, the real toolkit
+1,000-password check also passed: candidate 1 failed, candidate 2 connected,
+the remaining 998 were skipped, and Stop and USB disconnect completed.
+The test hotspot was removed and the original PC hotspot restored.
