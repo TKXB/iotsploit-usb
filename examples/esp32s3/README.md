@@ -89,7 +89,9 @@ Association and DHCP each have a 15-second deadline. Results contain
 `result,ip,reason`: `AUTH_FAILED`, `TIMEOUT`, `AP_NOT_FOUND`, `DHCP_TIMEOUT`,
 `DISCONNECTED`, `ERROR`, `STOPPED`, or `CONNECTED`. `reason` preserves the
 ESP-IDF disconnect reason (or API error). An authentication/handshake failure
-is an attempt result, not proof that the password is incorrect. A failed job
+is an attempt result, not proof that the password is incorrect. Driver
+authentication, association, and general timeout reasons (2, 4, 39) return
+`TIMEOUT`, preserving the original reason code so the host advances the list. A failed job
 queues the standard execution error once when `STATe?` is queried.
 
 The UI advances on `AUTH_FAILED` and `TIMEOUT`; other failures pause the run.
@@ -269,3 +271,8 @@ WPA2 AP on the host PC:
   connection passed; there is no indefinite background reconnect loop.
 
 The temporary AP was deleted and the host PC's original hotspot restored.
+
+Firmware 1.2.1 was also tested with the AP control interface sending a
+deauthentication frame with reason 39 while the board awaited DHCP. The board
+returned `TIMEOUT,"",39`, preserving the reason and allowing the next
+credential attempt instead of pausing as a generic disconnect.

@@ -122,6 +122,9 @@ static void sta_event_handler(void *arg, esp_event_base_t base,
             s_result.reason = e->reason;
             const char *result = "DISCONNECTED";
             if (e->reason == WIFI_REASON_NO_AP_FOUND) result = "AP_NOT_FOUND";
+            else if (e->reason == WIFI_REASON_AUTH_EXPIRE ||
+                     e->reason == WIFI_REASON_ASSOC_EXPIRE ||
+                     e->reason == WIFI_REASON_TIMEOUT) result = "TIMEOUT";
             else if (e->reason == WIFI_REASON_AUTH_FAIL ||
                      e->reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
                      e->reason == WIFI_REASON_HANDSHAKE_TIMEOUT) result = "AUTH_FAILED";
