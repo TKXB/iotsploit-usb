@@ -403,11 +403,28 @@ impl UsbtmcRaw {
 
 impl Transport for UsbtmcRaw {
     fn write_msg(&mut self, bytes: &[u8]) -> Result<()> {
-        self.send_msg_out(bytes)
+        let result = self.send_msg_out(bytes);
+        if result.is_err() {
+            self.clear_failed_exchange();
+        }
+        result
     }
 
     fn read_msg(&mut self, max_len: usize) -> Result<Vec<u8>> {
-        self.read_msg_in(max_len)
+        let result = self.read_msg_in(max_len);
+        if result.is_err() {
+            self.clear_failed_exchange();
+        }
+        result
+    }
+}
+
+impl UsbtmcRaw {
+    // Drop partial SCPI input and pending USB replies before another exchange.
+    // Preserve the original error if the device has gone away.
+    fn clear_failed_exchange(&self) {
+        let _ = self.interface.clear_halt(self.ep_out);
+        let _ = self.interface.clear_halt(self.ep_in);
     }
 }
 

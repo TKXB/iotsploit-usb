@@ -99,6 +99,14 @@ authentication, association, and general timeout reasons (2, 4, 39) return
 queues the standard execution error once when `STATe?` is queried.
 
 The UI advances on `AUTH_FAILED` and `TIMEOUT`; other failures pause the run.
+USB status reads and Stop retry up to three times with one-second gaps.
+An interrupted Start first confirms cancellation, then retries the same
+credential, also up to three times. Start and Stop execute with `*CLS` and
+`SYSTem:ERRor?` in one serialized SCPI exchange so another board view cannot
+interleave with command acknowledgement. The raw USB transport clears partial
+input and pending replies after a failed exchange before the caller retries.
+If recovery is exhausted, the UI pauses with the specific credential-safe
+failure instead of labeling every failure as a USB disconnection.
 Stop and closing the board session wait for cancellation before releasing USB.
 Cancellation waits for `WIFI_EVENT_STA_STOP` and restarts the station driver,
 so stopping before association also completes without leaking old events.
@@ -295,3 +303,15 @@ After the Device Control GUI released its USB session, the real toolkit
 1,000-password check also passed: candidate 1 failed, candidate 2 connected,
 the remaining 998 were skipped, and Stop and USB disconnect completed.
 The test hotspot was removed and the original PC hotspot restored.
+
+The hardware test also includes `100 real Wi-Fi connections with concurrent
+USB polling`. Select it with `--plain-name` to repeatedly connect, obtain
+DHCP, and disconnect while another caller reads identity/error status on the
+same session. It writes `/tmp/esp32-wifi-100-connections.json`. Set
+`IOTSPLOIT_RUST_LIB_PATH` to test a freshly built native library without
+replacing the GUI's loaded library.
+
+Validation on ESP32-S3 `34851841C6AC` with firmware `1.2.2` and a temporary
+PC WPA2 AP completed 100/100 connections with concurrent USB polling and zero
+USB errors. The temporary AP was removed and the original hotspot restored.
+Transient and exhausted USB retries were covered separately by UI tests.
