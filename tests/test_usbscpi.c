@@ -759,6 +759,47 @@ static void test_ring_buffer(void) {
     assert(usbscpi_ring_free(&ring) == 6);
 }
 
+static const char *expected_text[2];
+
+static scpi_result_t credential_text(scpi_t *ctx) {
+    for (size_t i = 0; i < 2; i++) {
+        const char *text;
+        size_t len;
+        if (!SCPI_ParamCharacters(ctx, &text, &len, TRUE)) return SCPI_RES_ERR;
+        assert(len == strlen(expected_text[i]));
+        assert(memcmp(text, expected_text[i], len) == 0);
+    }
+    SCPI_ResultBool(ctx, TRUE);
+    return SCPI_RES_OK;
+}
+
+static void test_credential_separators(void) {
+    static const scpi_command_t commands[] = {
+        { "TEXT?", credential_text, 0 }, SCPI_CMD_LIST_END
+    };
+    const char *inputs[] = {
+        "*CLS;:TEXT? \"lab;\"\"ap\",\"pass;word\";:SYST:ERR?\n",
+        "*CLS;:TEXT? 'lab;''ap','pass;word';:SYST:ERR?\n",
+        "*CLS;:TEXT? #213测试;网络,#216密码;\"test,123;:SYST:ERR?\n",
+    };
+    const char *ssids[] = { "lab;\"\"ap", "lab;''ap", "测试;网络" };
+    const char *passwords[] = { "pass;word", "pass;word", "密码;\"test,123" };
+    for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+        fixture_t f;
+        uint8_t storage[2048];
+        char line[128];
+        usbscpi_t *dev = make_device(&f, storage, sizeof(storage), line, sizeof(line));
+        assert(usbscpi_register(dev, commands) == USBSCPI_OK);
+        expected_text[0] = ssids[i];
+        expected_text[1] = passwords[i];
+        /* Split inside every quote, block header and UTF-8 character. */
+        for (size_t j = 0; j < strlen(inputs[i]); j++) {
+            assert(usbscpi_on_rx(dev, inputs[i] + j, 1, false) == USBSCPI_OK);
+        }
+        assert(strcmp(f.tx, "1\n0,\"No error\"\n") == 0);
+    }
+}
+
 int main(void) {
     test_idn_and_custom_command();
     test_param_parsing_and_arbitrary_block();
@@ -772,6 +813,7 @@ int main(void) {
     test_command_list_macro();
     test_workflow_macros_and_renames();
     test_queue_error_keeps_the_reply();
+    test_credential_separators();
     test_ring_buffer();
     puts("usbscpi tests passed");
     return 0;

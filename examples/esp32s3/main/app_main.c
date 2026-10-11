@@ -142,7 +142,7 @@ static scpi_result_t cmd_wlan_count(scpi_t *ctx) {
 
 static scpi_result_t cmd_wlan_get(scpi_t *ctx) {
     uint32_t idx = 0;
-    char buf[96];
+    char buf[128];
     if (SCPI_ParamUInt32(ctx, &idx, TRUE) != TRUE) return SCPI_RES_ERR;
     if (wifi_scan_get(idx, buf, sizeof(buf)) != 0) {
         SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
@@ -162,14 +162,40 @@ static bool wlan_usb_only(scpi_t *ctx) {
     return false;
 }
 
+/* Quoted ASCII or a length-delimited UTF-8 block; never truncate credentials. */
+static bool wlan_credential(scpi_t *ctx, char *out, size_t capacity, size_t *len) {
+    scpi_parameter_t param;
+    if (!SCPI_Parameter(ctx, &param, TRUE)) return false;
+    const char *text = param.ptr;
+    size_t size = param.len;
+    char quote = 0;
+    if (param.type == SCPI_TOKEN_SINGLE_QUOTE_PROGRAM_DATA ||
+        param.type == SCPI_TOKEN_DOUBLE_QUOTE_PROGRAM_DATA) {
+        quote = *text++;
+        size -= 2;
+    } else if (param.type != SCPI_TOKEN_ARBITRARY_BLOCK_PROGRAM_DATA) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_TYPE_ERROR);
+        return false;
+    }
+    *len = 0;
+    for (size_t i = 0; i < size; i++) {
+        if (*len + 1 >= capacity) {
+            SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
+            return false;
+        }
+        out[(*len)++] = text[i];
+        if (quote && text[i] == quote) i++;
+    }
+    out[*len] = 0;
+    return true;
+}
+
 static scpi_result_t cmd_wlan_connect_start(scpi_t *ctx) {
     if (!wlan_usb_only(ctx)) return SCPI_RES_ERR;
-    /* libscpi unescapes doubled quotes. Size for the encoded maximum too,
-     * then validate the decoded byte length instead of truncating it. */
-    char ssid[67], password[129];
+    char ssid[33], password[64];
     size_t ssid_len, password_len;
-    if (!SCPI_ParamCopyText(ctx, ssid, sizeof(ssid), &ssid_len, TRUE) ||
-        !SCPI_ParamCopyText(ctx, password, sizeof(password), &password_len, TRUE))
+    if (!wlan_credential(ctx, ssid, sizeof(ssid), &ssid_len) ||
+        !wlan_credential(ctx, password, sizeof(password), &password_len))
         return SCPI_RES_ERR;
     if (!ssid_len || ssid_len > 32 || password_len > 63 ||
         strlen(ssid) != ssid_len || strlen(password) != password_len ||

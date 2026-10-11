@@ -79,6 +79,15 @@ WLAN:CONNect:STOP               # cancel or disconnect; poll STATE? for IDLE
 WLAN:CONNect:CLEar              # clear an offline result
 ```
 
+Firmware 1.2.3 accepts quoted ASCII credentials (including semicolons and
+doubled quotes) and SCPI definite-length blocks containing UTF-8 bytes.
+For example, `WLAN:CONNect:STARt #213测试;网络,#216密码;"test,123`
+supplies a 13-byte SSID and a 16-byte password. The UI uses blocks for Unicode
+credentials. Update the board to 1.2.3 to use this fix.
+Survey results escape embedded quotes and preserve SSID whitespace when the
+UI selects an AP. The survey CSV buffer also covers a maximum-length SSID
+consisting entirely of quotes without truncating the remaining fields.
+
 `STARt` accepts an SSID of 1–32 UTF-8 bytes and a password of 0–63 bytes.
 Double quotes inside either value must be doubled; for example `"a""b"`
 represents `a"b`. Empty password supports an open AP through SCPI; the list UI
@@ -315,3 +324,19 @@ Validation on ESP32-S3 `34851841C6AC` with firmware `1.2.2` and a temporary
 PC WPA2 AP completed 100/100 connections with concurrent USB polling and zero
 USB errors. The temporary AP was removed and the original hotspot restored.
 Transient and exhausted USB retries were covered separately by UI tests.
+
+Firmware 1.2.3 validation also completed 100/100 connections with zero USB
+errors using an AP and password containing Unicode, semicolons, quotes and
+commas. A separate real UI run selected a surveyed SSID containing those
+characters and surrounding spaces, rejected candidate 1, connected with
+candidate 2 and skipped the remaining 998 entries. Stop and USB disconnect
+passed. Exact byte limits, maximum quote expansion, empty passwords, and
+invalid credential lengths were checked on the board. Both temporary test
+APs were removed and the original PC hotspot restored.
+
+On the user-provided AP `1902` (channel 11), the real UI completed all 100
+distinct synthetic password candidates: 99 `AUTH_FAILED` results and one
+`TIMEOUT`, which advanced normally. There were zero USB errors, parser
+refusals or unexpected pauses. No candidate matched. The list exhausted,
+Stop completed and USB closed cleanly. Results are recorded in
+`/tmp/esp32-1902-100-passwords.json`.

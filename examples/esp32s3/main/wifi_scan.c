@@ -322,9 +322,16 @@ int wifi_scan_get(size_t index, char *out, size_t out_len) {
     }
     const wifi_ap_record_t *ap = &s_aps[index];
     const uint8_t *b = ap->bssid;
-    snprintf(out, out_len,
+    char ssid[65];
+    size_t len = 0;
+    for (size_t i = 0; i < sizeof(ap->ssid) - 1 && ap->ssid[i]; i++) {
+        ssid[len++] = (char)ap->ssid[i];
+        if (ap->ssid[i] == '"') ssid[len++] = '"';
+    }
+    ssid[len] = 0;
+    int written = snprintf(out, out_len,
              "\"%s\",%d,%u,%u,%02X:%02X:%02X:%02X:%02X:%02X",
-             (const char *)ap->ssid, ap->rssi, ap->primary, ap->authmode,
+             ssid, ap->rssi, ap->primary, ap->authmode,
              b[0], b[1], b[2], b[3], b[4], b[5]);
-    return 0;
+    return written < 0 || (size_t)written >= out_len ? -1 : 0;
 }

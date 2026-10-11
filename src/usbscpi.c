@@ -453,6 +453,31 @@ static int execute_pending_line(usbscpi_t *ctx) {
     return rc;
 }
 
+/* A semicolon is a separator only outside quoted strings and inline blocks.
+ * Inspect the retained line so this also works across receive boundaries. */
+static int line_separator(const char *line, size_t len) {
+    char quote = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = line[i];
+        if (quote) {
+            if (c == quote) quote = 0;
+        } else if (c == '\'' || c == '"') {
+            quote = c;
+        } else if (c == '#' && i + 1 < len && line[i + 1] >= '1' && line[i + 1] <= '9') {
+            size_t digits = (size_t)(line[++i] - '0'), bytes = 0;
+            if (digits > len - i - 1) return 0;
+            for (size_t d = 0; d < digits; d++) {
+                char digit = line[++i];
+                if (digit < '0' || digit > '9') return 1;
+                bytes = bytes * 10 + (size_t)(digit - '0');
+            }
+            if (bytes > len - i - 1) return 0;
+            i += bytes;
+        }
+    }
+    return quote == 0;
+}
+
 static int block_begin(usbscpi_t *ctx) {
     if (ctx->block_started) return USBSCPI_OK;
     if (ctx->cfg.max_block_len && ctx->block_len > ctx->cfg.max_block_len) {
@@ -565,7 +590,7 @@ int usbscpi_on_rx(usbscpi_t *ctx, const void *data, size_t len, bool eom) {
             if (c == '\r' || c == '\0') {   /* ignore CR and stray NULs */
                 break;
             }
-            if (c == '\n' || c == ';') {
+            if (c == '\n' || (c == ';' && line_separator(ctx->cfg.line_buf, ctx->line_len))) {
                 ctx->cfg.line_buf[ctx->line_len++] = '\n';
                 status = feed_line(ctx);
                 ctx->line_len = 0;
