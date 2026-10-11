@@ -1,7 +1,5 @@
 #include "net_scpi.h"
 
-#include <string.h>
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -20,8 +18,8 @@ static const char *TAG = "netscpi";
 
 /* Storage for the TCP context. Separate from the USB context's buffers by
  * necessity, not by preference — see net_scpi.h. */
-static uint8_t s_net_storage[2048];
-static char    s_net_line[256];
+static uint8_t s_net_storage[4096];
+static char    s_net_line[512];
 /* 8 KiB, not 4: SYSTem:HELP:DESCription? is emitted whole into this buffer and
  * fails outright when it does not fit — emit_descriptor() returns 0 and the
  * handler pushes TOO_MUCH_DATA, so a descriptor one byte too large costs the
@@ -32,9 +30,6 @@ static uint8_t s_net_io[8192];
 static usbscpi_config_t     s_net_cfg;
 static usbscpi_t           *s_net_dev;
 static const scpi_command_t *s_net_commands;
-
-static char s_ssid[33];
-static char s_pass[65];
 
 static void net_stream_task(void *arg) {
     (void)arg;
@@ -54,12 +49,6 @@ static void net_scpi_task(void *arg) {
      * wait for it rather than racing it. */
     while (!wifi_scan_ready()) {
         vTaskDelay(pdMS_TO_TICKS(100));
-    }
-
-    if (wifi_sta_connect(s_ssid, s_pass) != 0) {
-        ESP_LOGE(TAG, "sta connect request failed; not starting listener");
-        vTaskDelete(NULL);
-        return;
     }
 
     char ip[16] = {0};
@@ -83,15 +72,11 @@ static void net_scpi_task(void *arg) {
 }
 
 int net_scpi_start(const usbscpi_config_t *tmpl,
-                   const scpi_command_t *commands,
-                   const char *ssid,
-                   const char *password) {
-    if (!tmpl || !ssid) {
+                   const scpi_command_t *commands) {
+    if (!tmpl) {
         return -1;
     }
 
-    snprintf(s_ssid, sizeof(s_ssid), "%s", ssid);
-    snprintf(s_pass, sizeof(s_pass), "%s", password ? password : "");
     s_net_commands = commands;
 
     /* Everything device-specific comes from the USB context's config; only the

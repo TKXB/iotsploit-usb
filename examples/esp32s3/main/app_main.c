@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "freertos/stream_buffer.h"
 #include "esp_log.h"
+#include "esp_app_desc.h"
 #include "esp_mac.h"
 #include "esp_private/usb_phy.h"     /* usb_new_phy */
 #include "driver/gpio.h"
@@ -23,19 +24,10 @@
 
 static const char *TAG = "scpi";
 
-/* Wi-Fi credentials for the SCPI-over-TCP transport. Stage 5 of
- * docs/scpi-over-tcp-plan.md replaces these with NVS-backed provisioning over
- * USBTMC; until then they are compile-time so the board can be tested. */
-#ifndef NET_SCPI_SSID
-#define NET_SCPI_SSID "My Hotspot"
-#endif
-#ifndef NET_SCPI_PASS
-#define NET_SCPI_PASS "great password"
-#endif
-
 /* ---------- 静态缓冲(等价 pico2,避免动态分配) ---------- */
-static uint8_t s_storage[2048];
-static char    s_line[96];
+static uint8_t s_storage[4096];
+static char    s_line[512];
+static usbscpi_t *s_usb_dev;
 /* See the note in net_scpi.c: the descriptor is all-or-nothing, so this is
  * sized for it rather than for the largest data read. */
 static uint8_t s_io[8192];
@@ -157,6 +149,93 @@ static scpi_result_t cmd_wlan_get(scpi_t *ctx) {
         return SCPI_RES_ERR;
     }
     SCPI_ResultCharacters(ctx, buf, strlen(buf));   /* 裸 CSV,不要 ResultText(会加引号) */
+    return SCPI_RES_OK;
+}
+
+/* Wi-Fi provisioning changes the interface that carries TCP SCPI. Only the
+ * independent USB context may start, stop or clear an association job. */
+static bool s_wlan_conn_failure_reported;
+
+static bool wlan_usb_only(scpi_t *ctx) {
+    if (ctx->user_context == s_usb_dev) return true;
+    SCPI_ErrorPush(ctx, SCPI_ERROR_SETTINGS_CONFLICT);
+    return false;
+}
+
+static scpi_result_t cmd_wlan_connect_start(scpi_t *ctx) {
+    if (!wlan_usb_only(ctx)) return SCPI_RES_ERR;
+    /* libscpi unescapes doubled quotes. Size for the encoded maximum too,
+     * then validate the decoded byte length instead of truncating it. */
+    char ssid[67], password[129];
+    size_t ssid_len, password_len;
+    if (!SCPI_ParamCopyText(ctx, ssid, sizeof(ssid), &ssid_len, TRUE) ||
+        !SCPI_ParamCopyText(ctx, password, sizeof(password), &password_len, TRUE))
+        return SCPI_RES_ERR;
+    if (!ssid_len || ssid_len > 32 || password_len > 63 ||
+        strlen(ssid) != ssid_len || strlen(password) != password_len ||
+        strpbrk(ssid, "\r\n") || strpbrk(password, "\r\n")) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
+        return SCPI_RES_ERR;
+    }
+    int rc = wifi_sta_connect(ssid, password);
+    memset(password, 0, sizeof(password));
+    if (rc != 0) {
+        SCPI_ErrorPush(ctx, rc == -2 ? SCPI_ERROR_SETTINGS_CONFLICT : SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    s_wlan_conn_failure_reported = false;
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_wlan_connect_stop(scpi_t *ctx) {
+    if (!wlan_usb_only(ctx)) return SCPI_RES_ERR;
+    if (wifi_sta_stop() != 0) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_wlan_connect_clear(scpi_t *ctx) {
+    if (!wlan_usb_only(ctx)) return SCPI_RES_ERR;
+    if (wifi_sta_clear() != 0) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_SETTINGS_CONFLICT);
+        return SCPI_RES_ERR;
+    }
+    s_wlan_conn_failure_reported = false;
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_wlan_connect_state(scpi_t *ctx) {
+    wifi_sta_result_t result;
+    wifi_sta_result(&result);
+    if (strcmp(result.state, "FAILED") == 0 && !s_wlan_conn_failure_reported) {
+        s_wlan_conn_failure_reported = true;
+        usbscpi_queue_error(ctx, SCPI_ERROR_EXECUTION_ERROR);
+    }
+    SCPI_ResultMnemonic(ctx, result.state);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_wlan_connect_count(scpi_t *ctx) {
+    wifi_sta_result_t result;
+    wifi_sta_result(&result);
+    SCPI_ResultUInt32(ctx, strcmp(result.result, "NONE") != 0);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_wlan_connect_fetch(scpi_t *ctx) {
+    uint32_t index;
+    if (!SCPI_ParamUInt32(ctx, &index, TRUE)) return SCPI_RES_ERR;
+    wifi_sta_result_t result;
+    wifi_sta_result(&result);
+    if (index || strcmp(result.result, "NONE") == 0) {
+        SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
+        return SCPI_RES_ERR;
+    }
+    SCPI_ResultMnemonic(ctx, result.result);
+    SCPI_ResultText(ctx, result.ip);
+    SCPI_ResultInt32(ctx, result.reason);
     return SCPI_RES_OK;
 }
 
@@ -448,6 +527,13 @@ static const usbscpi_param_desc_t pin_params[] = {
 static const usbscpi_param_desc_t adc_params[] = {
     USBSCPI_PARAM("channel", "u32", false),
 };
+static const usbscpi_param_desc_t wlan_connect_params[] = {
+    USBSCPI_PARAM("ssid", "string", true),
+    USBSCPI_PARAM("password", "string", true),
+};
+static const usbscpi_param_desc_t wlan_connect_fetch_params[] = {
+    USBSCPI_PARAM_PICK("index", "WLAN:CONNect:COUNt?", "WLAN:CONNect:FETCh?"),
+};
 static const usbscpi_param_desc_t ble_scan_params[] = {
     USBSCPI_PARAM("duration", "u32", false),
 };
@@ -509,6 +595,18 @@ static const usbscpi_param_desc_t framing_params[] = {
         USBSCPI_NO_PARAMS, "u32")                                                         \
     CMD("WLAN:SCAN:FETCh?",  cmd_wlan_get,   "query",   "Access point by index",          \
         USBSCPI_PARAMS(wlan_fetch_params), "string")                                      \
+    CMD("WLAN:CONNect:STARt", cmd_wlan_connect_start, "command", "Try one SSID/password (USB only)", \
+        USBSCPI_PARAMS(wlan_connect_params), "none")                                       \
+    CMD("WLAN:CONNect:STOP", cmd_wlan_connect_stop, "command", "Cancel or disconnect (USB only)", \
+        USBSCPI_NO_PARAMS, "none")                                                        \
+    CMD("WLAN:CONNect:STATe?", cmd_wlan_connect_state, "query", "IDLE, RUNNING, DONE or FAILED", \
+        USBSCPI_NO_PARAMS, "string")                                                      \
+    CMD("WLAN:CONNect:COUNt?", cmd_wlan_connect_count, "query", "Completed attempt results", \
+        USBSCPI_NO_PARAMS, "u32")                                                         \
+    CMD("WLAN:CONNect:FETCh?", cmd_wlan_connect_fetch, "query", "result,ip,reason; index 0", \
+        USBSCPI_PARAMS(wlan_connect_fetch_params), "string")                               \
+    CMD("WLAN:CONNect:CLEar", cmd_wlan_connect_clear, "command", "Clear an offline result (USB only)", \
+        USBSCPI_NO_PARAMS, "none")                                                        \
     CMD("BLE:SCAN:STARt",    cmd_ble_start,  "command", "Scan for BLE devices for N seconds (default 5)", \
         USBSCPI_PARAMS(ble_scan_params), "none")                                          \
     CMD("BLE:SCAN:STATe?",   cmd_ble_state,  "query",   "IDLE, RUNNING or DONE",          \
@@ -562,6 +660,8 @@ static const usbscpi_prompt_desc_t connect_prompts[] = {
 static const char *const connect_old_names[] = { "ble-connect-pair" };
 
 static const usbscpi_workflow_desc_t esp_workflows[] = {
+    { USBSCPI_WF_ACQUIRE("wifi-connect", "WLAN:CONNect", "Try one Wi-Fi credential over USB",
+                         "result:string,ip:string,reason:i32", 35000) },
     { USBSCPI_WF_ACQUIRE("wifi-scan", "WLAN:SCAN", "Scan for Wi-Fi access points",
                          "ssid:string,rssi:i32:dbm,channel:u32,authmode:string,bssid:mac",
                          15000) },
@@ -870,7 +970,7 @@ void app_main(void) {
 
     /* *IDN? carries the same chip-unique serial as the USB descriptor. */
     static char idn[64];
-    snprintf(idn, sizeof(idn), "IoTSploit,ESP32S3,%s,0.1.0", board_serial());
+    snprintf(idn, sizeof(idn), "IoTSploit,ESP32S3,%s,%s", board_serial(), esp_app_get_description()->version);
 
     usbscpi_config_t cfg = {
         .usb_tx        = usb_tx,
@@ -890,12 +990,14 @@ void app_main(void) {
     };
 
     usbscpi_t *dev = usbscpi_init(s_storage, sizeof(s_storage), &cfg);
+    ESP_ERROR_CHECK(dev ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(usbscpi_register(dev, esp_scpi_commands));
+    s_usb_dev = dev;
     usbscpi_tinyusb_bind(dev);          /* glue 接管 IN/OUT 路径 */
-    usbscpi_register(dev, esp_scpi_commands);
 
     /* Second context for SCPI over TCP: same commands and descriptor, its own
      * buffers and its own usb_tx. See net_scpi.h for why it cannot be shared. */
-    net_scpi_start(&cfg, esp_scpi_commands, NET_SCPI_SSID, NET_SCPI_PASS);
+    net_scpi_start(&cfg, esp_scpi_commands);
 
     xTaskCreate(usb_task, "usb", 6144, dev, 5, NULL);
     /* USB 起来后再异步初始化无线,避免阻塞枚举 */

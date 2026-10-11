@@ -27,13 +27,20 @@ size_t wifi_scan_count(void);
 
 /* ---- STA association (used by the SCPI-over-TCP transport) ---- */
 
-/* Associate with `ssid`/`password` and keep retrying on disconnect.
- * Non-blocking: use wifi_sta_ip() to learn when an address has been assigned.
- * Returns 0 if the request was accepted. */
-int wifi_sta_connect(const char *ssid, const char *password);
+typedef struct {
+    const char *state;   /* IDLE, RUNNING, DONE, FAILED */
+    const char *result;  /* CONNECTED, AUTH_FAILED, AP_NOT_FOUND, TIMEOUT,
+                         * DHCP_TIMEOUT, DISCONNECTED, STOPPED, ERROR, NONE */
+    char ip[16];
+    int reason;
+} wifi_sta_result_t;
 
-/* 1 once the station holds an IPv4 lease, else 0. */
-int wifi_sta_has_ip(void);
+/* One bounded asynchronous attempt. -2 means scan/association is busy.
+ * Credentials stay in RAM. SSID: 1..32 bytes; password: 0..63 bytes. */
+int wifi_sta_connect(const char *ssid, const char *password);
+int wifi_sta_stop(void);
+int wifi_sta_clear(void);
+void wifi_sta_result(wifi_sta_result_t *out);
 
 /* Copy the station's dotted-quad address into out. Returns 0 on success, -1 if
  * there is no lease yet. */

@@ -60,6 +60,61 @@ is GPIO `n+1`. A channel is configured (12 dB attenuation, about 0 to 3.1 V) the
 first time it is read. Any other channel number is refused with
 `-222,"Data out of range"`. The reply is the raw count.
 
+## Wi-Fi connection (USB provisioning)
+
+The Radio Bench's **Wi-Fi → Connect to AP** view imports a UTF-8 `.txt`
+password list or accepts pasted passwords, one per line. The UI retains the
+list and sends one candidate at a time. Order, duplicates and password spaces
+are preserved; empty lines are ignored. Thousands of candidates do not consume
+firmware list storage. Keep the UI open and USB attached while the list runs.
+
+Each credential is an asynchronous job:
+
+```text
+WLAN:CONNect:STARt "Lab-Router","candidate-password"
+WLAN:CONNect:STATe?             -> RUNNING, then DONE or FAILED
+WLAN:CONNect:COUNt?             -> 1 after completion
+WLAN:CONNect:FETCh? 0           -> CONNECTED,"192.168.1.57",0
+WLAN:CONNect:STOP               # cancel or disconnect; poll STATE? for IDLE
+WLAN:CONNect:CLEar              # clear an offline result
+```
+
+`STARt` accepts an SSID of 1–32 UTF-8 bytes and a password of 0–63 bytes.
+Double quotes inside either value must be doubled; for example `"a""b"`
+represents `a"b`. Empty password supports an open AP through SCPI; the list UI
+ignores empty lines. Enterprise Wi-Fi credentials and 64-character raw PSKs
+are outside this interface.
+
+Association and DHCP each have a 15-second deadline. Results contain
+`result,ip,reason`: `AUTH_FAILED`, `TIMEOUT`, `AP_NOT_FOUND`, `DHCP_TIMEOUT`,
+`DISCONNECTED`, `ERROR`, `STOPPED`, or `CONNECTED`. `reason` preserves the
+ESP-IDF disconnect reason (or API error). An authentication/handshake failure
+is an attempt result, not proof that the password is incorrect. A failed job
+queues the standard execution error once when `STATe?` is queried.
+
+The UI advances on `AUTH_FAILED` and `TIMEOUT`; other failures pause the run.
+Stop and closing the board session wait for cancellation before releasing USB.
+Cancellation waits for `WIFI_EVENT_STA_STOP` and restarts the station driver,
+so stopping before association also completes without leaking old events.
+On a new run, the UI cancels any attempt left by an earlier session before
+sending its first candidate. It does not automatically resume after USB loss.
+After success the board keeps the connection and reuses the successful
+credential for one bounded reconnect if the link drops.
+
+Credentials use Wi-Fi RAM storage and are not persisted to NVS. There are no
+build-time credentials or automatic boot association. TCP SCPI (5025) and the
+BLE stream listener (5026) start after USB provisioning obtains an IPv4 lease.
+Mutating Wi-Fi connection commands are USB-only; queries also work over TCP.
+Scanning and association attempts are serialized by the Wi-Fi owner.
+
+To bundle a built image for the UI's Firmware Manager:
+
+```bash
+# From the ui repository root:
+python3 tools/release/bundle-esp32s3.py third_party/iotsploit-usb/examples/esp32s3/build
+python3 tools/release/bundle-esp32s3.py third_party/iotsploit-usb/examples/esp32s3/build --check
+```
+
 ## Wi-Fi / BLE Scan (USBTMC SCPI)
 
 Both scanners use the same async pattern: trigger, poll `:DONE?`, then fetch
@@ -183,3 +238,34 @@ A successful numeric-comparison pairing yields, for example:
 BLE:SEC? -> D8:3A:DD:E4:7A:98,4,1,1,1,16
             <mac>,level=4(LE SC auth),enc=1,auth=1,bonded=1,key=16B
 ```
+
+### Hardware validation
+
+With the bundled firmware flashed and a test AP running, the toolkit hardware
+check uses the real Rust USB transport and a 1,000-entry list. Supply
+`IOTSPLOIT_TEST_SERIAL`, `IOTSPLOIT_WIFI_SSID`, and `IOTSPLOIT_WIFI_PASSWORD`,
+then run from `ui/`:
+
+```bash
+fvm flutter test --no-pub test/hardware/esp32_wifi_connection_hardware_test.dart --tags hardware
+```
+
+The check rejects the first credential, connects with the second, leaves the
+remaining 998 untried, and verifies Stop and USB disconnect. It requires the
+local debug `librust_lib_admin.so` bundle. Without the explicit environment
+variables it is skipped.
+
+Validated on ESP32-S3 `34851841C6AC` with firmware 1.2.0 using a temporary
+WPA2 AP on the host PC:
+
+- Wrong password returned `AUTH_FAILED`; correct password obtained DHCP and
+  answered TCP SCPI on port 5025.
+- Immediate Stop, established Stop, and connecting after cancellation passed.
+- A missing AP returned `AP_NOT_FOUND`; an AP without DHCP returned
+  `DHCP_TIMEOUT` after about 15 seconds. A subsequent connection passed.
+- The real toolkit accepted 1,000 candidates, connected at candidate 2, skipped
+  the remaining 998, and closed the USB session after Stop.
+- AP restart ended the bounded reconnect without cycling candidates. A fresh
+  connection passed; there is no indefinite background reconnect loop.
+
+The temporary AP was deleted and the host PC's original hotspot restored.

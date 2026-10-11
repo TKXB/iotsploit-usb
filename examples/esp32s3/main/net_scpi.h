@@ -20,13 +20,11 @@ extern "C" {
  * data_read, max_block_len — and is copied. The transport-specific fields
  * (usb_tx, line_buf, io_buf, mtu) are overridden with this module's own.
  *
- * Association is retried automatically, and the listener starts once the
- * station holds a lease. Returns 0 if the task was created.
+ * The Wi-Fi owner selects credentials through USB SCPI. The listener starts
+ * once the station holds a lease. Returns 0 if the task was created.
  */
 int net_scpi_start(const usbscpi_config_t *tmpl,
-                   const scpi_command_t *commands,
-                   const char *ssid,
-                   const char *password);
+                   const scpi_command_t *commands);
 
 #ifdef __cplusplus
 }

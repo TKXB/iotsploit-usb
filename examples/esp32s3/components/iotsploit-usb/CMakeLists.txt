@@ -24,3 +24,8 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC SCPI_USER_CONFIG=1)
 # fail silently while TCP (which sends inline, unbuffered) kept working. The
 # ESP32-S3 has the RAM; small MCUs keep the smaller default.
 target_compile_definitions(${COMPONENT_LIB} PUBLIC USBSCPI_TINYUSB_TX_BUF_SIZE=8192u)
+
+# Escaped SSID/password pairs can exceed 128 bytes. Keep all 62 core/board
+# commands, including legacy aliases, and leave room for the END sentinel.
+target_compile_definitions(${COMPONENT_LIB} PUBLIC
+    USBSCPI_INPUT_BUF_LEN=512u USBSCPI_MAX_CMDS=64u)
