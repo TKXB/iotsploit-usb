@@ -15,6 +15,8 @@ an example.
 | Lock-free SPSC ring | `helpers/ring_buffer.c` |
 | USBTMC over TinyUSB | `glue/usbscpi_tinyusb.c` |
 | SCPI over BSD sockets (glibc, lwIP, Winsock) | `glue/usbscpi_socket.c` |
+| SCPI over a BLE GATT peripheral (ESP-IDF NimBLE) | `glue/usbscpi_nimble.c` |
+| Wi-Fi scan/association and the `WLAN:*` jobs (ESP32) | `examples/components/wlan/` |
 | Payload-agnostic record stream | `glue/usbscpi_stream.c` |
 | Board init, clocks, pins, radio, USB descriptors | `examples/<board>/` |
 | Protocol-specific producers (for example CAN) | `examples/<consumer>/` |

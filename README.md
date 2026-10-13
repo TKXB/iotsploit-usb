@@ -25,8 +25,11 @@ third_party/libscpi/            vendored libscpi v2.3
 helpers/ring_buffer.c           optional ring helper
 glue/usbscpi_tinyusb.c          optional TinyUSB USBTMC adapter
 glue/usbscpi_socket.c           optional BSD-socket adapter (glibc / lwIP / Winsock)
+glue/usbscpi_nimble.c           optional BLE GATT adapter (ESP-IDF NimBLE)
 examples/pico2/                 Raspberry Pi Pico (RP2040) TinyUSB demo
 examples/esp32s3/               ESP32-S3 (ESP-IDF + TinyUSB) demo, hardware-verified
+examples/esp32s3-ble-wifi/      ESP32-S3 Wi-Fi scan/connect, controlled over BLE
+examples/components/wlan/       WLAN:* jobs shared by the ESP32-S3 examples
 examples/daemon/                SCPI-over-TCP daemon for Linux and Windows
 host/rust/                     generic Rust CLI host (cross-platform)
 tests/test_usbscpi.c            host unit tests

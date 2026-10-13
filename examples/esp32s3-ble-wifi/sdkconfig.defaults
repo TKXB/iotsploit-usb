@@ -1,0 +1,21 @@
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+# Default log level: 3 = INFO (wifi / scpi.ble visible on the UART console)
+CONFIG_LOG_DEFAULT_LEVEL=3
+
+# ---- BLE (NimBLE peripheral carrying SCPI) ----
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+# Pairing/encryption with LE Secure Connections; bonds (LTKs) persist in NVS
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
+CONFIG_BT_NIMBLE_SM_SC=y
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# Fewer, larger notifications for long replies such as SYSTem:HELP:DESCription?
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
+
+# ---- Wi-Fi and BLE share the 2.4 GHz radio ----
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# ---- Wi-Fi + NimBLE: single-app large partition table ----
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
