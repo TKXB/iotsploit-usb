@@ -2,7 +2,7 @@
 name = "iotsploit-host"
 version = "0.1.0"
 edition = "2021"
-description = "Generic SCPI host for iotsploit-usb devices (USBTMC and TCP)"
+description = "Generic SCPI host for iotsploit-usb devices (USBTMC, TCP and BLE)"
 license = "MIT"
 
 [lib]
@@ -23,6 +23,10 @@ tcp = []
 # (no libusb C dependency); `futures-lite` bridges its async transfers to the
 # blocking Transport trait, and `async-io` provides the transfer timeout timer.
 raw-usb = ["nusb", "futures-lite", "async-io"]
+# SCPI over a BLE GATT link (Windows, macOS, Linux/BlueZ) to boards running
+# glue/usbscpi_nimble.c. btleplug is async; a small tokio runtime drives it
+# behind the blocking Transport trait. Linux builds need libdbus-1-dev.
+ble = ["btleplug", "tokio", "futures", "uuid"]
 
 # No serde, no toml, no serde_json — the host crate stays dependency-light.
 # Profile/descriptor/workflow modules parse line-record text with std only.
@@ -31,6 +35,10 @@ raw-usb = ["nusb", "futures-lite", "async-io"]
 nusb = { version = "0.1", optional = true }
 futures-lite = { version = "2", optional = true }
 async-io = { version = "2", optional = true }
+btleplug = { version = "0.13", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"], optional = true }
+futures = { version = "0.3", optional = true }
+uuid = { version = "1", optional = true }
 
 [profile.release]
 opt-level = 2

@@ -6,12 +6,14 @@
 //! usbtmc:0  or /dev/usbtmc0      Linux kernel USBTMC node
 //! usb:1209:0001[/SERIAL]         raw USB by VID:PID (hex), optionally serial
 //! tcp://host[:port]              raw SCPI over TCP (default port 5025)
+//! ble://<name|id>                SCPI over BLE GATT, by advertised name or id
 //! ```
 //!
 //! [`list`] returns every USB device it can find, kernel nodes first. A device
 //! bound to the kernel `usbtmc` driver appears once, as its kernel node: the
 //! raw backend would detach that driver just to read `*IDN?`. TCP devices
-//! cannot be discovered and are only reachable by naming them.
+//! cannot be discovered and are only reachable by naming them; BLE boards are
+//! found by `ble::scan` (the `ble` feature).
 
 use std::path::PathBuf;
 
@@ -27,6 +29,8 @@ pub enum Address {
     UsbBus { bus: u8, addr: u8, label: String },
     /// Raw SCPI over TCP, `host:port`.
     Tcp(String),
+    /// SCPI over BLE GATT: the board's advertised name or platform id.
+    Ble(String),
 }
 
 impl std::fmt::Display for Address {
@@ -43,6 +47,7 @@ impl std::fmt::Display for Address {
             Address::Usb { vid, pid, serial: None } => write!(f, "usb:{vid:04x}:{pid:04x}"),
             Address::UsbBus { label, .. } => write!(f, "{label}"),
             Address::Tcp(hp) => write!(f, "tcp://{hp}"),
+            Address::Ble(t) => write!(f, "ble://{t}"),
         }
     }
 }
@@ -55,6 +60,12 @@ pub fn parse(spec: &str) -> Result<Address, String> {
         }
         let hp = if rest.contains(':') { rest.to_string() } else { format!("{rest}:5025") };
         return Ok(Address::Tcp(hp));
+    }
+    if let Some(target) = spec.strip_prefix("ble://") {
+        if target.is_empty() {
+            return Err("expected ble://<name|id>".into());
+        }
+        return Ok(Address::Ble(target.to_string()));
     }
     if let Some(n) = spec.strip_prefix("usbtmc:") {
         if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
@@ -80,7 +91,7 @@ pub fn parse(spec: &str) -> Result<Address, String> {
     }
     Err(format!(
         "unknown device `{spec}`; use a number from `devices`, usbtmc:N, \
-         usb:<vid>:<pid>[/<serial>] or tcp://<host>[:<port>]"
+         usb:<vid>:<pid>[/<serial>], tcp://<host>[:<port>] or ble://<name|id>"
     ))
 }
 
@@ -165,6 +176,8 @@ mod tests {
         assert_eq!(parse("/dev/usbtmc0").unwrap(), Address::Kernel("/dev/usbtmc0".into()));
         assert_eq!(parse("tcp://10.0.0.5").unwrap(), Address::Tcp("10.0.0.5:5025".into()));
         assert_eq!(parse("tcp://h:6000").unwrap(), Address::Tcp("h:6000".into()));
+        assert_eq!(parse("ble://iotsploit-wifi").unwrap(), Address::Ble("iotsploit-wifi".into()));
+        assert_eq!(parse("ble://E8:06:90:A1:3C:52").unwrap(), Address::Ble("E8:06:90:A1:3C:52".into()));
         assert_eq!(
             parse("usb:1209:0001/A1B2").unwrap(),
             Address::Usb { vid: 0x1209, pid: 1, serial: Some("A1B2".into()) }
@@ -177,12 +190,13 @@ mod tests {
         assert!(parse("usbtmc:x").is_err());
         assert!(parse("usb:1209").is_err());
         assert!(parse("tcp://").is_err());
+        assert!(parse("ble://").is_err());
         assert!(parse("serial0").is_err());
     }
 
     #[test]
     fn displays_in_the_syntax_it_parses() {
-        for s in ["usbtmc:3", "usb:1209:0001/SN", "usb:1209:0001", "tcp://h:5025"] {
+        for s in ["usbtmc:3", "usb:1209:0001/SN", "usb:1209:0001", "tcp://h:5025", "ble://iotsploit-wifi"] {
             assert_eq!(parse(s).unwrap().to_string(), s);
         }
     }

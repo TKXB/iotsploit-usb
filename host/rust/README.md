@@ -1,8 +1,8 @@
 # iotsploit-host (Rust)
 
 A command-line tool that lets you control any **`iotsploit-usb`** device from
-your PC, over USB or the network. The device speaks **SCPI** (over USBTMC or raw
-TCP on port 5025) and describes its own commands and workflows, so you do not
+your PC, over USB, the network or BLE. The device speaks **SCPI** (over USBTMC,
+raw TCP on port 5025, or a BLE GATT link) and describes its own commands and workflows, so you do not
 need any board-specific code on the PC: one binary controls every board.
 
 ```sh
@@ -93,7 +93,9 @@ cargo build --release
 The binary is at `target/release/iotsploit-host`. The default build (Linux
 kernel USBTMC plus TCP) has **zero external dependencies**. The `raw-usb` feature adds `nusb`
 (pure Rust — no libusb C library to install) plus `futures-lite`/`async-io`;
-it is needed on Windows/macOS and optional on Linux.
+it is needed on Windows/macOS and optional on Linux. The `ble` feature adds
+`btleplug` and a small tokio runtime for SCPI over BLE; on Linux it talks to
+BlueZ over D-Bus, so building it needs `libdbus-1-dev` (Debian/Ubuntu).
 
 **Platform-specific build:**
 
@@ -104,7 +106,10 @@ cargo build --release
 # Windows / macOS / Linux (raw USB backend via nusb)
 cargo build --release --features raw-usb
 
-# Linux with both backends (kernel + raw)
+# Any platform, plus BLE boards (esp32s3-ble-wifi)
+cargo build --release --features raw-usb,ble
+
+# Linux with every backend (kernel + raw + BLE; needs libdbus-1-dev)
 cargo build --release --all-features
 ```
 
@@ -201,9 +206,9 @@ iotsploit-host [-d <device>] <command> [args]
 
 | Option | Meaning |
 |---|---|
-| `-d, --device <dev>` | A number from `devices`, `usbtmc:N` (or `/dev/usbtmcN`), `usb:<vid>:<pid>[/<serial>]` (hex), or `tcp://<host>[:<port>]`. Default: `$IOTSPLOIT_DEVICE`, else the only connected USB device. |
+| `-d, --device <dev>` | A number from `devices`, `usbtmc:N` (or `/dev/usbtmcN`), `usb:<vid>:<pid>[/<serial>]` (hex), `tcp://<host>[:<port>]`, or `ble://<name|id>` (a BLE board's advertised name or the id `devices` prints). Default: `$IOTSPLOIT_DEVICE`, else the only connected USB device. |
 | `-o, --out <file>` | Save a binary reply to a file. |
-| `--timeout <ms>` | Read timeout for TCP and raw USB (default 5000). |
+| `--timeout <ms>` | Read timeout for TCP, BLE and raw USB (default 5000). Over BLE it also bounds each connect step: scan, connect, and pairing on first use. |
 
 Exit status: `0` ok, `1` the device reported an error, `2` usage error,
 `3` could not connect.
@@ -465,6 +470,26 @@ Homebrew libusb required):
 
 For distribution, the binary should be code-signed and notarized. This is a
 future packaging task; for development, running locally is fine.
+
+### BLE (`--features ble`)
+
+`ble://<name|id>` reaches a board running `glue/usbscpi_nimble.c`, such as
+`examples/esp32s3-ble-wifi`. `devices` lists the boards in range without
+connecting to them, because the first connection pairs.
+
+- **Pairing.** The board accepts commands only on an encrypted, bonded LE
+  Secure Connections link. There is no separate pair step: the operating system
+  pairs on the first connection (Just Works), and `connect` waits until the
+  board accepts a command. Remove the bond in the OS Bluetooth settings to pair
+  again.
+- **Linux.** BlueZ must be running, and the user needs access to the system
+  D-Bus Bluetooth interface (members of the `bluetooth` group usually have it).
+- **macOS.** The terminal or app needs Bluetooth permission (System Settings ->
+  Privacy & Security -> Bluetooth). Ids are per-machine UUIDs, not MAC
+  addresses, so prefer `ble://<name>` in scripts.
+- **Windows.** Windows 10 or later with a BLE adapter.
+- **Speed.** Replies arrive in notifications of ATT MTU - 3 bytes (20 to 244),
+  so a long `SYSTem:HELP:DESCription?` takes noticeably longer than over USB.
 
 ### Release artifact naming
 
