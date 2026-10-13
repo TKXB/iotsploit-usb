@@ -261,8 +261,10 @@ enum Backend {
     Raw(UsbtmcRaw),
     #[cfg(feature = "tcp")]
     Tcp(TcpTransport),
+    // Boxed: the BLE transport carries its own runtime and is several times
+    // the size of the others.
     #[cfg(feature = "ble")]
-    Ble(BleTransport),
+    Ble(Box<BleTransport>),
 }
 
 impl Transport for Backend {
@@ -318,7 +320,8 @@ fn open_target(target: &Target, timeout_ms: u64) -> iotsploit_host::Result<Backe
         }
         Target::Addr(Address::Ble(target)) => {
             #[cfg(feature = "ble")]
-            return BleTransport::connect(target, Duration::from_millis(timeout_ms)).map(Backend::Ble);
+            return BleTransport::connect(target, Duration::from_millis(timeout_ms))
+                .map(|t| Backend::Ble(Box::new(t)));
             #[cfg(not(feature = "ble"))]
             return Err(not_built("BLE", "ble"));
         }
