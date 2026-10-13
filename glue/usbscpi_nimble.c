@@ -54,6 +54,9 @@ static volatile uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 static volatile uint32_t s_session;
 static volatile bool     s_subscribed;
 static volatile bool     s_secure;     /* encrypted with an LE Secure Connections bond */
+static struct ble_npl_event s_security_event;
+static uint16_t s_security_conn;
+static uint32_t s_security_session;
 
 /* Worker only: the session whose bytes are being executed. */
 static uint32_t s_rx_session;
@@ -195,8 +198,7 @@ static void advertise(void) {
     }
 }
 
-/* True if this link's peer is bonded through LE Secure Connections. The bond
- * is stored before NimBLE reports the encryption change. */
+/* True if this link's peer has a persisted LE Secure Connections bond. */
 static bool bonded_with_sc(uint16_t conn, ble_addr_t *peer) {
     struct ble_gap_conn_desc desc;
     if (ble_gap_conn_find(conn, &desc) != 0) {
@@ -208,6 +210,25 @@ static bool bonded_with_sc(uint16_t conn, ble_addr_t *peer) {
     key.peer_addr = desc.peer_id_addr;
     struct ble_store_value_sec value;
     return desc.sec_state.encrypted && ble_store_read_peer_sec(&key, &value) == 0 && value.sc;
+}
+
+/* NimBLE persists a newly paired bond after returning from ENC_CHANGE.
+ * Check it on the host event queue once that processing has completed. */
+static void check_security(struct ble_npl_event *event) {
+    (void)event;
+    if (s_security_session != s_session || s_security_conn != s_conn) {
+        return;
+    }
+    ble_addr_t peer;
+    memset(&peer, 0, sizeof(peer));
+    if (bonded_with_sc(s_security_conn, &peer)) {
+        s_secure = true;
+        ESP_LOGI(TAG, "link secured");
+        return;
+    }
+    ESP_LOGW(TAG, "refusing link: not an LE Secure Connections bond");
+    (void)ble_store_util_delete_peer(&peer);
+    (void)ble_gap_terminate(s_security_conn, BLE_ERR_AUTH_FAIL);
 }
 
 static int gap_event(struct ble_gap_event *event, void *arg) {
@@ -239,18 +260,14 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
         return 0;
 
     case BLE_GAP_EVENT_ENC_CHANGE: {
-        ble_addr_t peer;
-        memset(&peer, 0, sizeof(peer));
-        if (event->enc_change.status == 0 && bonded_with_sc(event->enc_change.conn_handle, &peer)) {
-            s_secure = true;
-            ESP_LOGI(TAG, "link secured");
+        if (event->enc_change.status == 0) {
+            s_security_conn = event->enc_change.conn_handle;
+            s_security_session = s_session;
+            ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_security_event);
             return 0;
         }
         ESP_LOGW(TAG, "refusing link: status=%d, not an LE Secure Connections bond",
                  event->enc_change.status);
-        if (event->enc_change.status == 0) {
-            (void)ble_store_util_delete_peer(&peer);
-        }
         (void)ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_AUTH_FAIL);
         return 0;
     }
@@ -338,6 +355,7 @@ int usbscpi_nimble_start(usbscpi_t *ctx, const char *device_name) {
         return -1;
     }
     ble_store_config_init();
+    ble_npl_event_init(&s_security_event, check_security, NULL);
 
     if (xTaskCreate(worker_task, "scpi_ble", 6144, NULL, 4, NULL) != pdPASS) {
         ESP_LOGE(TAG, "worker task creation failed");

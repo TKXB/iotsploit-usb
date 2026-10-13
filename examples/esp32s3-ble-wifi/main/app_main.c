@@ -45,7 +45,7 @@ void app_main(void) {
 
     uint8_t mac[6] = { 0 };
     esp_efuse_mac_get_default(mac);
-    static char idn[64];
+    static char idn[80];
     snprintf(idn, sizeof(idn), "IoTSploit,ESP32S3-BLE-WIFI,%02X%02X%02X%02X%02X%02X,%s",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
              esp_app_get_description()->version);
