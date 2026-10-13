@@ -12,7 +12,8 @@ network (raw SCPI on TCP 5025) devices. `devices` lists connected boards,
 `SYSTem:HELP:DESCription?`), `send` runs any SCPI command and reports device
 errors, and `workflow` runs the multi-step jobs the board describes. The
 default build (Linux kernel USBTMC + TCP) has no dependencies; the `raw-usb`
-feature adds `nusb` (pure Rust, no libusb) for Windows and macOS.
+feature adds `nusb` (pure Rust, no libusb) for Windows and macOS, and the `ble`
+feature adds SCPI over BLE (`btleplug`) for boards such as `esp32s3-ble-wifi`.
 
 See [rust/README.md](rust/README.md) for full usage.
 

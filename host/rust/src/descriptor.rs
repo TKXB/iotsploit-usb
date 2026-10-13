@@ -711,17 +711,12 @@ impl Profile {
 impl WorkflowDesc {
     /// Build the trigger command string, substituting user-supplied params.
     ///
-    /// Params are appended in order: `trigger_cmd param0 param1 ...`.
+    /// SCPI parameter literals are appended in order, separated by commas.
     pub fn build_trigger(&self, params: &[String]) -> String {
         if params.is_empty() {
             return self.trigger_cmd.clone();
         }
-        let mut cmd = self.trigger_cmd.clone();
-        for p in params {
-            cmd.push(' ');
-            cmd.push_str(p);
-        }
-        cmd
+        format!("{} {}", self.trigger_cmd, params.join(","))
     }
 
     /// Build the fetch query for result index `i`.
@@ -1013,6 +1008,12 @@ WF ble-auto type=trigger_poll_interactive trigger=BLE:AUTO state=BLE:AUTO:STATe?
         let p = parse_str(ESP32_TXT).unwrap();
         let wf = p.workflow("ble-scan").unwrap();
         assert_eq!(wf.build_trigger(&["8".into()]), "BLE:SCAN 8");
+        let p = parse_str("WF wifi-connect type=trigger_poll_fetch trigger=WLAN:CONNect:STARt").unwrap();
+        let wf = p.workflow("wifi-connect").unwrap();
+        assert_eq!(
+            wf.build_trigger(&["\"ASUS\"".into(), "\"dummy-password\"".into()]),
+            "WLAN:CONNect:STARt \"ASUS\",\"dummy-password\""
+        );
     }
 
     #[test]

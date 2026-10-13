@@ -5,6 +5,8 @@
 //! anywhere a Rust toolchain is available. See `docs/iotsploit-usb-rust-host-plan.md`
 //! for the full design.
 
+#[cfg(feature = "ble")]
+pub mod ble;
 pub mod block;
 pub mod caps;
 #[cfg(feature = "tcp")]
@@ -14,6 +16,8 @@ pub mod discover;
 pub mod framing;
 pub mod headers;
 pub mod session;
+#[cfg(any(feature = "tcp", feature = "ble"))]
+mod stream;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 pub mod transport;

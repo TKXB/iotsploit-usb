@@ -2,7 +2,8 @@
 //!
 //! A command-line tool for talking to `iotsploit-usb` devices over SCPI.
 //! Supports multiple transport backends (kernel `/dev/usbtmcN`, raw `nusb`,
-//! raw SCPI over TCP), descriptor-driven help, and workflow execution.
+//! raw SCPI over TCP, SCPI over BLE), descriptor-driven help, and workflow
+//! execution.
 
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -23,17 +24,20 @@ use iotsploit_host::usbtmc_kernel::UsbtmcKernel;
 use iotsploit_host::usbtmc_raw::UsbtmcRaw;
 #[cfg(feature = "tcp")]
 use iotsploit_host::tcp::TcpTransport;
-#[cfg(feature = "tcp")]
+#[cfg(feature = "ble")]
+use iotsploit_host::ble::{self, BleTransport};
+#[cfg(any(feature = "tcp", feature = "ble"))]
 use std::time::Duration;
 
 const HELP: &str = "\
-iotsploit-host - control iotsploit-usb devices over USB or TCP
+iotsploit-host - control iotsploit-usb devices over USB, TCP or BLE
 
 USAGE:
     iotsploit-host [-d <device>] <command> [args]
 
 COMMANDS:
-    devices               List connected USB devices, numbered, with identity
+    devices               List connected USB devices, numbered, with identity,
+                          and BLE boards in range (when built with `ble`)
     info                  What the device is: identity, address, capabilities
     help [name]           What the device can do; with a name, the details of
                           one command or workflow
@@ -45,10 +49,11 @@ COMMANDS:
 
 OPTIONS:
     -d, --device <dev>    A number from `devices`, usbtmc:N,
-                          usb:<vid>:<pid>[/<serial>] or tcp://<host>[:<port>].
+                          usb:<vid>:<pid>[/<serial>], tcp://<host>[:<port>]
+                          or ble://<name|id>.
                           Default: $IOTSPLOIT_DEVICE, else the only USB device
     -o, --out <file>      Save a binary reply to a file instead of stdout
-    --timeout <ms>        Read timeout for TCP and raw USB (default: 5000)
+    --timeout <ms>        Read timeout for TCP, BLE and raw USB (default: 5000)
     -h, --help            Show this help
     -V, --version         Show the version
 
@@ -64,6 +69,7 @@ EXAMPLES:
     iotsploit-host send 'DATA:READ? 64' -o adc.bin
     iotsploit-host workflow wifi-scan
     iotsploit-host -d tcp://192.168.4.1 info
+    iotsploit-host -d ble://iotsploit-wifi workflow wifi-scan
 
 Older commands (idn, caps, headers, describe, profile, query, write,
 block-read, list) and options (--backend, --vid, --pid, --serial) still work
@@ -229,7 +235,7 @@ fn resolve(cli: &Cli) -> std::result::Result<Target, Fail> {
     match found.len() {
         0 => Err(connect(Error::Device(
             "no USB device found; check the cable, or name a network device with \
-             -d tcp://<host>"
+             -d tcp://<host> or a BLE board with -d ble://<name>"
                 .into(),
         ))),
         1 => Ok(Target::Addr(found.remove(0))),
@@ -255,6 +261,10 @@ enum Backend {
     Raw(UsbtmcRaw),
     #[cfg(feature = "tcp")]
     Tcp(TcpTransport),
+    // Boxed: the BLE transport carries its own runtime and is several times
+    // the size of the others.
+    #[cfg(feature = "ble")]
+    Ble(Box<BleTransport>),
 }
 
 impl Transport for Backend {
@@ -266,6 +276,8 @@ impl Transport for Backend {
             Backend::Raw(t) => t.write_msg(bytes),
             #[cfg(feature = "tcp")]
             Backend::Tcp(t) => t.write_msg(bytes),
+            #[cfg(feature = "ble")]
+            Backend::Ble(t) => t.write_msg(bytes),
             #[allow(unreachable_patterns)]
             _ => Err(Error::Device("no transport backend compiled in".into())),
         }
@@ -278,13 +290,15 @@ impl Transport for Backend {
             Backend::Raw(t) => t.read_msg(max_len),
             #[cfg(feature = "tcp")]
             Backend::Tcp(t) => t.read_msg(max_len),
+            #[cfg(feature = "ble")]
+            Backend::Ble(t) => t.read_msg(max_len),
             #[allow(unreachable_patterns)]
             _ => Err(Error::Device("no transport backend compiled in".into())),
         }
     }
 }
 
-#[cfg(not(all(feature = "kernel", feature = "tcp", feature = "raw-usb")))]
+#[cfg(not(all(feature = "kernel", feature = "tcp", feature = "raw-usb", feature = "ble")))]
 fn not_built(what: &str, feature: &str) -> Error {
     Error::Device(format!("{what} support is not built in (rebuild with `--features {feature}`)"))
 }
@@ -303,6 +317,13 @@ fn open_target(target: &Target, timeout_ms: u64) -> iotsploit_host::Result<Backe
             return TcpTransport::connect(hp, Duration::from_millis(timeout_ms)).map(Backend::Tcp);
             #[cfg(not(feature = "tcp"))]
             return Err(not_built("TCP", "tcp"));
+        }
+        Target::Addr(Address::Ble(target)) => {
+            #[cfg(feature = "ble")]
+            return BleTransport::connect(target, Duration::from_millis(timeout_ms))
+                .map(|t| Backend::Ble(Box::new(t)));
+            #[cfg(not(feature = "ble"))]
+            return Err(not_built("BLE", "ble"));
         }
         #[cfg(feature = "raw-usb")]
         Target::Addr(Address::Usb { vid, pid, serial }) => {
@@ -520,18 +541,40 @@ fn cmd_devices(cli: &Cli) -> CliResult {
     if found.is_empty() {
         println!("no USB devices found");
         println!("network devices are not discovered; use -d tcp://<host>[:<port>]");
-        return Ok(());
+    } else {
+        let width = found.iter().map(|a| a.to_string().len()).max().unwrap_or(0).max(7);
+        println!("{:<3}{:<width$}  IDENTITY", "#", "ADDRESS");
+        for (i, a) in found.iter().enumerate() {
+            let identity = match open_target(&Target::Addr(a.clone()), cli.timeout_ms) {
+                Ok(b) => session_for(b).idn().unwrap_or_else(|e| format!("(no reply: {e})")),
+                Err(e) => format!("(cannot open: {e})"),
+            };
+            println!("{:<3}{:<width$}  {identity}", i + 1, a.to_string());
+        }
     }
-    let width = found.iter().map(|a| a.to_string().len()).max().unwrap_or(0).max(7);
-    println!("{:<3}{:<width$}  IDENTITY", "#", "ADDRESS");
-    for (i, a) in found.iter().enumerate() {
-        let identity = match open_target(&Target::Addr(a.clone()), cli.timeout_ms) {
-            Ok(b) => session_for(b).idn().unwrap_or_else(|e| format!("(no reply: {e})")),
-            Err(e) => format!("(cannot open: {e})"),
-        };
-        println!("{:<3}{:<width$}  {identity}", i + 1, a.to_string());
-    }
+    #[cfg(feature = "ble")]
+    print_ble_devices();
     Ok(())
+}
+
+/// BLE boards in range. Listed without `*IDN?`: connecting would pair them.
+#[cfg(feature = "ble")]
+fn print_ble_devices() {
+    const SCAN: Duration = Duration::from_secs(3);
+    println!();
+    match ble::scan(SCAN) {
+        Ok(found) if found.is_empty() => println!("no BLE boards advertising the SCPI service"),
+        Ok(found) => {
+            let addrs: Vec<String> = found.iter().map(|d| format!("ble://{}", d.id)).collect();
+            let width = addrs.iter().map(String::len).max().unwrap_or(0).max(7);
+            println!("{:<width$}  {:>8}  NAME", "BLE", "RSSI");
+            for (d, a) in found.iter().zip(&addrs) {
+                let rssi = d.rssi.map_or("?".to_string(), |r| format!("{r} dBm"));
+                println!("{a:<width$}  {rssi:>8}  {}", d.name.as_deref().unwrap_or("-"));
+            }
+        }
+        Err(e) => println!("BLE scan failed: {e}"),
+    }
 }
 
 fn cmd_info(cli: &Cli) -> CliResult {
