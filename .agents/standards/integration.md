@@ -4,8 +4,8 @@
 
 ```text
 host (host/rust, Python tests)
-   │  SCPI over USBTMC, TCP 5025, or the USB vendor pipe
-glue (tinyusb | socket | stream)
+   │  SCPI over USBTMC, TCP 5025, BLE GATT, or the USB vendor pipe
+glue (tinyusb | socket | nimble | stream)
    │  usbscpi_config_t callbacks, usbscpi_on_rx(), usbscpi_task()
 core (src/usbscpi.c + libscpi)
    │  scpi_command_t handlers registered by the example

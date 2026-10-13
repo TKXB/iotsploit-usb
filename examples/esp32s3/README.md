@@ -128,7 +128,8 @@ Credentials use Wi-Fi RAM storage and are not persisted to NVS. There are no
 build-time credentials or automatic boot association. TCP SCPI (5025) and the
 BLE stream listener (5026) start after USB provisioning obtains an IPv4 lease.
 Mutating Wi-Fi connection commands are USB-only; queries also work over TCP.
-Scanning and association attempts are serialized by the Wi-Fi owner.
+Scanning and association attempts are serialized by the Wi-Fi owner,
+`examples/components/wlan/`, which `examples/esp32s3-ble-wifi` shares.
 
 To bundle a built image for the UI's Firmware Manager:
 

@@ -17,6 +17,7 @@
 #include "usbscpi_socket.h"
 #include "net_scpi.h"
 #include "wifi_scan.h"
+#include "wlan_scpi.h"
 #include "ble_scan.h"
 #include "ble_conn.h"
 #include "usb_frame.h"
@@ -114,155 +115,18 @@ static scpi_result_t cmd_adc_read(scpi_t *ctx) {
     return SCPI_RES_OK;
 }
 
-/* ---------- WiFi 扫描命令(异步触发 → 轮询 → 逐行取) ---------- */
-static scpi_result_t cmd_wlan_scan(scpi_t *ctx) {
-    /* esp_wifi_scan_start() sweeps every channel, taking the radio off the
-     * channel the station is associated on. Over USB that is free, because the
-     * link is independent of the radio; over TCP the scan would drop the very
-     * connection carrying this command. Refuse rather than strand the caller —
-     * the scan is still available over USB. */
-    if (usbscpi_socket_client_connected()) {
+/* ---------- WLAN jobs (wlan_scpi.h): who may disturb the radio ----------
+ * A scan sweeps every channel, taking the radio off the one the station is
+ * associated on: over USB that is free, but it would drop any TCP session, so
+ * refuse it while one is open. Association changes the interface that carries
+ * TCP SCPI, so only the independent USB context may start, stop or clear it. */
+bool wlan_scpi_allowed(scpi_t *ctx, bool scan) {
+    if (scan) {
+        if (!usbscpi_socket_client_connected()) return true;
         ESP_LOGW(TAG, "WLAN:SCAN refused: would drop the TCP session");
-        SCPI_ErrorPush(ctx, SCPI_ERROR_SETTINGS_CONFLICT);
-        return SCPI_RES_ERR;
-    }
-    ESP_LOGI(TAG, "WLAN:SCAN");
-    return wifi_scan_start() == 0 ? SCPI_RES_OK : SCPI_RES_ERR;
-}
-
-static scpi_result_t cmd_wlan_done(scpi_t *ctx) {
-    SCPI_ResultBool(ctx, wifi_scan_done());
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_wlan_count(scpi_t *ctx) {
-    SCPI_ResultUInt32(ctx, (uint32_t)wifi_scan_count());
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_wlan_get(scpi_t *ctx) {
-    uint32_t idx = 0;
-    char buf[128];
-    if (SCPI_ParamUInt32(ctx, &idx, TRUE) != TRUE) return SCPI_RES_ERR;
-    if (wifi_scan_get(idx, buf, sizeof(buf)) != 0) {
-        SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
-        return SCPI_RES_ERR;
-    }
-    SCPI_ResultCharacters(ctx, buf, strlen(buf));   /* 裸 CSV,不要 ResultText(会加引号) */
-    return SCPI_RES_OK;
-}
-
-/* Wi-Fi provisioning changes the interface that carries TCP SCPI. Only the
- * independent USB context may start, stop or clear an association job. */
-static bool s_wlan_conn_failure_reported;
-
-static bool wlan_usb_only(scpi_t *ctx) {
-    if (ctx->user_context == s_usb_dev) return true;
-    SCPI_ErrorPush(ctx, SCPI_ERROR_SETTINGS_CONFLICT);
-    return false;
-}
-
-/* Quoted ASCII or a length-delimited UTF-8 block; never truncate credentials. */
-static bool wlan_credential(scpi_t *ctx, char *out, size_t capacity, size_t *len) {
-    scpi_parameter_t param;
-    if (!SCPI_Parameter(ctx, &param, TRUE)) return false;
-    const char *text = param.ptr;
-    size_t size = param.len;
-    char quote = 0;
-    if (param.type == SCPI_TOKEN_SINGLE_QUOTE_PROGRAM_DATA ||
-        param.type == SCPI_TOKEN_DOUBLE_QUOTE_PROGRAM_DATA) {
-        quote = *text++;
-        size -= 2;
-    } else if (param.type != SCPI_TOKEN_ARBITRARY_BLOCK_PROGRAM_DATA) {
-        SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_TYPE_ERROR);
         return false;
     }
-    *len = 0;
-    for (size_t i = 0; i < size; i++) {
-        if (*len + 1 >= capacity) {
-            SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
-            return false;
-        }
-        out[(*len)++] = text[i];
-        if (quote && text[i] == quote) i++;
-    }
-    out[*len] = 0;
-    return true;
-}
-
-static scpi_result_t cmd_wlan_connect_start(scpi_t *ctx) {
-    if (!wlan_usb_only(ctx)) return SCPI_RES_ERR;
-    char ssid[33], password[64];
-    size_t ssid_len, password_len;
-    if (!wlan_credential(ctx, ssid, sizeof(ssid), &ssid_len) ||
-        !wlan_credential(ctx, password, sizeof(password), &password_len))
-        return SCPI_RES_ERR;
-    if (!ssid_len || ssid_len > 32 || password_len > 63 ||
-        strlen(ssid) != ssid_len || strlen(password) != password_len ||
-        strpbrk(ssid, "\r\n") || strpbrk(password, "\r\n")) {
-        SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
-        return SCPI_RES_ERR;
-    }
-    int rc = wifi_sta_connect(ssid, password);
-    memset(password, 0, sizeof(password));
-    if (rc != 0) {
-        SCPI_ErrorPush(ctx, rc == -2 ? SCPI_ERROR_SETTINGS_CONFLICT : SCPI_ERROR_EXECUTION_ERROR);
-        return SCPI_RES_ERR;
-    }
-    s_wlan_conn_failure_reported = false;
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_wlan_connect_stop(scpi_t *ctx) {
-    if (!wlan_usb_only(ctx)) return SCPI_RES_ERR;
-    if (wifi_sta_stop() != 0) {
-        SCPI_ErrorPush(ctx, SCPI_ERROR_EXECUTION_ERROR);
-        return SCPI_RES_ERR;
-    }
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_wlan_connect_clear(scpi_t *ctx) {
-    if (!wlan_usb_only(ctx)) return SCPI_RES_ERR;
-    if (wifi_sta_clear() != 0) {
-        SCPI_ErrorPush(ctx, SCPI_ERROR_SETTINGS_CONFLICT);
-        return SCPI_RES_ERR;
-    }
-    s_wlan_conn_failure_reported = false;
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_wlan_connect_state(scpi_t *ctx) {
-    wifi_sta_result_t result;
-    wifi_sta_result(&result);
-    if (strcmp(result.state, "FAILED") == 0 && !s_wlan_conn_failure_reported) {
-        s_wlan_conn_failure_reported = true;
-        usbscpi_queue_error(ctx, SCPI_ERROR_EXECUTION_ERROR);
-    }
-    SCPI_ResultMnemonic(ctx, result.state);
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_wlan_connect_count(scpi_t *ctx) {
-    wifi_sta_result_t result;
-    wifi_sta_result(&result);
-    SCPI_ResultUInt32(ctx, strcmp(result.result, "NONE") != 0);
-    return SCPI_RES_OK;
-}
-
-static scpi_result_t cmd_wlan_connect_fetch(scpi_t *ctx) {
-    uint32_t index;
-    if (!SCPI_ParamUInt32(ctx, &index, TRUE)) return SCPI_RES_ERR;
-    wifi_sta_result_t result;
-    wifi_sta_result(&result);
-    if (index || strcmp(result.result, "NONE") == 0) {
-        SCPI_ErrorPush(ctx, SCPI_ERROR_DATA_OUT_OF_RANGE);
-        return SCPI_RES_ERR;
-    }
-    SCPI_ResultMnemonic(ctx, result.result);
-    SCPI_ResultText(ctx, result.ip);
-    SCPI_ResultInt32(ctx, result.reason);
-    return SCPI_RES_OK;
+    return ctx->user_context == s_usb_dev;
 }
 
 /* ---------- BLE 扫描命令 ---------- */
@@ -462,23 +326,12 @@ static scpi_result_t cmd_stream_state(scpi_t *ctx) {
 }
 
 /* ---------- Jobs (.agents/standards/scpi-commands.md) ----------
- * WLAN:SCAN, BLE:SCAN and BLE:CONNect are jobs: STARt, then STATe? reports one
- * word. These handlers map the scanners' done flags and the BLE connect/pair
- * state machines (ble_conn.h) onto those words; the machines are unchanged. */
+ * BLE:SCAN and BLE:CONNect are jobs: STARt, then STATe? reports one word
+ * (WLAN:SCAN is in wlan_scpi.c). These handlers map the scanner's done flag
+ * and the BLE connect/pair state machines (ble_conn.h) onto those words; the
+ * machines are unchanged. */
 
-static bool s_wlan_started;
 static bool s_ble_started;
-
-static scpi_result_t cmd_wlan_start(scpi_t *ctx) {
-    scpi_result_t r = cmd_wlan_scan(ctx);
-    if (r == SCPI_RES_OK) s_wlan_started = true;
-    return r;
-}
-
-static scpi_result_t cmd_wlan_state(scpi_t *ctx) {
-    SCPI_ResultMnemonic(ctx, !s_wlan_started ? "IDLE" : wifi_scan_done() ? "DONE" : "RUNNING");
-    return SCPI_RES_OK;
-}
 
 static scpi_result_t cmd_ble_start(scpi_t *ctx) {
     scpi_result_t r = cmd_ble_scan(ctx);
@@ -553,18 +406,8 @@ static const usbscpi_param_desc_t pin_params[] = {
 static const usbscpi_param_desc_t adc_params[] = {
     USBSCPI_PARAM("channel", "u32", false),
 };
-static const usbscpi_param_desc_t wlan_connect_params[] = {
-    USBSCPI_PARAM("ssid", "string", true),
-    USBSCPI_PARAM("password", "string", true),
-};
-static const usbscpi_param_desc_t wlan_connect_fetch_params[] = {
-    USBSCPI_PARAM_PICK("index", "WLAN:CONNect:COUNt?", "WLAN:CONNect:FETCh?"),
-};
 static const usbscpi_param_desc_t ble_scan_params[] = {
     USBSCPI_PARAM("duration", "u32", false),
-};
-static const usbscpi_param_desc_t wlan_fetch_params[] = {
-    USBSCPI_PARAM_PICK("index", "WLAN:SCAN:COUNt?", "WLAN:SCAN:FETCh?"),
 };
 static const usbscpi_param_desc_t ble_fetch_params[] = {
     USBSCPI_PARAM_PICK("index", "BLE:SCAN:COUNt?", "BLE:SCAN:FETCh?"),
@@ -613,26 +456,7 @@ static const usbscpi_param_desc_t framing_params[] = {
         USBSCPI_PARAMS(pin_params), "u32")                                                \
     CMD("ADC?",              cmd_adc_read,   "query",   "Raw ADC1 count; channel n is GPIO n+1", \
         USBSCPI_PARAMS(adc_params), "u32")                                                \
-    CMD("WLAN:SCAN:STARt",   cmd_wlan_start, "command", "Scan for Wi-Fi access points (USB only)", \
-        USBSCPI_NO_PARAMS, "none")                                                        \
-    CMD("WLAN:SCAN:STATe?",  cmd_wlan_state, "query",   "IDLE, RUNNING or DONE",          \
-        USBSCPI_NO_PARAMS, "string")                                                      \
-    CMD("WLAN:SCAN:COUNt?",  cmd_wlan_count, "query",   "Access points found",            \
-        USBSCPI_NO_PARAMS, "u32")                                                         \
-    CMD("WLAN:SCAN:FETCh?",  cmd_wlan_get,   "query",   "Access point by index",          \
-        USBSCPI_PARAMS(wlan_fetch_params), "string")                                      \
-    CMD("WLAN:CONNect:STARt", cmd_wlan_connect_start, "command", "Try one SSID/password (USB only)", \
-        USBSCPI_PARAMS(wlan_connect_params), "none")                                       \
-    CMD("WLAN:CONNect:STOP", cmd_wlan_connect_stop, "command", "Cancel or disconnect (USB only)", \
-        USBSCPI_NO_PARAMS, "none")                                                        \
-    CMD("WLAN:CONNect:STATe?", cmd_wlan_connect_state, "query", "IDLE, RUNNING, DONE or FAILED", \
-        USBSCPI_NO_PARAMS, "string")                                                      \
-    CMD("WLAN:CONNect:COUNt?", cmd_wlan_connect_count, "query", "Completed attempt results", \
-        USBSCPI_NO_PARAMS, "u32")                                                         \
-    CMD("WLAN:CONNect:FETCh?", cmd_wlan_connect_fetch, "query", "result,ip,reason; index 0", \
-        USBSCPI_PARAMS(wlan_connect_fetch_params), "string")                               \
-    CMD("WLAN:CONNect:CLEar", cmd_wlan_connect_clear, "command", "Clear an offline result (USB only)", \
-        USBSCPI_NO_PARAMS, "none")                                                        \
+    WLAN_COMMANDS(CMD, ALIAS)                                                         \
     CMD("BLE:SCAN:STARt",    cmd_ble_start,  "command", "Scan for BLE devices for N seconds (default 5)", \
         USBSCPI_PARAMS(ble_scan_params), "none")                                          \
     CMD("BLE:SCAN:STATe?",   cmd_ble_state,  "query",   "IDLE, RUNNING or DONE",          \
@@ -662,9 +486,9 @@ static const usbscpi_param_desc_t framing_params[] = {
     ALIAS("GPIO:SET",            cmd_gpio_set)                                            \
     ALIAS("GPIO:GET?",           cmd_gpio_get)                                            \
     ALIAS("ADC:READ?",           cmd_adc_read)                                            \
-    ALIAS("WLAN:SCAN",           cmd_wlan_start)                                          \
-    ALIAS("WLAN:SCAN:DONE?",     cmd_wlan_done)                                           \
-    ALIAS("WLAN:SCAN?",          cmd_wlan_get)                                            \
+    ALIAS("WLAN:SCAN",           wlan_cmd_scan_start)                                     \
+    ALIAS("WLAN:SCAN:DONE?",     wlan_cmd_scan_done)                                      \
+    ALIAS("WLAN:SCAN?",          wlan_cmd_scan_fetch)                                     \
     ALIAS("BLE:SCAN",            cmd_ble_start)                                           \
     ALIAS("BLE:SCAN:DONE?",      cmd_ble_done)                                            \
     ALIAS("BLE:SCAN?",           cmd_ble_get)                                             \
@@ -686,11 +510,7 @@ static const usbscpi_prompt_desc_t connect_prompts[] = {
 static const char *const connect_old_names[] = { "ble-connect-pair" };
 
 static const usbscpi_workflow_desc_t esp_workflows[] = {
-    { USBSCPI_WF_ACQUIRE("wifi-connect", "WLAN:CONNect", "Try one Wi-Fi credential over USB",
-                         "result:string,ip:string,reason:i32", 35000) },
-    { USBSCPI_WF_ACQUIRE("wifi-scan", "WLAN:SCAN", "Scan for Wi-Fi access points",
-                         "ssid:string,rssi:i32:dbm,channel:u32,authmode:string,bssid:mac",
-                         15000) },
+    WLAN_WORKFLOWS,
     { USBSCPI_WF_ACQUIRE("ble-scan", "BLE:SCAN", "Scan for BLE devices",
                          "addr:mac,rssi:i32:dbm,name:string,adv_type:string", 30000) },
     { USBSCPI_WF_INTERACTIVE("ble-connect", "BLE:CONNect",
