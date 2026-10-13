@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "app_main.c" "ble_spp_security.c"
+    SRCS "app_main.c" "ble_spp_security.c" "ble_scpi.c"
     INCLUDE_DIRS "."
     REQUIRES iotsploit-usb tinyusb driver usb nvs_flash bt)
 

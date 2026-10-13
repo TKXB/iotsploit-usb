@@ -6,18 +6,69 @@ connection security are driven and inspected from a host over **USBTMC/SCPI**.
 It adapts Espressif's NimBLE `ble_spp/spp_server` example (the SPP GATT service,
 advertising, and GAP handling) and exposes it through `iotsploit-usb`'s
 USBTMC/SCPI control path — the same TinyUSB + libSCPI glue used by the other
-examples in this repo. The SPP data path is intentionally minimal; the point of
-the example is to **connect, pair, and report the negotiated BLE security
-level**.
+examples in this repo. The SPP characteristic also carries SCPI as a **third
+transport**, so the full command surface is reachable over BLE as well as over
+USBTMC and (in the esp32s3 example) TCP.
 
 ## What it does
 
 - Enumerates as a USBTMC instrument (`0x1209:0x0001`).
 - Runs the NimBLE host stack as an SPP peripheral (service UUID `0xABF0`).
+- Carries SCPI over the SPP characteristic (`0xABF1`): a central subscribes to
+  notifications, writes command bytes, and reads the notified replies.
 - Security Manager configured for LE Secure Connections + MITM + bonding, with
   `KeyboardDisplay` IO capability (the host acts as the keyboard/display via
   SCPI, so passkey / numeric-comparison pairing is fully supported).
 - Reports the connection security state as an LE security level (1–4).
+
+## SCPI over BLE
+
+The SPP characteristic `0xABF1` is a Nordic-UART-style byte pipe wired into a
+second `usbscpi_t` context, exactly as `net_scpi.c` wires SCPI onto a TCP socket
+in the esp32s3 example. A central:
+
+1. connects and subscribes to notifications on `0xABF1` (writes its CCCD),
+2. writes a SCPI command line (ending in `\n`) to `0xABF1`, and
+3. receives the reply as one or more notifications, reassembled by the `\n`
+   terminator — the reply is chunked to the negotiated ATT MTU.
+
+It is a distinct context from the USB one: a `usbscpi_t` holds exactly one
+response callback, so a command arriving over BLE on the USB context would route
+its reply out over USB. The BLE context has its own line buffer and error queue,
+and is cleared on disconnect so a central that drops mid-block cannot poison the
+next session. Both share the same command table and descriptor, so `*IDN?`,
+`SYSTem:HELP:DESCription?`, and every `BLE:*` command behave identically on
+either transport.
+
+```python
+# Example with the `bleak` BLE client (central on the host).
+import asyncio
+from bleak import BleakClient, BleakScanner
+
+SPP_CHR = "0000abf1-0000-1000-8000-00805f9b34fb"
+
+async def main():
+    dev = await BleakScanner.find_device_by_name("iotsploit-spp-sec")
+    async with BleakClient(dev) as c:
+        reply = bytearray()
+        done = asyncio.Event()
+
+        def on_notify(_handle, data):
+            reply.extend(data)
+            if reply.endswith(b"\n"):
+                done.set()
+
+        await c.start_notify(SPP_CHR, on_notify)
+        await c.write_gatt_char(SPP_CHR, b"*IDN?\n", response=False)
+        await asyncio.wait_for(done.wait(), timeout=5)
+        print(reply.decode().strip())   # IoTSploit,ESP32S3-SPP-SEC,<MAC>,0.1.0
+
+asyncio.run(main())
+```
+
+> The BLE SCPI pipe is not encryption-gated in this example: a central can send
+> commands as soon as it subscribes, before pairing. Drive `BLE:PERiph` /
+> `BLE:PAIR` (over USB or BLE) to negotiate a secure link, then read `BLE:SEC?`.
 
 ## Hardware
 

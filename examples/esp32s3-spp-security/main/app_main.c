@@ -9,6 +9,7 @@
 #include "usbscpi/usbscpi.h"
 #include "usbscpi_tinyusb.h"
 #include "ble_spp_security.h"
+#include "ble_scpi.h"
 
 static const char *TAG = "scpi";
 
@@ -399,6 +400,12 @@ void app_main(void) {
     usbscpi_t *dev = usbscpi_init(s_storage, sizeof(s_storage), &cfg);
     usbscpi_tinyusb_bind(dev);          /* glue takes over the IN/OUT path */
     usbscpi_register(dev, spp_scpi_commands);
+
+    /* Second context for SCPI over BLE: same commands and descriptor, its own
+     * buffers and its own usb_tx (GATT notifications). The SPP characteristic
+     * carries it once a central connects and subscribes. See ble_scpi.h for why
+     * it cannot be shared with the USB context. */
+    ble_scpi_start(&cfg, spp_scpi_commands);
 
     xTaskCreate(usb_task, "usb", 6144, dev, 5, NULL);
     /* Bring up BLE after USB is running so enumeration is not blocked. */

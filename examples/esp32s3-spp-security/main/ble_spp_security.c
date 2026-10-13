@@ -10,12 +10,18 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
+#include "host/ble_hs_mbuf.h"
 #include "host/ble_gap.h"
+#include "host/ble_gatt.h"
+#include "host/ble_att.h"
 #include "host/ble_sm.h"
 #include "host/ble_store.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "os/os_mbuf.h"
+
+#include "usbscpi/usbscpi.h"
 
 static const char *TAG = "ble.spp";
 
@@ -41,12 +47,21 @@ static volatile int      s_last_status;    /* last GAP connect/disc/enc status *
 static uint8_t  s_own_addr_type;
 static uint16_t s_spp_val_handle;          /* SPP characteristic value handle */
 
+/* SCPI-over-BLE transport. The bound context carries the SCPI command surface;
+ * s_notify_on tracks whether the central has subscribed to notifications on the
+ * SPP characteristic, which is where replies go. Both touched only on the
+ * NimBLE host task (GATT access + GAP events), same as the rest of this file. */
+static usbscpi_t *s_scpi_ctx;
+static volatile int s_notify_on;
+
 static int gap_event_cb(struct ble_gap_event *event, void *arg);
 
 /* ---------- SPP GATT service ----------
  * A single primary service (0xABF0) with one read/write/notify characteristic
- * (0xABF1). The data path is intentionally minimal: this example exists to
- * demonstrate connection security, so the access callback only logs. */
+ * (0xABF1). Writes carry SCPI command bytes: when a context is bound
+ * (ble_spp_scpi_bind), they are fed to usbscpi_on_rx() and the reply is
+ * notified back from ble_spp_scpi_tx(), synchronously on this host task. With
+ * no context bound the characteristic is a plain logging stub, as before. */
 static int spp_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                              struct ble_gatt_access_ctxt *ctxt, void *arg) {
     (void)conn_handle; (void)attr_handle; (void)arg;
@@ -54,9 +69,32 @@ static int spp_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     case BLE_GATT_ACCESS_OP_READ_CHR:
         ESP_LOGI(TAG, "spp chr read");
         break;
-    case BLE_GATT_ACCESS_OP_WRITE_CHR:
-        ESP_LOGI(TAG, "spp chr write len=%u", (unsigned)OS_MBUF_PKTLEN(ctxt->om));
+    case BLE_GATT_ACCESS_OP_WRITE_CHR: {
+        uint16_t total = OS_MBUF_PKTLEN(ctxt->om);
+        ESP_LOGI(TAG, "spp chr write len=%u", (unsigned)total);
+        if (!s_scpi_ctx) {
+            break;
+        }
+        /* Drain the mbuf in fixed-size chunks into the SCPI core. eom is
+         * false: like a socket, a BLE write carries no SCPI message boundary,
+         * and usbscpi_on_rx() only uses eom to flush an unterminated line —
+         * which here would execute a half-received command. Commands still
+         * execute on '\n' or ';' as usual. */
+        uint16_t off = 0;
+        while (off < total) {
+            uint8_t buf[256];
+            uint16_t chunk = (uint16_t)(total - off);
+            if (chunk > sizeof(buf)) {
+                chunk = sizeof(buf);
+            }
+            if (os_mbuf_copydata(ctxt->om, off, chunk, buf) != 0) {
+                break;
+            }
+            (void)usbscpi_on_rx(s_scpi_ctx, buf, chunk, false);
+            off = (uint16_t)(off + chunk);
+        }
         break;
+    }
     default:
         break;
     }
@@ -73,7 +111,7 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
                 .access_cb  = spp_chr_access_cb,
                 .val_handle = &s_spp_val_handle,
                 .flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE |
-                              BLE_GATT_CHR_F_NOTIFY,
+                              BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,
             },
             { 0 }
         },
@@ -155,7 +193,14 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         s_last_status = event->disconnect.reason;
         s_conn_state  = BLE_SPP_DISCONNECTED;
         s_pair_state  = BLE_SPP_PAIR_IDLE;
+        s_notify_on   = 0;
         ESP_LOGI(TAG, "disconnect reason=%d", event->disconnect.reason);
+        /* A central that dropped mid-block leaves the SCPI context in
+         * block-payload mode with a partial line buffer; clear it so the next
+         * session starts clean, exactly as the socket glue does on close. */
+        if (s_scpi_ctx) {
+            usbscpi_clear(s_scpi_ctx);
+        }
         /* Resume advertising so the next central can connect. */
         if (s_adv_on) {
             advertise();
@@ -226,6 +271,12 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
     case BLE_GAP_EVENT_SUBSCRIBE:
         ESP_LOGI(TAG, "subscribe attr=%d cur_notify=%d",
                  event->subscribe.attr_handle, event->subscribe.cur_notify);
+        /* Track the SPP characteristic's notify subscription: replies go out as
+         * notifications, so ble_spp_scpi_tx() only sends once the central has
+         * subscribed. */
+        if (event->subscribe.attr_handle == s_spp_val_handle) {
+            s_notify_on = event->subscribe.cur_notify;
+        }
         return 0;
 
     case BLE_GAP_EVENT_MTU:
@@ -432,5 +483,47 @@ int ble_spp_sec_info(char *out, size_t out_len) {
              "%02X:%02X:%02X:%02X:%02X:%02X,%d,%d,%d,%d,%d",
              v[5], v[4], v[3], v[2], v[1], v[0],
              level, enc, auth, bonded, ks);
+    return 0;
+}
+
+void ble_spp_scpi_bind(usbscpi_t *ctx) {
+    s_scpi_ctx = ctx;
+}
+
+int ble_spp_scpi_tx(void *user, const uint8_t *data, size_t len, bool eom) {
+    (void)user;
+    (void)eom; /* a byte stream has no message boundary to signal */
+
+    if (s_conn_state != BLE_SPP_CONNECTED || !s_notify_on || !data) {
+        return -1;
+    }
+    if (len == 0) {
+        return 0;
+    }
+
+    /* One ATT notification can carry ATT_MTU-3 payload bytes; libscpi hands us
+     * whole replies, so chunk them to the negotiated MTU. Each chunk is its own
+     * notification and the central reassembles the reply by its '\n'
+     * terminator, exactly as a socket client reassembles a TCP stream. */
+    uint16_t mtu = ble_att_mtu(s_conn_handle);
+    size_t cap = (mtu > 3) ? (size_t)(mtu - 3) : 20u;
+
+    size_t sent = 0;
+    while (sent < len) {
+        size_t chunk = len - sent;
+        if (chunk > cap) {
+            chunk = cap;
+        }
+        /* ble_gatts_notify_custom() takes ownership of the mbuf and frees it on
+         * both success and failure, so there is nothing to free here. */
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(data + sent, (uint16_t)chunk);
+        if (!om) {
+            return -1;  /* mbuf pool exhausted */
+        }
+        if (ble_gatts_notify_custom(s_conn_handle, s_spp_val_handle, om) != 0) {
+            return -1;
+        }
+        sent += chunk;
+    }
     return 0;
 }

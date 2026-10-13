@@ -1,8 +1,11 @@
 #ifndef BLE_SPP_SECURITY_H
 #define BLE_SPP_SECURITY_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#include "usbscpi/usbscpi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,6 +66,32 @@ int ble_spp_pair_numcmp_get(uint32_t *out);
 
 /* Confirm (accept != 0) or reject numeric comparison. */
 int ble_spp_pair_confirm(int accept);
+
+/* ---- SCPI over BLE transport ----
+ *
+ * The SPP characteristic (0xABF1) carries a raw SCPI byte stream, exactly as a
+ * TCP socket or the USBTMC bulk pipe does: a GATT write from the central is
+ * command bytes, and the reply is delivered as GATT notifications on the same
+ * characteristic. The central subscribes to notifications (writes the CCCD),
+ * then writes commands and reads the notified replies — the Nordic-UART style.
+ *
+ * Bind the usbscpi_t whose usb_tx is ble_spp_scpi_tx(). The GATT write callback
+ * feeds its bytes to usbscpi_on_rx() and the reply is produced synchronously,
+ * all on the NimBLE host task — one context, one BLE link, the same
+ * single-threaded contract the socket glue relies on. The context is cleared on
+ * disconnect so a central that drops mid-block cannot poison the next session.
+ *
+ * One context per transport: this is a SECOND usbscpi_t, never the USB one. A
+ * context holds exactly one usb_tx, so a command arriving over BLE on the USB
+ * context would route its reply out over USB (see net_scpi.h in the esp32s3
+ * example for the same reasoning on TCP). */
+void ble_spp_scpi_bind(usbscpi_t *ctx);
+
+/* usbscpi_config_t.usb_tx for the BLE context. Sends `data` as GATT
+ * notifications on the SPP characteristic, chunked to the negotiated ATT MTU.
+ * Returns 0 on success, -1 if no central is connected and subscribed, or a
+ * notification could not be queued. */
+int ble_spp_scpi_tx(void *user, const uint8_t *data, size_t len, bool eom);
 
 /* Format the active connection's security info as a CSV row into out:
  *   <mac>,<level>,<encrypted>,<authenticated>,<bonded>,<key_size>
