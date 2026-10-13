@@ -130,7 +130,7 @@ impl Transport for BleTransport {
                 .peripheral
                 .write(&self.rx, part, WriteType::WithResponse);
             self.rt
-                .block_on(tokio::time::timeout(self.timeout, write))
+                .block_on(async { tokio::time::timeout(self.timeout, write).await })
                 .map_err(|_| Error::Timeout)?
                 .map_err(ble_err)?;
         }
