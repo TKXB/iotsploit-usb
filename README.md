@@ -6,6 +6,10 @@ The public C API uses the `usbscpi_*` prefix because it describes the component 
 
 The host project owns USB initialization and device-specific I/O. This component owns the SCPI command path, definite-length binary block parsing, standard error queue, and response routing.
 
+## Architecture
+
+Open [the HTML architecture diagram](docs/architecture.html) in a browser for the component boundaries, command and binary data flows, TinyUSB response sequence, and board integrations. The diagram is self-contained and works offline.
+
 ## Design Choices
 
 - Stack-neutral core: no TinyUSB, ESP-IDF, Pico SDK, STM32, or RTOS headers in `src/`.
