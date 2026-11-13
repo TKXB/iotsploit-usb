@@ -80,7 +80,7 @@ lsusb | grep 1209:0001
 system_profiler SPUSBDataType | grep -A5 1209
 
 # Windows (PowerShell)
-# Use Zadig to bind WinUSB first — see Platform setup below
+# Check WinUSB binding — see Platform setup below
 ```
 
 ## 3. Build
@@ -437,12 +437,21 @@ Windows has no `/dev/usbtmcN` equivalent. Use the raw USB backend:
    ```sh
    cargo build --release --features raw-usb --target x86_64-pc-windows-msvc
    ```
-3. **Driver binding** (one-time per device): use
-   [Zadig](https://zadig.akeo.ie/) to bind the USBTMC interface to
-   **WinUSB** (recommended) or **libusbK**.
+3. **Driver binding:** ESP32-S3 firmware with USB device revision `0x0101`
+   advertises MS OS 2.0 descriptors for automatic WinUSB binding of both the
+   USBTMC and log interfaces on Windows 8.1+. Automatic binding still needs
+   Windows hardware validation; see the
+   [verification plan](../../docs/exec-plans/pending/windows-winusb-ms-os-20-plan.md).
+   Existing third-party driver packages may require manual migration; changing
+   the firmware revision does not remove them.
+
+   For firmware without these descriptors, use
+   [Zadig](https://zadig.akeo.ie/) to bind each required interface to **WinUSB**:
    - In Zadig, select `Options → List All Devices`.
-   - Find the `iotsploit-usb` device (VID 1209, PID 0001).
+   - Find the `iotsploit-usb` USBTMC interface (VID 1209, PID 0001, `MI_00`).
    - Set the driver to `WinUSB` and click `Replace Driver`.
+   - For composite firmware with an IoTSploit Log interface (`MI_01`), repeat
+     for that interface. Keep the composite parent bound to `usbccgp`.
 4. Run:
    ```sh
    iotsploit-host.exe devices

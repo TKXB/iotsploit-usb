@@ -582,14 +582,14 @@ bool tud_usbtmc_check_clear_cb(usbtmc_get_clear_status_rsp_t *rsp) { rsp->USBTMC
 static tusb_desc_device_t const desc_device = {
     .bLength            = sizeof(tusb_desc_device_t),
     .bDescriptorType    = TUSB_DESC_DEVICE,
-    .bcdUSB             = 0x0200,
+    .bcdUSB             = 0x0210,
     .bDeviceClass       = TUSB_CLASS_UNSPECIFIED,
     .bDeviceSubClass    = 0x00,
     .bDeviceProtocol    = 0x00,
     .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor           = 0x1209,
     .idProduct          = 0x0001,
-    .bcdDevice          = 0x0100,
+    .bcdDevice          = 0x0101,
     .iManufacturer      = 0x01,
     .iProduct           = 0x02,
     .iSerialNumber      = 0x03,
@@ -618,6 +618,74 @@ static uint8_t const desc_configuration[] = {
 };
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     (void)index; return desc_configuration;
+}
+
+/* Windows discovers these per-interface WinUSB bindings through BOS. */
+enum {
+    VENDOR_REQUEST_MICROSOFT = 1,
+    MS_OS_20_FUNCTION_LEN = 8 + 20 + 132,
+    MS_OS_20_DESC_LEN = 10 + 8 + 2 * MS_OS_20_FUNCTION_LEN,
+    BOS_TOTAL_LEN = TUD_BOS_DESC_LEN + TUD_BOS_MICROSOFT_OS_DESC_LEN,
+};
+
+static uint8_t const desc_ms_os_20[] = {
+    U16_TO_U8S_LE(10), U16_TO_U8S_LE(MS_OS_20_SET_HEADER_DESCRIPTOR),
+    U32_TO_U8S_LE(0x06030000), U16_TO_U8S_LE(MS_OS_20_DESC_LEN),
+    U16_TO_U8S_LE(8), U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_CONFIGURATION),
+    0, 0, U16_TO_U8S_LE(MS_OS_20_DESC_LEN - 10), /* first configuration */
+    /* ITF_NUM_USBTMC: WINUSB with a stable, interface-specific GUID. */
+    U16_TO_U8S_LE(8), U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_FUNCTION),
+    ITF_NUM_USBTMC, 0, U16_TO_U8S_LE(MS_OS_20_FUNCTION_LEN),
+    U16_TO_U8S_LE(20), U16_TO_U8S_LE(MS_OS_20_FEATURE_COMPATBLE_ID),
+    'W', 'I', 'N', 'U', 'S', 'B', 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    U16_TO_U8S_LE(132), U16_TO_U8S_LE(MS_OS_20_FEATURE_REG_PROPERTY),
+    U16_TO_U8S_LE(7), U16_TO_U8S_LE(42), /* REG_MULTI_SZ, UTF-16LE property name */
+    0x44, 0x00, 0x65, 0x00, 0x76, 0x00, 0x69, 0x00, 0x63, 0x00, 0x65, 0x00, 0x49, 0x00, 0x6e, 0x00,
+    0x74, 0x00, 0x65, 0x00, 0x72, 0x00, 0x66, 0x00, 0x61, 0x00, 0x63, 0x00, 0x65, 0x00, 0x47, 0x00,
+    0x55, 0x00, 0x49, 0x00, 0x44, 0x00, 0x73, 0x00, 0x00, 0x00,
+    U16_TO_U8S_LE(80), /* UTF-16LE GUID with two NUL terminators */
+    0x7b, 0x00, 0x42, 0x00, 0x43, 0x00, 0x42, 0x00, 0x35, 0x00, 0x36, 0x00, 0x39, 0x00, 0x33, 0x00,
+    0x34, 0x00, 0x2d, 0x00, 0x41, 0x00, 0x35, 0x00, 0x32, 0x00, 0x42, 0x00, 0x2d, 0x00, 0x34, 0x00,
+    0x42, 0x00, 0x32, 0x00, 0x45, 0x00, 0x2d, 0x00, 0x39, 0x00, 0x44, 0x00, 0x35, 0x00, 0x43, 0x00,
+    0x2d, 0x00, 0x37, 0x00, 0x42, 0x00, 0x30, 0x00, 0x44, 0x00, 0x38, 0x00, 0x38, 0x00, 0x37, 0x00,
+    0x37, 0x00, 0x32, 0x00, 0x36, 0x00, 0x41, 0x00, 0x39, 0x00, 0x7d, 0x00, 0x00, 0x00, 0x00, 0x00,
+    /* ITF_NUM_VENDOR: WINUSB with a stable, interface-specific GUID. */
+    U16_TO_U8S_LE(8), U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_FUNCTION),
+    ITF_NUM_VENDOR, 0, U16_TO_U8S_LE(MS_OS_20_FUNCTION_LEN),
+    U16_TO_U8S_LE(20), U16_TO_U8S_LE(MS_OS_20_FEATURE_COMPATBLE_ID),
+    'W', 'I', 'N', 'U', 'S', 'B', 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    U16_TO_U8S_LE(132), U16_TO_U8S_LE(MS_OS_20_FEATURE_REG_PROPERTY),
+    U16_TO_U8S_LE(7), U16_TO_U8S_LE(42), /* REG_MULTI_SZ, UTF-16LE property name */
+    0x44, 0x00, 0x65, 0x00, 0x76, 0x00, 0x69, 0x00, 0x63, 0x00, 0x65, 0x00, 0x49, 0x00, 0x6e, 0x00,
+    0x74, 0x00, 0x65, 0x00, 0x72, 0x00, 0x66, 0x00, 0x61, 0x00, 0x63, 0x00, 0x65, 0x00, 0x47, 0x00,
+    0x55, 0x00, 0x49, 0x00, 0x44, 0x00, 0x73, 0x00, 0x00, 0x00,
+    U16_TO_U8S_LE(80), /* UTF-16LE GUID with two NUL terminators */
+    0x7b, 0x00, 0x41, 0x00, 0x34, 0x00, 0x34, 0x00, 0x37, 0x00, 0x43, 0x00, 0x30, 0x00, 0x42, 0x00,
+    0x34, 0x00, 0x2d, 0x00, 0x31, 0x00, 0x34, 0x00, 0x36, 0x00, 0x30, 0x00, 0x2d, 0x00, 0x34, 0x00,
+    0x41, 0x00, 0x31, 0x00, 0x39, 0x00, 0x2d, 0x00, 0x39, 0x00, 0x37, 0x00, 0x44, 0x00, 0x36, 0x00,
+    0x2d, 0x00, 0x33, 0x00, 0x33, 0x00, 0x43, 0x00, 0x41, 0x00, 0x38, 0x00, 0x36, 0x00, 0x35, 0x00,
+    0x35, 0x00, 0x46, 0x00, 0x39, 0x00, 0x33, 0x00, 0x43, 0x00, 0x7d, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+TU_VERIFY_STATIC(sizeof(desc_ms_os_20) == MS_OS_20_DESC_LEN, "Incorrect MS OS 2.0 size");
+
+static uint8_t const desc_bos[] = {
+    TUD_BOS_DESCRIPTOR(BOS_TOTAL_LEN, 1),
+    TUD_BOS_MS_OS_20_DESCRIPTOR(MS_OS_20_DESC_LEN, VENDOR_REQUEST_MICROSOFT),
+};
+TU_VERIFY_STATIC(sizeof(desc_bos) == BOS_TOTAL_LEN, "Incorrect BOS size");
+
+uint8_t const *tud_descriptor_bos_cb(void) { return desc_bos; }
+
+bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
+                                tusb_control_request_t const *request) {
+    if (stage != CONTROL_STAGE_SETUP) return true;
+    if (request->bmRequestType != 0xC0 ||
+        request->bRequest != VENDOR_REQUEST_MICROSOFT ||
+        request->wValue != 0 || request->wIndex != 7) return false;
+    return tud_control_xfer(rhport, request, (void *)(uintptr_t)desc_ms_os_20,
+                            sizeof(desc_ms_os_20));
 }
 
 /* Chip-unique serial number, shared by the USB descriptor and *IDN? so two
