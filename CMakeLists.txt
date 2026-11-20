@@ -107,7 +107,9 @@ if(USBSCPI_BUILD_SOCKET_GLUE)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_executable(usbscpi_linux_pi5
             examples/linux-pi5/main.c
+            examples/linux-pi5/file_xfer.c
             examples/linux-pi5/gpio_chardev.c
+            examples/linux-pi5/sys_exec.c
             examples/linux-pi5/sys_status.c
         )
         target_link_libraries(usbscpi_linux_pi5 PRIVATE usbscpi_socket_glue)

@@ -3,13 +3,18 @@
 
 Runs on any Linux host without Pi 5 hardware: spawns the server on an
 ephemeral localhost port and verifies *IDN?, descriptor discovery,
-system status queries, and safe GPIO direction/range handling.
+system status queries, shell command execution (sync & async),
+binary file upload/download (with NUL/LF/# bytes and CRC-32), and
+safe GPIO direction/range handling.
 """
 
+import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
+import zlib
 
 
 def free_port() -> int:
@@ -18,15 +23,41 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def query(sock: socket.socket, cmd: str) -> str:
-    sock.sendall((cmd + "\n").encode("ascii"))
+def read_reply_bytes(sock: socket.socket) -> bytes:
     buf = b""
-    while not buf.endswith(b"\n"):
+    while True:
         chunk = sock.recv(4096)
         if not chunk:
-            raise RuntimeError(f"EOF waiting for reply to {cmd!r}")
+            raise RuntimeError("EOF waiting for reply")
         buf += chunk
-    return buf.decode("utf-8", errors="replace").strip()
+        if buf.startswith(b"#"):
+            nd = int(chr(buf[1]))
+            if len(buf) >= 2 + nd:
+                nbytes = int(buf[2 : 2 + nd].decode("ascii"))
+                total = 2 + nd + nbytes + 1
+                if len(buf) >= total:
+                    return buf[2 + nd : 2 + nd + nbytes]
+        elif buf.endswith(b"\n"):
+            return buf[:-1].rstrip(b"\r")
+
+
+def query_bytes(sock: socket.socket, cmd: str) -> bytes:
+    sock.sendall((cmd + "\n").encode("ascii"))
+    return read_reply_bytes(sock)
+
+
+def query(sock: socket.socket, cmd: str) -> str:
+    return query_bytes(sock, cmd).decode("utf-8", errors="replace").strip()
+
+
+def send(sock: socket.socket, cmd: str) -> None:
+    sock.sendall((cmd + "\n").encode("ascii"))
+
+
+def send_data_write(sock: socket.socket, payload: bytes) -> None:
+    len_str = str(len(payload)).encode("ascii")
+    hdr = b"DATA:WRITE #" + str(len(len_str)).encode("ascii") + len_str
+    sock.sendall(hdr + payload)
 
 
 def connect_with_retry(port: int, timeout: float = 5.0) -> socket.socket:
@@ -53,6 +84,8 @@ def main() -> int:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix="usbscpi_pi5_xfer_")
+    os.close(tmp_fd)
     try:
         with connect_with_retry(port) as sock:
             idn = query(sock, "*IDN?")
@@ -74,12 +107,69 @@ def main() -> int:
             net = query(sock, "SYST:NET? lo")
             assert "127.0.0.1" in net, f"bad loopback net: {net!r}"
 
-            gdir = query(sock, "GPIO:DIR? 17")
-            assert gdir == "FREE", f"unexpected initial dir: {gdir!r}"
+            # Synchronous multi-line shell execution
+            out = query_bytes(sock, 'SYST:EXEC? "printf \'line1\\nline2\\n\'"').decode("utf-8")
+            assert out == "line1\nline2\n", f"unexpected sync exec output: {out!r}"
+            assert query(sock, "SYST:EXEC:CODE?") == "0"
 
+            # Asynchronous job execution
+            send(sock, 'SYST:EXEC:STARt "echo async-done"')
+            deadline = time.monotonic() + 2.0
+            state = "RUNNING"
+            while time.monotonic() < deadline:
+                state = query(sock, "SYST:EXEC:STATe?")
+                if state != "RUNNING":
+                    break
+                time.sleep(0.02)
+            assert state == "DONE", f"async job did not reach DONE: {state!r}"
+            assert query(sock, "SYST:EXEC:CODE?") == "0"
+            assert query(sock, "SYST:EXEC:OUTPut?").strip() == "async-done"
+            send(sock, "SYST:EXEC:CLEar")
+            assert query(sock, "SYST:EXEC:STATe?") == "IDLE"
+
+            # Binary file upload & download (includes NUL, CR, LF, '#', all 0..255 bytes)
+            payload = bytes(range(256)) * 20 + b"\x00\r\n#99999binary-tail\x00"
+            expected_crc = zlib.crc32(payload) & 0xFFFFFFFF
+
+            assert query(sock, "FILE:STATe?") == "IDLE"
+            send(sock, f'FILE:OPEN "{tmp_path}",WRITE')
+            assert query(sock, "FILE:STATe?") == "WRITE"
+            assert int(query(sock, "DATA:FREE?")) >= 4096
+
+            # Upload in two binary chunks
+            send_data_write(sock, payload[:3000])
+            send_data_write(sock, payload[3000:])
+            send(sock, "FILE:CLOSe")
+            assert query(sock, "FILE:STATe?") == "IDLE"
+
+            assert int(query(sock, f'FILE:SIZE? "{tmp_path}"')) == len(payload)
+            assert int(query(sock, f'FILE:CRC32? "{tmp_path}"')) == expected_crc
+
+            # Download back in chunks via FILE:OPEN ...,READ + FILE:READ? / DATA:COUNt?
+            send(sock, f'FILE:OPEN "{tmp_path}",READ')
+            assert query(sock, "FILE:STATe?") == "READ"
+            assert int(query(sock, "FILE:SIZE?")) == len(payload)
+            assert int(query(sock, "DATA:COUNt?")) == len(payload)
+
+            downloaded = bytearray()
+            while int(query(sock, "DATA:COUNt?")) > 0:
+                chunk = query_bytes(sock, "FILE:READ? 2048")
+                assert len(chunk) > 0, "empty chunk while DATA:COUNt? > 0"
+                downloaded.extend(chunk)
+            send(sock, "FILE:CLOSe")
+            assert bytes(downloaded) == payload, "downloaded payload mismatch"
+
+            # Delete file over SCPI (synchronize via SYST:ERR? before checking host fs)
+            send(sock, f'FILE:DELete "{tmp_path}"')
             err = query(sock, "SYST:ERR?")
             assert err.startswith("0,"), f"unexpected SCPI error: {err!r}"
+            assert not os.path.exists(tmp_path), "FILE:DELete did not unlink file"
+
+            gdir = query(sock, "GPIO:DIR? 17")
+            assert gdir == "FREE", f"unexpected initial dir: {gdir!r}"
     finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
         proc.terminate()
         try:
             proc.wait(timeout=3.0)

@@ -23,18 +23,22 @@
 #include "usbscpi/usbscpi.h"
 #include "usbscpi_socket.h"
 
+#include "file_xfer.h"
 #include "gpio_chardev.h"
+#include "sys_exec.h"
 #include "sys_status.h"
 
 /* ---------- static storage (no dynamic allocation after init) ---------- */
 
-static uint8_t s_storage[2048];
+static uint8_t s_storage[4096];
 static char    s_line[256];
-static uint8_t s_io[4096];
+static uint8_t s_io[8192];
 static char    s_idn[96];
 
 static void on_exit_signal(int sig) {
     (void)sig;
+    pi5_file_cleanup();
+    pi5_exec_cleanup();
     pi5_gpio_cleanup();
     _Exit(0);
 }
@@ -258,6 +262,230 @@ static scpi_result_t cmd_sys_net(scpi_t *scpi) {
     return SCPI_RES_OK;
 }
 
+/* ---------- Linux command execution handlers (SYSTem:EXEC*) ---------- */
+
+static int extract_cmd_param(scpi_t *scpi, char *dst, size_t cap) {
+    const char *raw = NULL;
+    size_t rlen = 0;
+    if (!SCPI_ParamCharacters(scpi, &raw, &rlen, TRUE)) {
+        return -1;
+    }
+    if (rlen == 0 || rlen >= cap) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return -1;
+    }
+    /* Copy and unescape doubled quotes ("" -> " or '' -> ') inside SCPI strings. */
+    size_t out_i = 0;
+    for (size_t i = 0; i < rlen && out_i + 1 < cap; i++) {
+        dst[out_i++] = raw[i];
+        if ((raw[i] == '"' || raw[i] == '\'') && i + 1 < rlen && raw[i + 1] == raw[i]) {
+            i++;
+        }
+    }
+    dst[out_i] = '\0';
+    return (out_i > 0) ? 0 : -1;
+}
+
+static scpi_result_t cmd_sys_exec(scpi_t *scpi) {
+    char cmd[224];
+    if (extract_cmd_param(scpi, cmd, sizeof(cmd)) != 0) {
+        return SCPI_RES_ERR;
+    }
+    if (pi5_exec_run_sync(cmd, PI5_EXEC_DEFAULT_TIMEOUT_MS) != 0) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    size_t out_len = 0;
+    const uint8_t *out = pi5_exec_output(&out_len);
+    SCPI_ResultArbitraryBlock(scpi, out, out_len);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_sys_exec_start(scpi_t *scpi) {
+    char cmd[224];
+    if (extract_cmd_param(scpi, cmd, sizeof(cmd)) != 0) {
+        return SCPI_RES_ERR;
+    }
+    if (pi5_exec_start(cmd) != 0) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_sys_exec_stop(scpi_t *scpi) {
+    (void)scpi;
+    pi5_exec_stop();
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_sys_exec_state(scpi_t *scpi) {
+    pi5_exec_state_t st = pi5_exec_poll();
+    if (st == PI5_EXEC_FAILED && pi5_exec_take_error_latch()) {
+        usbscpi_queue_error(scpi, SCPI_ERROR_EXECUTION_ERROR);
+    }
+    const char *word = "IDLE";
+    switch (st) {
+    case PI5_EXEC_RUNNING: word = "RUNNING"; break;
+    case PI5_EXEC_DONE:    word = "DONE";    break;
+    case PI5_EXEC_FAILED:  word = "FAILED";  break;
+    case PI5_EXEC_IDLE:
+    default:               word = "IDLE";    break;
+    }
+    SCPI_ResultMnemonic(scpi, word);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_sys_exec_code(scpi_t *scpi) {
+    SCPI_ResultInt32(scpi, pi5_exec_exit_code());
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_sys_exec_output(scpi_t *scpi) {
+    size_t out_len = 0;
+    const uint8_t *out = pi5_exec_output(&out_len);
+    SCPI_ResultArbitraryBlock(scpi, out, out_len);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_sys_exec_clear(scpi_t *scpi) {
+    (void)scpi;
+    pi5_exec_clear();
+    return SCPI_RES_OK;
+}
+
+/* ---------- File transfer handlers (FILE:* + DATA:WRITE / DATA:READ?) ---------- */
+
+static scpi_result_t cmd_file_open(scpi_t *scpi) {
+    char path[224];
+    if (extract_cmd_param(scpi, path, sizeof(path)) != 0) {
+        return SCPI_RES_ERR;
+    }
+    const char *mword = NULL;
+    size_t mlen = 0;
+    if (!SCPI_ParamCharacters(scpi, &mword, &mlen, TRUE)) {
+        return SCPI_RES_ERR;
+    }
+    pi5_file_mode_t mode;
+    if (token_ieq(mword, mlen, "READ") || token_ieq(mword, mlen, "R")) {
+        mode = PI5_FILE_READ;
+    } else if (token_ieq(mword, mlen, "WRITE") || token_ieq(mword, mlen, "W")) {
+        mode = PI5_FILE_WRITE;
+    } else if (token_ieq(mword, mlen, "APPEND") || token_ieq(mword, mlen, "A")) {
+        mode = PI5_FILE_APPEND;
+    } else {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    if (pi5_file_open(path, mode) != 0) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_file_close(scpi_t *scpi) {
+    if (pi5_file_close() != 0) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_file_state(scpi_t *scpi) {
+    const char *word = "IDLE";
+    switch (pi5_file_mode()) {
+    case PI5_FILE_READ:   word = "READ";   break;
+    case PI5_FILE_WRITE:  word = "WRITE";  break;
+    case PI5_FILE_APPEND: word = "APPEND"; break;
+    case PI5_FILE_IDLE:
+    default:              word = "IDLE";   break;
+    }
+    SCPI_ResultMnemonic(scpi, word);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_file_size(scpi_t *scpi) {
+    const char *raw = NULL;
+    size_t rlen = 0;
+    char path[224];
+    const char *opt_path = NULL;
+    if (SCPI_ParamCharacters(scpi, &raw, &rlen, FALSE) && rlen > 0) {
+        if (rlen >= sizeof(path)) {
+            SCPI_ErrorPush(scpi, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+            return SCPI_RES_ERR;
+        }
+        memcpy(path, raw, rlen);
+        path[rlen] = '\0';
+        opt_path = path;
+    }
+    uint64_t sz = 0;
+    if (pi5_file_size(opt_path, &sz) != 0) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    SCPI_ResultUInt64(scpi, sz);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_file_seek(scpi_t *scpi) {
+    uint64_t offset = 0;
+    if (!SCPI_ParamUInt64(scpi, &offset, TRUE)) {
+        return SCPI_RES_ERR;
+    }
+    if (pi5_file_seek(offset) != 0) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_file_read(scpi_t *scpi) {
+    uint32_t want = 0;
+    if (!SCPI_ParamUInt32(scpi, &want, TRUE)) {
+        return SCPI_RES_ERR;
+    }
+    if (pi5_file_mode() != PI5_FILE_READ) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    /* Cap payload so `#44000<payload>\n` fits inside the 4096-byte TCP MTU. */
+    size_t cap = 4000u;
+    if (cap > sizeof(s_io)) {
+        cap = sizeof(s_io);
+    }
+    size_t to_read = (want < cap) ? (size_t)want : cap;
+    size_t actual  = pi5_file_data_read(NULL, s_io, to_read);
+    SCPI_ResultArbitraryBlock(scpi, s_io, actual);
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_file_delete(scpi_t *scpi) {
+    char path[224];
+    if (extract_cmd_param(scpi, path, sizeof(path)) != 0) {
+        return SCPI_RES_ERR;
+    }
+    if (pi5_file_delete(path) != 0) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    return SCPI_RES_OK;
+}
+
+static scpi_result_t cmd_file_crc32(scpi_t *scpi) {
+    char path[224];
+    if (extract_cmd_param(scpi, path, sizeof(path)) != 0) {
+        return SCPI_RES_ERR;
+    }
+    uint32_t crc = 0;
+    if (pi5_file_crc32(path, &crc) != 0) {
+        SCPI_ErrorPush(scpi, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    SCPI_ResultUInt32(scpi, crc);
+    return SCPI_RES_OK;
+}
+
 /* ---------- commands and descriptor (SYSTem:HELP:DESCription?) ---------- */
 
 static const usbscpi_param_desc_t gpio_set_params[] = {
@@ -278,32 +506,81 @@ static const usbscpi_param_desc_t gpio_pull_params[] = {
 static const usbscpi_param_desc_t sys_net_params[] = {
     USBSCPI_PARAM("interface", "string", true),
 };
+static const usbscpi_param_desc_t sys_exec_params[] = {
+    USBSCPI_PARAM("command", "string", true),
+};
+static const usbscpi_param_desc_t file_open_params[] = {
+    USBSCPI_PARAM("path", "string", true),
+    USBSCPI_PARAM("mode", "string", true),
+};
+static const usbscpi_param_desc_t file_path_params[] = {
+    USBSCPI_PARAM("path", "string", true),
+};
+static const usbscpi_param_desc_t file_opt_path_params[] = {
+    USBSCPI_PARAM("path", "string", false),
+};
+static const usbscpi_param_desc_t file_seek_params[] = {
+    USBSCPI_PARAM("offset", "u64", true),
+};
+static const usbscpi_param_desc_t file_read_params[] = {
+    USBSCPI_PARAM("length", "u32", true),
+};
 
 #define PI5_COMMANDS(CMD, ALIAS)                                                        \
-    CMD("GPIO",                 cmd_gpio_set,      "command", "Set a GPIO output level", \
+    CMD("GPIO",                 cmd_gpio_set,        "command", "Set a GPIO output level", \
         USBSCPI_PARAMS(gpio_set_params), "none")                                        \
-    CMD("GPIO?",                cmd_gpio_get,      "query",   "Read a GPIO level",       \
+    CMD("GPIO?",                cmd_gpio_get,        "query",   "Read a GPIO level",       \
         USBSCPI_PARAMS(gpio_pin_params), "u32")                                         \
-    CMD("GPIO:DIRection",       cmd_gpio_dir_set,  "command", "Set GPIO direction (IN/OUT)", \
+    CMD("GPIO:DIRection",       cmd_gpio_dir_set,    "command", "Set GPIO direction (IN/OUT)", \
         USBSCPI_PARAMS(gpio_dir_params), "none")                                        \
-    CMD("GPIO:DIRection?",      cmd_gpio_dir_get,  "query",   "Read GPIO direction",     \
+    CMD("GPIO:DIRection?",      cmd_gpio_dir_get,    "query",   "Read GPIO direction",     \
         USBSCPI_PARAMS(gpio_pin_params), "string")                                      \
-    CMD("GPIO:PULL",            cmd_gpio_pull_set, "command", "Set GPIO bias (NONE/UP/DOWN)", \
+    CMD("GPIO:PULL",            cmd_gpio_pull_set,   "command", "Set GPIO bias (NONE/UP/DOWN)", \
         USBSCPI_PARAMS(gpio_pull_params), "none")                                       \
-    CMD("GPIO:RELease",         cmd_gpio_release,  "command", "Release a GPIO line",     \
+    CMD("GPIO:RELease",         cmd_gpio_release,    "command", "Release a GPIO line",     \
         USBSCPI_PARAMS(gpio_pin_params), "none")                                        \
-    CMD("SYSTem:UPTime?",       cmd_sys_uptime,    "query",   "System uptime in seconds", \
+    CMD("SYSTem:UPTime?",       cmd_sys_uptime,      "query",   "System uptime in seconds", \
         USBSCPI_NO_PARAMS, "u64")                                                       \
-    CMD("SYSTem:TEMPerature?",  cmd_sys_temp,      "query",   "SoC temperature in millidegrees C", \
+    CMD("SYSTem:TEMPerature?",  cmd_sys_temp,        "query",   "SoC temperature in millidegrees C", \
         USBSCPI_NO_PARAMS, "i32")                                                       \
-    CMD("SYSTem:MEMory?",       cmd_sys_memory,    "query",   "Total and available memory in KiB", \
+    CMD("SYSTem:MEMory?",       cmd_sys_memory,      "query",   "Total and available memory in KiB", \
         USBSCPI_NO_PARAMS, "string")                                                    \
-    CMD("SYSTem:LOAD?",         cmd_sys_load,      "query",   "1m,5m,15m load averages", \
+    CMD("SYSTem:LOAD?",         cmd_sys_load,        "query",   "1m,5m,15m load averages", \
         USBSCPI_NO_PARAMS, "string")                                                    \
-    CMD("SYSTem:HOST?",         cmd_sys_host,      "query",   "Hostname, kernel release, and arch", \
+    CMD("SYSTem:HOST?",         cmd_sys_host,        "query",   "Hostname, kernel release, and arch", \
         USBSCPI_NO_PARAMS, "string")                                                    \
-    CMD("SYSTem:NET?",          cmd_sys_net,       "query",   "Interface state and IPv4 address", \
+    CMD("SYSTem:NET?",          cmd_sys_net,         "query",   "Interface state and IPv4 address", \
         USBSCPI_PARAMS(sys_net_params), "string")                                       \
+    CMD("SYSTem:EXEC?",         cmd_sys_exec,        "block",   "Execute a shell command and return output block", \
+        USBSCPI_PARAMS(sys_exec_params), "block")                                       \
+    CMD("SYSTem:EXEC:STARt",    cmd_sys_exec_start,  "command", "Start a shell command asynchronously", \
+        USBSCPI_PARAMS(sys_exec_params), "none")                                        \
+    CMD("SYSTem:EXEC:STOP",     cmd_sys_exec_stop,   "command", "Stop the running shell command", \
+        USBSCPI_NO_PARAMS, "none")                                                      \
+    CMD("SYSTem:EXEC:STATe?",   cmd_sys_exec_state,  "query",   "IDLE, RUNNING, DONE or FAILED", \
+        USBSCPI_NO_PARAMS, "string")                                                    \
+    CMD("SYSTem:EXEC:CODE?",    cmd_sys_exec_code,   "query",   "Exit code of the shell command", \
+        USBSCPI_NO_PARAMS, "i32")                                                       \
+    CMD("SYSTem:EXEC:OUTPut?",  cmd_sys_exec_output, "block",   "Read captured stdout/stderr as a binary block", \
+        USBSCPI_NO_PARAMS, "block")                                                      \
+    CMD("SYSTem:EXEC:CLEar",    cmd_sys_exec_clear,  "command", "Clear command output and reset state", \
+        USBSCPI_NO_PARAMS, "none")                                                      \
+    CMD("FILE:OPEN",            cmd_file_open,       "command", "Open file for READ, WRITE or APPEND", \
+        USBSCPI_PARAMS(file_open_params), "none")                                       \
+    CMD("FILE:CLOSe",           cmd_file_close,      "command", "Close currently open file", \
+        USBSCPI_NO_PARAMS, "none")                                                      \
+    CMD("FILE:STATe?",          cmd_file_state,      "query",   "IDLE, READ, WRITE or APPEND", \
+        USBSCPI_NO_PARAMS, "string")                                                    \
+    CMD("FILE:SIZE?",           cmd_file_size,       "query",   "File size in bytes",   \
+        USBSCPI_PARAMS(file_opt_path_params), "u64")                                    \
+    CMD("FILE:SEEK",            cmd_file_seek,       "command", "Seek to byte offset in open file", \
+        USBSCPI_PARAMS(file_seek_params), "none")                                       \
+    CMD("FILE:READ?",           cmd_file_read,       "block",   "Read up to N bytes from open file as binary block", \
+        USBSCPI_PARAMS(file_read_params), "block")                                      \
+    CMD("FILE:DELete",          cmd_file_delete,     "command", "Delete a file on the target", \
+        USBSCPI_PARAMS(file_path_params), "none")                                       \
+    CMD("FILE:CRC32?",          cmd_file_crc32,      "query",   "CRC-32 checksum of a file", \
+        USBSCPI_PARAMS(file_path_params), "u32")                                        \
     ALIAS("GPIO:SET",           cmd_gpio_set)                                           \
     ALIAS("GPIO:GET?",          cmd_gpio_get)
 USBSCPI_DEFINE_COMMANDS(pi5, PI5_COMMANDS);
@@ -373,26 +650,36 @@ int main(int argc, char **argv) {
     snprintf(s_idn, sizeof(s_idn), "IoTSploit,Linux-Pi5,%s,0.1.0", serial);
 
     usbscpi_config_t cfg = {
-        .usb_tx        = usbscpi_socket_tx,
-        .line_buf      = s_line,
-        .line_buf_len  = sizeof(s_line),
-        .max_block_len = 4096,
-        .idn           = s_idn,
-        .io_buf        = s_io,
-        .io_buf_len    = sizeof(s_io),
-        .proto         = 1,
-        .mtu           = 4096,
-        .descriptor    = &s_descriptor,
+        .usb_tx         = usbscpi_socket_tx,
+        .on_block_begin = pi5_file_on_block_begin,
+        .on_block_data  = pi5_file_on_block_data,
+        .on_block_end   = pi5_file_on_block_end,
+        .data_free      = pi5_file_data_free,
+        .data_avail     = pi5_file_data_avail,
+        .data_read      = pi5_file_data_read,
+        .line_buf       = s_line,
+        .line_buf_len   = sizeof(s_line),
+        .max_block_len  = PI5_FILE_MAX_BLOCK_LEN,
+        .idn            = s_idn,
+        .io_buf         = s_io,
+        .io_buf_len     = sizeof(s_io),
+        .proto          = 1,
+        .mtu            = 4096,
+        .descriptor     = &s_descriptor,
     };
 
     usbscpi_t *dev = usbscpi_init(s_storage, sizeof(s_storage), &cfg);
     if (!dev) {
         fprintf(stderr, "usbscpi_init failed\n");
+        pi5_file_cleanup();
+        pi5_exec_cleanup();
         pi5_gpio_cleanup();
         return 1;
     }
     if (usbscpi_register(dev, pi5_scpi_commands) != USBSCPI_OK) {
         fprintf(stderr, "usbscpi_register failed\n");
+        pi5_file_cleanup();
+        pi5_exec_cleanup();
         pi5_gpio_cleanup();
         return 1;
     }
@@ -401,6 +688,8 @@ int main(int argc, char **argv) {
     fflush(stdout);
 
     int rc = usbscpi_socket_serve(dev, bind_addr, port);
+    pi5_file_cleanup();
+    pi5_exec_cleanup();
     pi5_gpio_cleanup();
     if (rc != 0) {
         fprintf(stderr, "listen on %s:%u failed\n", bind_addr, port);
