@@ -105,6 +105,24 @@ if(USBSCPI_BUILD_SOCKET_GLUE)
     # has no equivalent elsewhere. Everything CAN-shaped lives here, never in
     # the glue.
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(usbscpi_linux_pi5
+            examples/linux-pi5/main.c
+            examples/linux-pi5/gpio_chardev.c
+            examples/linux-pi5/sys_status.c
+        )
+        target_link_libraries(usbscpi_linux_pi5 PRIVATE usbscpi_socket_glue)
+        target_compile_options(usbscpi_linux_pi5 PRIVATE ${USBSCPI_WARNINGS})
+        set_target_properties(usbscpi_linux_pi5 PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples/linux-pi5)
+
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(USBSCPI_BUILD_TESTS AND Python3_FOUND AND NOT CMAKE_CROSSCOMPILING)
+            add_test(NAME test_linux_pi5_smoke
+                COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_linux_pi5_smoke.py
+                        $<TARGET_FILE:usbscpi_linux_pi5>)
+        endif()
+
         find_package(Threads QUIET)
         if(Threads_FOUND)
             add_executable(usbscpi_can examples/can/main.c)
